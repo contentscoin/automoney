@@ -9,3 +9,5 @@ dist/
 coverage/
 .DS_Store
 next-env.d.ts
+apps/web/AGENTS.md
+apps/web/CLAUDE.md

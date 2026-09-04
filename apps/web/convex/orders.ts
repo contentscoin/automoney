@@ -9,11 +9,10 @@ import {
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, query, type MutationCtx } from "./_generated/server";
 import { requireSuperAdmin, requireUser, requireViewableUser } from "./lib/rbac";
+import { COUNTED_STATUSES, syncOrderEntriesStandalone } from "./lib/commissionEngine";
 import { bumpMonthlyStats, type StatsDelta } from "./lib/stats";
 import { kstMonth } from "./lib/time";
 import { getDefaultUserRateBps } from "./settings";
-
-const COUNTED_STATUSES = new Set(["PAID", "CONFIRMED"]);
 
 function statsDelta(order: Pick<Doc<"orders">, "attribution" | "orderAmount" | "commissionableAmount">, sign: 1 | -1): StatsDelta | null {
   if (!order.attribution) return null;
@@ -88,19 +87,32 @@ async function createOrder(ctx: MutationCtx, evt: AttrangsOrderWebhook): Promise
     const delta = statsDelta(doc, 1);
     if (delta) await bumpMonthlyStats(ctx, doc.userId, kstMonth(orderedAt), delta);
   }
+  const saved = await ctx.db.get(id);
+  if (saved) await syncOrderEntriesStandalone(ctx, saved);
   return id;
 }
 
 async function applyToExisting(ctx: MutationCtx, existing: Doc<"orders">, evt: AttrangsOrderWebhook): Promise<Id<"orders">> {
-  const nextStatus = toOrderStatus(evt.order.status);
+  await transitionOrderStatus(ctx, existing, toOrderStatus(evt.order.status), evt.event_id);
+  return existing._id;
+}
+
+/** 상태 전이 공통 경로: 월 집계 증감 + 수수료 항목 동기화. 웹훅과 리컨실이 함께 사용. */
+export async function transitionOrderStatus(
+  ctx: MutationCtx,
+  existing: Doc<"orders">,
+  nextStatus: Doc<"orders">["status"],
+  eventId?: string,
+): Promise<void> {
   const wasCounted = COUNTED_STATUSES.has(existing.status);
   const willCount = COUNTED_STATUSES.has(nextStatus);
-  await ctx.db.patch(existing._id, { status: nextStatus, lastEventId: evt.event_id, updatedAt: Date.now() });
+  await ctx.db.patch(existing._id, { status: nextStatus, lastEventId: eventId ?? existing.lastEventId, updatedAt: Date.now() });
   if (existing.userId && wasCounted !== willCount) {
     const delta = statsDelta(existing, willCount ? 1 : -1);
     if (delta) await bumpMonthlyStats(ctx, existing.userId, kstMonth(existing.orderedAt), delta);
   }
-  return existing._id;
+  const updated = await ctx.db.get(existing._id);
+  if (updated) await syncOrderEntriesStandalone(ctx, updated);
 }
 
 /** 유저 본인 주문 — DIRECT 만. 간접구매는 유저·총판에게 노출하지 않는다 (docs/03 §6). */

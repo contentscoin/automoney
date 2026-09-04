@@ -12,16 +12,22 @@ const NAV = {
     { href: "/dashboard", label: "대시보드" },
     { href: "/dashboard/links", label: "내 링크" },
     { href: "/dashboard/orders", label: "주문 실적" },
+    { href: "/dashboard/settlements", label: "정산 히스토리" },
     { href: "/dashboard/kyc", label: "정산 정보(KYC)" },
   ],
-  ADMIN: [{ href: "/admin", label: "총판 관리" }],
+  ADMIN: [
+    { href: "/admin", label: "총판 관리" },
+    { href: "/admin/settlements", label: "총판 정산" },
+  ],
   SUPER_ADMIN: [
     { href: "/super", label: "운영 대시보드" },
     { href: "/super/users", label: "유저·권한" },
     { href: "/super/kyc", label: "KYC 검수" },
     { href: "/super/products", label: "상품" },
     { href: "/super/orders", label: "주문 원장" },
-    { href: "/super/settings", label: "요율 설정" },
+    { href: "/super/settlements", label: "정산 관리" },
+    { href: "/super/rules", label: "요율·그레이드" },
+    { href: "/super/settings", label: "기본 설정" },
   ],
 };
 
