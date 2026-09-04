@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>automoney 에이전트</title>
+<style>
+  body { font-family: system-ui, "Apple SD Gothic Neo", sans-serif; margin: 0; padding: 16px; background: #faf9f7; color: #1c1917; font-size: 13px; }
+  h1 { font-size: 16px; margin: 0 0 8px; color: #c2410c; }
+  .card { background: #fff; border: 1px solid #e7e5e4; border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+  .row { display: flex; justify-content: space-between; margin: 4px 0; }
+  .k { color: #78716c; }
+  input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #e7e5e4; border-radius: 8px; font-size: 14px; letter-spacing: 2px; text-transform: uppercase; }
+  button { padding: 8px 12px; border-radius: 8px; border: 1px solid #e7e5e4; background: #fff; cursor: pointer; }
+  button.primary { background: #c2410c; color: #fff; border-color: #c2410c; }
+  .ok { color: #047857; } .bad { color: #b91c1c; } .muted { color: #78716c; }
+  #msg { min-height: 16px; }
+</style>
+</head>
+<body>
+<h1>automoney 에이전트</h1>
+<div class="card" id="pairCard">
+  <div class="k" style="margin-bottom:6px">대시보드 &gt; 데스크톱 에이전트에서 발급한 8자리 페어링 코드</div>
+  <input id="code" maxlength="8" placeholder="XXXXXXXX" />
+  <div style="display:flex; gap:8px; margin-top:8px">
+    <button class="primary" id="pairBtn">페어링</button>
+    <button id="dash">웹 대시보드 열기</button>
+  </div>
+</div>
+<div class="card">
+  <div class="row"><span class="k">페어링</span><span id="paired">-</span></div>
+  <div class="row"><span class="k">연결</span><span id="online">-</span></div>
+  <div class="row"><span class="k">현재 작업</span><span id="job">-</span></div>
+  <div class="row"><span class="k">처리한 작업</span><span id="processed">0</span></div>
+  <div class="row"><span class="k">Codex</span><span id="codex">-</span></div>
+  <div class="row"><span class="k">마지막 오류</span><span id="err" class="bad">-</span></div>
+</div>
+<div id="msg" class="muted"></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function render(s) {
+    $("paired").textContent = s.paired ? "완료" : "필요";
+    $("paired").className = s.paired ? "ok" : "bad";
+    $("online").textContent = s.online ? "온라인" : "오프라인";
+    $("online").className = s.online ? "ok" : "muted";
+    $("job").textContent = s.activeJob ? `${s.activeJob.jobType} · ${s.activeJob.stage}` : "없음";
+    $("processed").textContent = String(s.processed ?? 0);
+    $("codex").textContent = s.codex ? (s.codex.loggedIn ? "로그인됨" : s.codex.installed ? "로그인 필요" : "미설치") : "-";
+    $("err").textContent = s.lastError ?? "-";
+    $("pairCard").style.display = s.paired ? "none" : "block";
+  }
+  window.automoney.getStatus().then(render);
+  window.automoney.onStatus(render);
+  $("pairBtn").onclick = async () => {
+    $("msg").textContent = "페어링 중…";
+    try { await window.automoney.pair($("code").value.trim()); $("msg").textContent = "페어링되었습니다."; }
+    catch (e) { $("msg").textContent = "실패: " + (e && e.message ? e.message : e); }
+  };
+  $("dash").onclick = () => window.automoney.openDashboard();
+</script>
+</body>
+</html>

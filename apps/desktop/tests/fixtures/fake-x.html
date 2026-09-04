@@ -1,0 +1,17 @@
+<!doctype html><html><body>
+<h1>Fake X home (fixture)</h1>
+<a data-automoney="handle" href="/e2e_handle">@e2e_handle</a>
+<div data-automoney="compose" role="textbox" contenteditable="true" id="box" style="border:1px solid #999;min-height:60px;width:400px"></div>
+<div data-automoney="editor" role="textbox" contenteditable="true" id="editor" style="border:1px solid #999;min-height:60px;width:400px"></div>
+<button data-automoney="post" id="post">Post</button>
+<div id="posted"></div>
+<script>
+  document.getElementById("post").onclick = () => {
+    const a = document.createElement("a");
+    a.setAttribute("data-automoney", "post-link");
+    a.href = "/e2e_handle/status/1234567890";
+    a.textContent = "posted";
+    document.getElementById("posted").appendChild(a);
+  };
+</script>
+</body></html>

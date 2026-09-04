@@ -2,6 +2,8 @@
 
 > 참조: ego lite(계정별 격리 Space, 병렬 에이전트, 시맨틱 스냅샷 + snapshot/fill/click/wait/navigate/capture 액션). ego lite는 macOS 전용 오픈소스이므로 개념을 차용하고 Playwright로 구현합니다. blogautomcp `scripts/lib/chatgpt-profile-lock.ts`, `src/lib/naver-session.ts`, `src/services/scheduler.ts` 계승.
 
+> **구현 메모(M3a, 2026-09-04)**: `apps/desktop` — Electron main(트레이·패널·딥링크·단일 인스턴스) + `src/agent/`(loop·api·spaces·recipes·jobs). 관리 UI 는 웹 대시보드가 담당하고 앱은 페어링·상태·로그인 창만 제공한다. 스페이스 = `~/.automoney/spaces/<id>/{profile,meta.json,history.jsonl,space.lock}`. 잡 계약은 Convex HTTP actions(`convex/agent.ts`).
+
 ## 1. 데스크톱 에이전트 구성
 
 ```mermaid

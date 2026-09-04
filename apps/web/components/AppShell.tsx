@@ -14,6 +14,11 @@ const NAV = {
     { href: "/dashboard/orders", label: "주문 실적" },
     { href: "/dashboard/settlements", label: "정산 히스토리" },
     { href: "/dashboard/kyc", label: "정산 정보(KYC)" },
+    { href: "/dashboard/spaces", label: "스페이스" },
+    { href: "/dashboard/jobs", label: "작업" },
+    { href: "/dashboard/schedules", label: "예약 발행" },
+    { href: "/dashboard/devices", label: "데스크톱 에이전트" },
+    { href: "/dashboard/telegram", label: "텔레그램" },
   ],
   ADMIN: [
     { href: "/admin", label: "총판 관리" },

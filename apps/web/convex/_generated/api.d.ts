@@ -8,14 +8,17 @@
  * @module
  */
 
+import type * as agent from "../agent.js";
 import type * as audit from "../audit.js";
 import type * as auth from "../auth.js";
 import type * as clicks from "../clicks.js";
 import type * as commissionRules from "../commissionRules.js";
 import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
+import type * as devices from "../devices.js";
 import type * as http from "../http.js";
 import type * as invites from "../invites.js";
+import type * as jobs from "../jobs.js";
 import type * as kyc from "../kyc.js";
 import type * as lib_attrangs_adapter from "../lib/attrangs/adapter.js";
 import type * as lib_attrangs_mock from "../lib/attrangs/mock.js";
@@ -30,8 +33,11 @@ import type * as lib_time from "../lib/time.js";
 import type * as links from "../links.js";
 import type * as orders from "../orders.js";
 import type * as products from "../products.js";
+import type * as schedules from "../schedules.js";
 import type * as settings from "../settings.js";
 import type * as settlements from "../settlements.js";
+import type * as spaces from "../spaces.js";
+import type * as telegram from "../telegram.js";
 import type * as users from "../users.js";
 
 import type {
@@ -41,14 +47,17 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  agent: typeof agent;
   audit: typeof audit;
   auth: typeof auth;
   clicks: typeof clicks;
   commissionRules: typeof commissionRules;
   crons: typeof crons;
   dashboard: typeof dashboard;
+  devices: typeof devices;
   http: typeof http;
   invites: typeof invites;
+  jobs: typeof jobs;
   kyc: typeof kyc;
   "lib/attrangs/adapter": typeof lib_attrangs_adapter;
   "lib/attrangs/mock": typeof lib_attrangs_mock;
@@ -63,8 +72,11 @@ declare const fullApi: ApiFromModules<{
   links: typeof links;
   orders: typeof orders;
   products: typeof products;
+  schedules: typeof schedules;
   settings: typeof settings;
   settlements: typeof settlements;
+  spaces: typeof spaces;
+  telegram: typeof telegram;
   users: typeof users;
 }>;
 
