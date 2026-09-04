@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { estimateUserCommission } from "@automoney/shared";
 import type { Doc, Id } from "./_generated/dataModel";
 import { query, type QueryCtx } from "./_generated/server";
+import { sumEntries } from "./lib/commissionEngine";
 import { requireAdminOrSuper, requireSuperAdmin, requireUser, roleOf } from "./lib/rbac";
 import { kstMonth, previousMonth } from "./lib/time";
 import { getDefaultUserRateBps } from "./settings";
@@ -35,17 +36,22 @@ export const userSummary = query({
     const now = Date.now();
     const thisMonth = kstMonth(now);
     const lastMonth = previousMonth(thisMonth);
-    const [cur, prev, kyc, links] = await Promise.all([
+    const [cur, prev, kyc, links, curEntries, prevEntries] = await Promise.all([
       statsFor(ctx, user._id, thisMonth),
       statsFor(ctx, user._id, lastMonth),
       ctx.db.query("kycProfiles").withIndex("by_user", (q) => q.eq("userId", user._id)).unique(),
       ctx.db.query("marketingLinks").withIndex("by_user", (q) => q.eq("userId", user._id)).collect(),
+      sumEntries(ctx, { beneficiaryUserId: user._id, beneficiaryType: "USER", month: thisMonth }),
+      sumEntries(ctx, { beneficiaryUserId: user._id, beneficiaryType: "USER", month: lastMonth }),
     ]);
+    // 예상 수당은 수수료 원장(commissionEntries) 합계를 정본으로 한다. 원장이 비어 있으면 단일 요율 추정치로 폴백.
+    const curFacing = { ...userFacing(cur, rate), estimatedCommission: curEntries.count > 0 ? curEntries.amount : userFacing(cur, rate).estimatedCommission };
+    const prevFacing = { ...userFacing(prev, rate), estimatedCommission: prevEntries.count > 0 ? prevEntries.amount : userFacing(prev, rate).estimatedCommission };
     return {
       month: thisMonth,
       rateBps: rate,
-      current: userFacing(cur, rate),
-      nextSettlement: { month: lastMonth, ...userFacing(prev, rate), payable: kyc?.status === "APPROVED" },
+      current: curFacing,
+      nextSettlement: { month: lastMonth, ...prevFacing, payable: kyc?.status === "APPROVED" },
       kycStatus: kyc?.status ?? null,
       linkCount: links.length,
       activeLinkCount: links.filter((l) => l.status === "ACTIVE").length,
@@ -103,9 +109,15 @@ export const superSummary = query({
       ctx.db.query("products").withIndex("by_status", (q) => q.eq("status", "ACTIVE")).collect(),
       ctx.db.query("marketingLinks").collect(),
     ]);
+    const [opSum, adminSum, userSum] = await Promise.all([
+      sumEntries(ctx, { beneficiaryType: "OPERATOR", month }),
+      sumEntries(ctx, { beneficiaryType: "ADMIN", month }),
+      sumEntries(ctx, { beneficiaryType: "USER", month }),
+    ]);
     return {
       month,
       rateBps: rate,
+      margins: { operator: opSum.amount, admin: adminSum.amount, user: userSum.amount, operatorIndirect: opSum.indirect },
       direct: { orders: agg.directOrders, sales: agg.directSales, commissionable: agg.directCommissionable, estimatedUserCommission: estimateUserCommission(agg.directCommissionable, rate) },
       indirect: { orders: agg.indirectOrders, sales: agg.indirectSales, commissionable: agg.indirectCommissionable },
       clicks: agg.clicks,

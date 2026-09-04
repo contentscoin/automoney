@@ -102,4 +102,44 @@ const adminSummary = await admin.query(api.dashboard.adminSummary, {});
 assert(adminSummary.total.sales === 39000, "총판 대시보드에 하부 실적 반영");
 const superSummary = await owner.query(api.dashboard.superSummary, {});
 assert(superSummary.direct.orders >= 1, "수퍼어드민 집계 반영");
-console.log("\nE2E OK");
+
+// ───────────── M2: 정산 ─────────────
+await owner.mutation(api.commissionRules.seedDefaults, {});
+// 간접구매 1건 추가 (같은 유저 링크)
+const indirectBody = JSON.stringify({
+  event_id: `evt_i_${stamp}`,
+  event_type: "order.created",
+  occurred_at: now.toISOString(),
+  order: {
+    order_id: `E2E-I-${stamp}`,
+    ordered_at: now.toISOString(),
+    tracking_code: link.trackingCode,
+    attribution: "indirect",
+    clicked_at: new Date(now.getTime() - 60_000).toISOString(),
+    landing_product_id: 999999,
+    items: [{ product_id: 999999, qty: 1, amount: 20000, commissionable_amount: 20000 }],
+    order_amount: 20000,
+    commissionable_amount: 20000,
+    status: "paid",
+  },
+});
+const ts2 = String(Date.now());
+const sig2 = `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(`${ts2}.${indirectBody}`).digest("hex")}`;
+const okI = await fetch(`${CONVEX_SITE_URL}/partner/attrangs/webhook`, { method: "POST", body: indirectBody, headers: { "x-attrangs-timestamp": ts2, "x-attrangs-signature": sig2 } });
+assert(okI.status === 200, "간접구매 웹훅 수신");
+// 요율 시드 이후 재계산해 기존 주문에도 3단계 항목 생성
+const month = new Date(now.getTime() + 9 * 3600_000).toISOString().slice(0, 7);
+await owner.mutation(api.commissionRules.recompute, { month });
+const afterRules = await user.query(api.dashboard.userSummary, {});
+assert(afterRules.current.estimatedCommission === 1750, `원장 기반 예상 수당 1,750 (${afterRules.current.estimatedCommission})`);
+
+const closed = await owner.mutation(api.settlements.closeMonth, { month });
+assert(closed.held >= 1, `월 마감: KYC 미승인 유저 HELD (${closed.held}), DRAFT ${closed.created}`);
+const myList = await user.query(api.settlements.listMine, {});
+assert(myList[0]?.status === "HELD" && myList[0]?.heldReason === "KYC_INCOMPLETE", "유저 정산 HELD(KYC)");
+
+const sm = await owner.query(api.settlements.superMonth, { month });
+assert(sm.totals.total > 0 && sm.totals.operator > 0, `수퍼어드민 월 현황: 총 ${sm.totals.total} / 운영사 ${sm.totals.operator} / 총판 ${sm.totals.admin} / 유저 ${sm.totals.user}`);
+const am = await admin.query(api.settlements.adminMonth, { month });
+assert(am.adminMargin > 0, `총판 차액 ${am.adminMargin}`);
+console.log("\nE2E OK (M1 + M2 정산 마감까지)");

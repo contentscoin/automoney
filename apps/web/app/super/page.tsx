@@ -38,7 +38,13 @@ export default function SuperPage() {
             <dt className="text-stone-500">매출</dt><dd className="tabular-nums">{won(s.indirect.sales)}</dd>
             <dt className="text-stone-500">수당 기준금액</dt><dd className="tabular-nums">{won(s.indirect.commissionable)}</dd>
           </dl>
-          <p className="mt-2 text-xs text-stone-500">그레이드별 아뜨랑스 지급률과 운영사·총판 차액 계산은 M2 정산 엔진에서 제공됩니다.</p>
+          <dl className="mt-3 grid grid-cols-2 gap-y-1 border-t border-violet-200 pt-2 text-sm">
+            <dt className="text-stone-500">운영사 차액(원장)</dt><dd className="tabular-nums font-medium">{won(s.margins.operator)}</dd>
+            <dt className="text-stone-500">└ 간접구매 기여</dt><dd className="tabular-nums">{won(s.margins.operatorIndirect)}</dd>
+            <dt className="text-stone-500">총판 차액 합계</dt><dd className="tabular-nums">{won(s.margins.admin)}</dd>
+            <dt className="text-stone-500">유저 수당 합계</dt><dd className="tabular-nums">{won(s.margins.user)}</dd>
+          </dl>
+          <Link href="/super/settlements" className="mt-2 inline-block text-xs underline">정산 관리로</Link>
         </div>
       </section>
     </div>

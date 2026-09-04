@@ -11,6 +11,8 @@
 import type * as audit from "../audit.js";
 import type * as auth from "../auth.js";
 import type * as clicks from "../clicks.js";
+import type * as commissionRules from "../commissionRules.js";
+import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
 import type * as http from "../http.js";
 import type * as invites from "../invites.js";
@@ -18,6 +20,7 @@ import type * as kyc from "../kyc.js";
 import type * as lib_attrangs_adapter from "../lib/attrangs/adapter.js";
 import type * as lib_attrangs_mock from "../lib/attrangs/mock.js";
 import type * as lib_audit from "../lib/audit.js";
+import type * as lib_commissionEngine from "../lib/commissionEngine.js";
 import type * as lib_crypto from "../lib/crypto.js";
 import type * as lib_errors from "../lib/errors.js";
 import type * as lib_onboarding from "../lib/onboarding.js";
@@ -28,6 +31,7 @@ import type * as links from "../links.js";
 import type * as orders from "../orders.js";
 import type * as products from "../products.js";
 import type * as settings from "../settings.js";
+import type * as settlements from "../settlements.js";
 import type * as users from "../users.js";
 
 import type {
@@ -40,6 +44,8 @@ declare const fullApi: ApiFromModules<{
   audit: typeof audit;
   auth: typeof auth;
   clicks: typeof clicks;
+  commissionRules: typeof commissionRules;
+  crons: typeof crons;
   dashboard: typeof dashboard;
   http: typeof http;
   invites: typeof invites;
@@ -47,6 +53,7 @@ declare const fullApi: ApiFromModules<{
   "lib/attrangs/adapter": typeof lib_attrangs_adapter;
   "lib/attrangs/mock": typeof lib_attrangs_mock;
   "lib/audit": typeof lib_audit;
+  "lib/commissionEngine": typeof lib_commissionEngine;
   "lib/crypto": typeof lib_crypto;
   "lib/errors": typeof lib_errors;
   "lib/onboarding": typeof lib_onboarding;
@@ -57,6 +64,7 @@ declare const fullApi: ApiFromModules<{
   orders: typeof orders;
   products: typeof products;
   settings: typeof settings;
+  settlements: typeof settlements;
   users: typeof users;
 }>;
 

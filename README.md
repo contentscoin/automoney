@@ -77,9 +77,16 @@ pnpm dev                  # next dev + convex dev
 
 검증: `pnpm -r test`(shared 10 + convex 15 테스트), `pnpm -r typecheck`, `pnpm --filter @automoney/web build`, 서버 기동 후 `node apps/web/scripts/e2e-local.mjs`.
 
+### M2 정산 엔진 (구현)
+- `packages/shared/src/rules.ts`: 요율 규칙 해석(유저 예외 > 총판 예외 > 전역, 유효기간), 그레이드 구간, 기본 시드.
+- `convex/lib/commissionEngine.ts`: 주문별 3단계 분배 원장(`commissionEntries`). "원하는 분배 − 정산된 금액" 델타만 미정산으로 남겨 취소·요율 변경·그레이드 확정을 한 경로(`recomputeMonth`)로 처리.
+- `convex/settlements.ts`: 월 마감(DRAFT/HELD 재구성, KYC 미승인 보류·이월) → 아뜨랑스 확정 배치 CSV 업로드 → 리컨실(주문 대조·그레이드 확정·재계산·0원 오차 시 CONFIRMED) → 승인 → 지급 파일(계좌 복호화, 감사로그) → 지급 완료. 매월 크론 마감(`convex/crons.ts`).
+- 화면: 유저 정산 히스토리·웹 명세서(인쇄/PDF), 총판 정산(차액), 수퍼어드민 정산 관리·요율/그레이드 관리.
+- 확정 정책: 간접구매 유저 미지급(0bps), 원천징수·지급은 아뜨랑스 수행(세전 금액만 계산).
+
 ### M1 범위와 다음 단계
 - 구현: 회원·RBAC·총판 초대, KYC 제출·암호화·검수, 상품 CSV/Mock 동기화, 링크 발급·단축 URL·클릭 로그, 주문 웹훅(멱등·24h 재검증·취소 역분개), 유저/총판/수퍼어드민 대시보드(단일 요율 예상 수당, 간접구매는 수퍼어드민 전용).
-- M2 로 이관: 3단계 마진 분배 엔진·그레이드·월 정산 상태기계·명세서, 아뜨랑스 실제 API 어댑터.
+- M3 로 이관: 데스크톱 에이전트·스페이스·스케줄러·텔레그램 봇. 아뜨랑스 실제 API 어댑터는 규격 합의 후.
 
 ## 전제 (사용자 확정)
 - 아뜨랑스에는 현재 파트너 API가 없으므로 **automoney가 인터페이스 규격을 제안**하고 아뜨랑스가 구현합니다. 초기 폴백은 CSV 배치입니다.
