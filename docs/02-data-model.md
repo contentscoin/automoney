@@ -1,6 +1,6 @@
 # 02. 데이터 모델
 
-> 클라우드는 Postgres(Drizzle ORM). 데스크톱 에이전트는 SQLite 로컬 캐시. blogautomcp의 JSON-in-TEXT 방식은 정산 무결성 때문에 채택하지 않습니다(ADR-0002).
+> **2026-09-04 갱신**: 백엔드는 Convex 로 확정되었습니다(ADR-0006). 물리 스키마의 정본은 `apps/web/convex/schema.ts` 이며, 아래 표는 컬럼 계약(필드·의미·인덱스)으로 유지합니다. M1 에 구현된 테이블: users, inviteCodes, kycProfiles, products, marketingLinks, clickEvents, orders, orderEvents, userMonthlyStats(월 집계), settings, auditEvents. 데스크톱 에이전트(M3)는 SQLite 로컬 캐시를 사용합니다.
 
 ## 1. ERD (핵심)
 

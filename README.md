@@ -44,7 +44,45 @@
 | 16 | 쓰레드·인스타그램 Meta API 인증 설계 | 04 §2, ADR-0004 |
 | 17 | stateless MCP로 작업 지시·결과 보고 | 04 §5, ADR-0003 |
 
+## 코드 구성 (M1 코어)
+
+```
+apps/web/            Next.js 16 앱 + Convex 백엔드 (apps/web/convex/)
+  convex/schema.ts   데이터 모델 정본
+  convex/auth.ts     Convex Auth (이메일+비밀번호), 가입 시 역할·총판 연결 (lib/onboarding.ts)
+  convex/{users,invites,kyc,products,links,clicks,orders,dashboard,settings,audit}.ts
+  convex/http.ts     아뜨랑스 주문 웹훅 POST /partner/attrangs/webhook (HMAC 검증)
+  app/r/[code]/      단축 링크 리다이렉터 (클릭 기록 → 아뜨랑스 상품 페이지)
+  app/dashboard/*    유저: 대시보드·링크·주문 실적·KYC
+  app/admin          총판: 초대 코드·하부 실적
+  app/super/*        수퍼어드민: 운영 대시보드·유저/권한·KYC 검수·상품·주문 원장·요율
+  tests/             convex-test 기반 함수 테스트
+  scripts/e2e-local.mjs  로컬 E2E (가입→링크→클릭→웹훅→대시보드)
+packages/shared/     순수 TS: 요율 계산, 웹훅 파서, 24h 어트리뷰션, CSV, 코드 생성
+```
+
+### 실행
+
+```bash
+pnpm install
+cd apps/web
+npx convex dev            # 최초 실행 시 "계정 없이 로컬 개발" 선택 가능 (익명 로컬 배포)
+# Convex 환경변수 (npx convex env set KEY VALUE)
+#   SITE_URL, JWT_PRIVATE_KEY, JWKS  → npx @convex-dev/auth 로 생성 가능
+#   SUPER_ADMIN_EMAILS, KYC_ENC_KEY(openssl rand -base64 32),
+#   REDIRECT_SHARED_SECRET, ATTRANGS_WEBHOOK_SECRET
+# apps/web/.env.local 에 NEXT_PUBLIC_CONVEX_URL, REDIRECT_SHARED_SECRET
+pnpm dev                  # next dev + convex dev
+```
+
+검증: `pnpm -r test`(shared 10 + convex 15 테스트), `pnpm -r typecheck`, `pnpm --filter @automoney/web build`, 서버 기동 후 `node apps/web/scripts/e2e-local.mjs`.
+
+### M1 범위와 다음 단계
+- 구현: 회원·RBAC·총판 초대, KYC 제출·암호화·검수, 상품 CSV/Mock 동기화, 링크 발급·단축 URL·클릭 로그, 주문 웹훅(멱등·24h 재검증·취소 역분개), 유저/총판/수퍼어드민 대시보드(단일 요율 예상 수당, 간접구매는 수퍼어드민 전용).
+- M2 로 이관: 3단계 마진 분배 엔진·그레이드·월 정산 상태기계·명세서, 아뜨랑스 실제 API 어댑터.
+
 ## 전제 (사용자 확정)
 - 아뜨랑스에는 현재 파트너 API가 없으므로 **automoney가 인터페이스 규격을 제안**하고 아뜨랑스가 구현합니다. 초기 폴백은 CSV 배치입니다.
+- 백엔드는 **Convex** 로 확정했습니다(ADR-0006, Postgres 결정 대체).
 - 수당은 **3단계 마진 구조**(아뜨랑스 → 운영사(그레이드별 %) → 총판 → 유저)이며, 24시간 간접구매는 별도 요율입니다.
 - 브라우저 자동화(스페이스, 고정, SNS 포스팅)와 Codex 로그인은 **유저 PC의 데스크톱 앱**에서 실행됩니다. 클라우드는 MCP, 정산, 대시보드를 담당합니다.

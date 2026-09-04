@@ -1,0 +1,38 @@
+{
+  "name": "@automoney/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k \"next dev\" \"convex dev\"",
+    "dev:web": "next dev",
+    "dev:convex": "convex dev",
+    "build": "next build",
+    "start": "next start",
+    "codegen": "convex codegen",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@automoney/shared": "workspace:*",
+    "@convex-dev/auth": "^0.0.95",
+    "convex": "^1.45.0",
+    "next": "^16.3.4",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@tailwindcss/postcss": "^4.2.1",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "concurrently": "^9.1.2",
+    "convex-test": "^0.0.56",
+    "eslint": "^9",
+    "eslint-config-next": "^16.3.4",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
+  }
+}

@@ -1,0 +1,50 @@
+import { httpRouter } from "convex/server";
+import { WEBHOOK_REPLAY_WINDOW_MS } from "@automoney/shared";
+import { internal } from "./_generated/api";
+import { httpAction } from "./_generated/server";
+import { auth } from "./auth";
+import { hmacSha256Hex, timingSafeEqual } from "./lib/crypto";
+
+const http = httpRouter();
+auth.addHttpRoutes(http);
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+}
+
+/**
+ * 아뜨랑스 주문 웹훅 (docs/04-integrations.md §1.3).
+ * 서명: X-Attrangs-Signature: sha256={HMAC(secret, timestamp + "." + body)}, X-Attrangs-Timestamp(ms).
+ */
+export const attrangsWebhook = httpAction(async (ctx, request) => {
+  const secret = process.env.ATTRANGS_WEBHOOK_SECRET;
+  if (!secret) return json({ success: false, error: { code: "CONFIG_MISSING", message: "webhook secret not configured" } }, 500);
+
+  const signature = request.headers.get("x-attrangs-signature") ?? "";
+  const timestamp = request.headers.get("x-attrangs-timestamp") ?? "";
+  const body = await request.text();
+  if (body.length > 256_000) return json({ success: false, error: { code: "INVALID_ARGUMENT", message: "body too large" } }, 413);
+
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > WEBHOOK_REPLAY_WINDOW_MS) {
+    return json({ success: false, error: { code: "ATTRANGS_WEBHOOK_SIGNATURE_INVALID", message: "stale or missing timestamp" } }, 401);
+  }
+  const expected = `sha256=${await hmacSha256Hex(secret, `${timestamp}.${body}`)}`;
+  if (!timingSafeEqual(expected, signature)) {
+    return json({ success: false, error: { code: "ATTRANGS_WEBHOOK_SIGNATURE_INVALID", message: "bad signature" } }, 401);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return json({ success: false, error: { code: "INVALID_ARGUMENT", message: "invalid json" } }, 400);
+  }
+  const result = await ctx.runMutation(internal.orders.ingest, { payload });
+  if (!result.accepted) return json({ success: false, error: { code: "INVALID_ARGUMENT", message: result.reason } }, 400);
+  return json({ success: true, data: { duplicate: result.duplicate } });
+});
+
+http.route({ path: "/partner/attrangs/webhook", method: "POST", handler: attrangsWebhook });
+
+export default http;

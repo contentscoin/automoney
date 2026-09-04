@@ -151,7 +151,7 @@ sequenceDiagram
 | 영역 | 선택 | 근거 |
 |---|---|---|
 | 웹/API | Next.js(App Router) + TypeScript | blogautomcp와 동일, 코드 이식 용이 |
-| DB | Postgres + Drizzle ORM | 정산은 관계 무결성·트랜잭션 필수 (ADR-0002) |
+| DB/백엔드 | Convex (문서 DB + 서버 함수 + 파일 스토리지 + HTTP actions) | 운영 부담 최소화, 실시간 대시보드. 정산 집계는 트랜잭션 내 롤업 테이블로 유지 (ADR-0006, ADR-0002 대체) |
 | MCP | Streamable HTTP, stateless, JSON-Schema 툴 정의 단일 소스 | blogautomcp `apps/sites/lib/tool-schema.ts` |
 | 데스크톱 | Electron + Playwright(+stealth) + Codex SDK + SQLite | blogautomcp 루트 앱 |
 | 스토리지 | S3 호환(R2) | 통장사본·이미지·스크린샷 |
