@@ -261,6 +261,135 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_month", ["month"]),
 
+  // ─────────────── M3: 디바이스 · 스페이스 · 잡큐 · 예약 · 텔레그램 ───────────────
+  devices: defineTable({
+    userId: v.id("users"),
+    name: v.string(),
+    platform: v.string(),
+    appVersion: v.string(),
+    tokenHash: v.string(),
+    status: v.union(v.literal("ACTIVE"), v.literal("REVOKED"), v.literal("REPLACED")),
+    pairedAt: v.number(),
+    lastSeenAt: v.optional(v.number()),
+    snapshot: v.optional(v.any()),
+  })
+    .index("by_user", ["userId", "status"])
+    .index("by_tokenHash", ["tokenHash"]),
+
+  pairCodes: defineTable({
+    userId: v.id("users"),
+    codeHash: v.string(),
+    expiresAt: v.number(),
+    usedAt: v.optional(v.number()),
+  })
+    .index("by_codeHash", ["codeHash"])
+    .index("by_user", ["userId"]),
+
+  spaces: defineTable({
+    userId: v.id("users"),
+    deviceId: v.id("devices"),
+    platform: v.union(v.literal("THREADS"), v.literal("X"), v.literal("INSTAGRAM"), v.literal("TIKTOK"), v.literal("NAVER_BLOG")),
+    name: v.string(),
+    handle: v.optional(v.string()),
+    pinned: v.boolean(),
+    fingerprint: v.optional(v.any()),
+    sessionState: v.union(
+      v.literal("CREATED"),
+      v.literal("LOGIN_REQUIRED"),
+      v.literal("HEALTHY"),
+      v.literal("RUNNING"),
+      v.literal("EXPIRED"),
+      v.literal("RESTRICTED"),
+      v.literal("PAUSED"),
+    ),
+    dailyPostLimit: v.number(),
+    lastCheckedAt: v.optional(v.number()),
+    lastError: v.optional(v.string()),
+    lockJobId: v.optional(v.id("agentJobs")),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_device", ["deviceId"]),
+
+  agentJobs: defineTable({
+    userId: v.id("users"),
+    deviceId: v.optional(v.id("devices")),
+    spaceId: v.optional(v.id("spaces")),
+    scheduleId: v.optional(v.id("schedules")),
+    jobType: v.union(v.literal("post.publish"), v.literal("space.create"), v.literal("space.login"), v.literal("space.verify"), v.literal("codex.login")),
+    payload: v.any(),
+    status: v.union(
+      v.literal("NEEDS_APPROVAL"),
+      v.literal("QUEUED"),
+      v.literal("RUNNING"),
+      v.literal("SUCCEEDED"),
+      v.literal("FAILED"),
+      v.literal("CANCELLED"),
+    ),
+    runAfter: v.number(),
+    idempotencyKey: v.optional(v.string()),
+    claimedByDeviceId: v.optional(v.id("devices")),
+    leaseUntil: v.optional(v.number()),
+    heartbeatAt: v.optional(v.number()),
+    stage: v.optional(v.string()),
+    progress: v.optional(v.number()),
+    cancelRequested: v.boolean(),
+    result: v.optional(v.any()),
+    errorCode: v.optional(v.string()),
+    errorMessage: v.optional(v.string()),
+    source: v.union(v.literal("WEB"), v.literal("SCHEDULE"), v.literal("TELEGRAM"), v.literal("MCP"), v.literal("SYSTEM")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    finishedAt: v.optional(v.number()),
+  })
+    .index("by_user_status", ["userId", "status", "runAfter"])
+    .index("by_user", ["userId", "createdAt"])
+    .index("by_status", ["status", "runAfter"])
+    .index("by_idempotencyKey", ["idempotencyKey"])
+    .index("by_space", ["spaceId", "createdAt"]),
+
+  schedules: defineTable({
+    userId: v.id("users"),
+    spaceId: v.id("spaces"),
+    kind: v.union(v.literal("ONE_SHOT"), v.literal("DAILY"), v.literal("WEEKLY")),
+    timeOfDay: v.string(),
+    daysOfWeek: v.array(v.number()),
+    runDate: v.optional(v.string()),
+    jitterMinutes: v.number(),
+    text: v.string(),
+    mediaUrls: v.array(v.string()),
+    linkId: v.optional(v.id("marketingLinks")),
+    autoApprove: v.boolean(),
+    enabled: v.boolean(),
+    nextRunAt: v.optional(v.number()),
+    lastRunAt: v.optional(v.number()),
+    lastJobId: v.optional(v.id("agentJobs")),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_enabled_next", ["enabled", "nextRunAt"]),
+
+  telegramBindings: defineTable({
+    userId: v.id("users"),
+    chatId: v.optional(v.string()),
+    bindCodeHash: v.optional(v.string()),
+    bindCodeExpiresAt: v.optional(v.number()),
+    boundAt: v.optional(v.number()),
+    notify: v.boolean(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_chatId", ["chatId"])
+    .index("by_bindCodeHash", ["bindCodeHash"]),
+
+  telegramOutbox: defineTable({
+    userId: v.optional(v.id("users")),
+    chatId: v.string(),
+    text: v.string(),
+    status: v.union(v.literal("SENT"), v.literal("SKIPPED_NO_TOKEN"), v.literal("FAILED")),
+    detail: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_user", ["userId", "createdAt"]),
+
   settings: defineTable({
     key: v.string(),
     value: v.any(),

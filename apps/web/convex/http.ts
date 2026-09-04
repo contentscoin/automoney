@@ -3,6 +3,8 @@ import { WEBHOOK_REPLAY_WINDOW_MS } from "@automoney/shared";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
 import { auth } from "./auth";
+import { claim, config, jobsRouter, spacesSync } from "./agent";
+import { webhook as telegramWebhook } from "./telegram";
 import { hmacSha256Hex, timingSafeEqual } from "./lib/crypto";
 
 const http = httpRouter();
@@ -46,5 +48,14 @@ export const attrangsWebhook = httpAction(async (ctx, request) => {
 });
 
 http.route({ path: "/partner/attrangs/webhook", method: "POST", handler: attrangsWebhook });
+
+// 데스크톱 에이전트 (Bearer 디바이스 토큰)
+http.route({ path: "/agent/claim", method: "POST", handler: claim });
+http.route({ path: "/agent/config", method: "GET", handler: config });
+http.route({ path: "/agent/spaces/sync", method: "POST", handler: spacesSync });
+http.route({ pathPrefix: "/agent/jobs/", method: "POST", handler: jobsRouter });
+
+// 텔레그램 봇 웹훅 (X-Telegram-Bot-Api-Secret-Token 검증)
+http.route({ path: "/telegram/webhook", method: "POST", handler: telegramWebhook });
 
 export default http;

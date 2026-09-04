@@ -1,0 +1,48 @@
+{
+  "name": "@automoney/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "automoney 데스크톱 에이전트 — 브라우저 스페이스·SNS 포스팅·Codex 실행",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "electron .",
+    "agent": "node dist/cli.js",
+    "test": "vitest run",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "@automoney/shared": "workspace:*",
+    "convex": "^1.45.0",
+    "playwright": "^1.63.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "electron": "^44.2.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
+  },
+  "build": {
+    "appId": "kr.automoney.desktop",
+    "productName": "automoney",
+    "protocols": [
+      {
+        "name": "automoney",
+        "schemes": [
+          "automoney"
+        ]
+      }
+    ],
+    "files": [
+      "dist/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    }
+  }
+}
