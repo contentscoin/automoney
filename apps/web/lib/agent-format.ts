@@ -38,6 +38,7 @@ export const JOB_TYPE_LABEL: Record<string, string> = {
   "space.login": "로그인 창",
   "space.verify": "세션 검증",
   "codex.login": "Codex 로그인",
+  "content.generate": "콘텐츠 생성",
 };
 export const PLATFORM_LABEL: Record<string, string> = { THREADS: "쓰레드", X: "X", INSTAGRAM: "인스타그램", TIKTOK: "틱톡", NAVER_BLOG: "네이버 블로그" };
 export const DOW = ["일", "월", "화", "수", "목", "금", "토"];

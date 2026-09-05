@@ -1,14 +1,29 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Badge } from "@/components/Badge";
 import { dateTime, errorMessage } from "@/lib/format";
 import { JOB_STATUS_LABEL, JOB_STATUS_TONE, JOB_TYPE_LABEL, PLATFORM_LABEL } from "@/lib/agent-format";
+import { CHANNEL_LABEL } from "@/lib/content-format";
+import { pieceText } from "@/components/PieceCard";
 
 export default function JobsPage() {
+  return (
+    <Suspense fallback={null}>
+      <JobsPageInner />
+    </Suspense>
+  );
+}
+
+function JobsPageInner() {
+  const params = useSearchParams();
+  const pieceParam = params.get("piece");
+  const library = useQuery(api.content.listLibrary, { status: "APPROVED", limit: 100 });
+  const [pieceId, setPieceId] = useState<string>("");
   const jobs = useQuery(api.jobs.listMine, { limit: 100 });
   const spaces = useQuery(api.spaces.listMine);
   const links = useQuery(api.links.listMine);
@@ -17,6 +32,17 @@ export default function JobsPage() {
   const enqueue = useMutation(api.jobs.enqueuePublish);
   const [f, setF] = useState({ spaceId: "", text: "", media: "", linkId: "", approval: true, dryRun: false });
   const [msg, setMsg] = useState<string | null>(null);
+  const applyPiece = (id: string) => {
+    setPieceId(id);
+    const p = library?.find((x) => x._id === id);
+    if (p) setF((prev) => ({ ...prev, text: pieceText(p), media: p.mediaUrls.join(" ") }));
+  };
+  // URL 의 ?piece= 는 라이브러리 로드 후 한 번만 적용(렌더 중 상태 조정 패턴)
+  const [appliedParam, setAppliedParam] = useState<string | null>(null);
+  if (pieceParam && library && appliedParam !== pieceParam) {
+    setAppliedParam(pieceParam);
+    applyPiece(pieceParam);
+  }
   const usable = spaces?.filter((s) => ["HEALTHY", "RUNNING", "LOGIN_REQUIRED", "CREATED"].includes(s.sessionState)) ?? [];
   return (
     <div className="flex flex-col gap-6">
@@ -26,9 +52,10 @@ export default function JobsPage() {
       </div>
       <section className="card">
         <h2 className="font-semibold">지금 게시</h2>
-        <form className="mt-2 grid gap-3 sm:grid-cols-2" onSubmit={async (e) => { e.preventDefault(); try { await enqueue({ spaceId: f.spaceId as Id<"spaces">, text: f.text, mediaUrls: f.media.split(/\s+/).filter(Boolean), linkId: (f.linkId || undefined) as Id<"marketingLinks"> | undefined, requireApproval: f.approval, dryRun: f.dryRun }); setMsg(f.approval ? "승인 대기 작업으로 등록했습니다." : "작업을 등록했습니다."); setF({ ...f, text: "", media: "" }); } catch (err) { setMsg(errorMessage(err)); } }}>
+        <form className="mt-2 grid gap-3 sm:grid-cols-2" onSubmit={async (e) => { e.preventDefault(); try { await enqueue({ spaceId: f.spaceId as Id<"spaces">, text: f.text, mediaUrls: f.media.split(/\s+/).filter(Boolean), linkId: (f.linkId || undefined) as Id<"marketingLinks"> | undefined, pieceId: (pieceId || undefined) as Id<"contentPieces"> | undefined, requireApproval: f.approval, dryRun: f.dryRun }); setMsg(f.approval ? "승인 대기 작업으로 등록했습니다." : "작업을 등록했습니다."); setF({ ...f, text: "", media: "" }); setPieceId(""); } catch (err) { setMsg(errorMessage(err)); } }}>
           <div><label className="label">스페이스</label><select className="input" required value={f.spaceId} onChange={(e) => setF({ ...f, spaceId: e.target.value })}><option value="">선택</option>{usable.map((s) => <option key={s._id} value={s._id}>[{PLATFORM_LABEL[s.platform]}] {s.name}</option>)}</select></div>
           <div><label className="label">마케팅 링크</label><select className="input" value={f.linkId} onChange={(e) => setF({ ...f, linkId: e.target.value })}><option value="">없음</option>{links?.map((l) => <option key={l._id} value={l._id}>{l.product?.name ?? l.shortCode}</option>)}</select></div>
+          <div className="sm:col-span-2"><label className="label">라이브러리 콘텐츠</label><select className="input" value={pieceId} onChange={(e) => applyPiece(e.target.value)}><option value="">직접 입력</option>{library?.map((p) => <option key={p._id} value={p._id}>[{CHANNEL_LABEL[p.channel] ?? p.channel}] {p.caption.slice(0, 50)}{p.qualityScore ? ` · ${p.qualityScore}점` : ""}</option>)}</select></div>
           <div className="sm:col-span-2"><label className="label">본문</label><textarea className="input" rows={3} required value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} /></div>
           <div><label className="label">이미지 URL (공백 구분)</label><input className="input" value={f.media} onChange={(e) => setF({ ...f, media: e.target.value })} /></div>
           <div className="flex items-end gap-4 text-sm">

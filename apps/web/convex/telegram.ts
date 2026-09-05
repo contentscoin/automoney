@@ -129,7 +129,7 @@ export const processUpdate = internalMutation({
 
     switch (cmd) {
       case "/help":
-        return reply(chatId, ["/status — 에이전트·스페이스 상태", "/earnings — 이번 달 실적·예상 수당", "/links — 최근 링크", "/schedule — 예약 목록", "/post <스페이스명> <내용> — 발행(승인 후 게시)", "/jobs — 최근 작업"].join("\n"), userId);
+        return reply(chatId, ["/status — 에이전트·스페이스 상태", "/earnings — 이번 달 실적·예상 수당", "/links — 최근 링크", "/schedule — 예약 목록", "/post <스페이스명> <내용> — 발행(승인 후 게시)", "/jobs — 최근 작업", "/content — 오늘 추천 콘텐츠 3개"].join("\n"), userId);
       case "/status": {
         const devices = await ctx.db.query("devices").withIndex("by_user", (q) => q.eq("userId", userId).eq("status", "ACTIVE")).collect();
         const spaces = await ctx.db.query("spaces").withIndex("by_user", (q) => q.eq("userId", userId)).collect();
@@ -169,6 +169,14 @@ export const processUpdate = internalMutation({
         const jobs = await ctx.db.query("agentJobs").withIndex("by_user", (q) => q.eq("userId", userId)).order("desc").take(5);
         if (jobs.length === 0) return reply(chatId, "작업이 없습니다.", userId);
         return reply(chatId, jobs.map((j) => `- ${j.jobType} · ${j.status}${j.errorCode ? ` (${j.errorCode})` : ""} · ${fmtKst(j.createdAt)}`).join("\n"), userId);
+      }
+      case "/content": {
+        const mine = (await ctx.db.query("contentPieces").withIndex("by_owner", (q) => q.eq("ownerUserId", userId)).order("desc").take(20)).filter((p) => p.status === "APPROVED").slice(0, 3);
+        const shared = mine.length < 3 ? await ctx.db.query("contentPieces").withIndex("by_visibility", (q) => q.eq("visibility", "SHARED").eq("status", "APPROVED")).order("desc").take(3 - mine.length) : [];
+        const picks = [...mine, ...shared.filter((p) => !mine.some((m) => m._id === p._id))].slice(0, 3);
+        if (picks.length === 0) return reply(chatId, "승인된 콘텐츠가 없습니다. 대시보드 > 콘텐츠에서 생성을 요청하세요(내 PC 의 Codex 가 생성).", userId);
+        const lines = picks.map((p, i) => `${i + 1}. [${p.channel}] ${p.qualityScore}점${p.visibility === "SHARED" ? " · 공유" : ""}\n${p.caption.slice(0, 160)}${p.caption.length > 160 ? "…" : ""}`);
+        return reply(chatId, ["오늘의 추천 콘텐츠", ...lines, "", "게시: /post <스페이스명> <내용> 또는 대시보드 > 콘텐츠 > 이 콘텐츠로 게시"].join("\n"), userId);
       }
       case "/post": {
         const spaceName = rest[0];
