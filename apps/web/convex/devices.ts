@@ -1,6 +1,7 @@
+import type { Doc } from "./_generated/dataModel";
 import { v } from "convex/values";
 import { generateCode, normalizeCode, PAIR_CODE_TTL_MS } from "@automoney/shared";
-import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query, type QueryCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { sha256Hex } from "./lib/crypto";
 import { fail } from "./lib/errors";
@@ -62,24 +63,27 @@ export const pair = mutation({
   },
 });
 
+export async function listDevicesFor(ctx: QueryCtx, user: Doc<"users">) {
+  const rows = await ctx.db.query("devices").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
+  return rows
+    .sort((a, b) => b.pairedAt - a.pairedAt)
+    .map((d) => ({
+      _id: d._id,
+      name: d.name,
+      platform: d.platform,
+      appVersion: d.appVersion,
+      status: d.status,
+      pairedAt: d.pairedAt,
+      lastSeenAt: d.lastSeenAt ?? null,
+      online: d.status === "ACTIVE" && !!d.lastSeenAt && Date.now() - d.lastSeenAt < 90_000,
+      snapshot: d.snapshot ?? null,
+    }));
+}
+
 export const listMine = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
-    const rows = await ctx.db.query("devices").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
-    return rows
-      .sort((a, b) => b.pairedAt - a.pairedAt)
-      .map((d) => ({
-        _id: d._id,
-        name: d.name,
-        platform: d.platform,
-        appVersion: d.appVersion,
-        status: d.status,
-        pairedAt: d.pairedAt,
-        lastSeenAt: d.lastSeenAt ?? null,
-        online: d.status === "ACTIVE" && !!d.lastSeenAt && Date.now() - d.lastSeenAt < 90_000,
-        snapshot: d.snapshot ?? null,
-      }));
+    return await listDevicesFor(ctx, await requireUser(ctx));
   },
 });
 

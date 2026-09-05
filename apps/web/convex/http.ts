@@ -5,6 +5,8 @@ import { httpAction } from "./_generated/server";
 import { auth } from "./auth";
 import { claim, config, jobsRouter, spacesSync } from "./agent";
 import { webhook as telegramWebhook } from "./telegram";
+import { mcpHttp } from "./mcp";
+import { callback as metaCallback } from "./meta";
 import { hmacSha256Hex, timingSafeEqual } from "./lib/crypto";
 
 const http = httpRouter();
@@ -54,6 +56,15 @@ http.route({ path: "/agent/claim", method: "POST", handler: claim });
 http.route({ path: "/agent/config", method: "GET", handler: config });
 http.route({ path: "/agent/spaces/sync", method: "POST", handler: spacesSync });
 http.route({ pathPrefix: "/agent/jobs/", method: "POST", handler: jobsRouter });
+
+// Meta OAuth 콜백 (Threads · Instagram)
+http.route({ path: "/meta/callback", method: "GET", handler: metaCallback });
+
+// Stateless MCP (POST /mcp 또는 /mcp/{endpointId}.{secret}; GET 은 안내)
+http.route({ path: "/mcp", method: "POST", handler: mcpHttp });
+http.route({ path: "/mcp", method: "GET", handler: mcpHttp });
+http.route({ pathPrefix: "/mcp/", method: "POST", handler: mcpHttp });
+http.route({ pathPrefix: "/mcp/", method: "GET", handler: mcpHttp });
 
 // 텔레그램 봇 웹훅 (X-Telegram-Bot-Api-Secret-Token 검증)
 http.route({ path: "/telegram/webhook", method: "POST", handler: telegramWebhook });

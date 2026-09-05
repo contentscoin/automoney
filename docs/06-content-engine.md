@@ -59,4 +59,9 @@ flowchart LR
 - **생성 위치**: 운영사 LLM 키 없음(사용자 확정). 클라우드는 수집·원자 추출·품질 게이트·라이브러리·큐레이션 저장만 담당하고, 생성은 잡 `content.generate` 로 유저 PC 의 에이전트가 `codex exec` 로 수행한다(ADR-0005 와 동일한 토큰 경계). Codex 가 없으면 규칙 템플릿으로 폴백하고 `generatedBy=template` 로 표시한다. §3 의 "전문가 패널 점수·3회 재생성" 은 규칙 기반 `evaluatePiece` 점수(길이·해시태그·광고 표기·금칙·AI 상투어 감점)로 1차 대체했다.
 - **매거진 수집**: 수퍼어드민이 URL 을 등록하면 서버가 HTML 을 가져와 `extractMagazine` 으로 추출한다(라이브러리 없이 정규식: og 메타, article/main/body 본문, 이미지, `index_no` 상품 링크 ↔ `products` 매칭). URL 접근이 막힌 경우 HTML 붙여넣기.
 - **큐레이션 소스**: 트렌드 = 구글 트렌드 KR RSS(6시간 크론). 연예인 착용 = `SearchProvider`(Brave/SerpAPI 키 있을 때만, 없으면 `none`) — 출처 링크·스니펫만 저장, 이미지 재게시 금지 라벨 고정. 짤/밈 은 수퍼어드민 수동 등록(라이선스 메모 필수). 제품 정보 팩 은 카탈로그 필드 규칙 생성(상세 페이지 크롤링은 아뜨랑스 규격 합의 후).
-- **미구현(다음)**: 코디 제안 카드, 거절 패턴의 프롬프트 주입(현재는 통계 노출까지), §5 분석 루프(readback) — M5.
+- **미구현(다음)**: 코디 제안 카드.
+
+## 8. 분석 루프 구현 메모 (M5, 2026-09-05)
+- `postMetrics`(게시물 1행, 스냅샷 24h/72h/7d) — 생성 시 훅(`classifyHook`: 질문/숫자/대비/트렌드/가격/서술)·CTA(`classifyCta`: 링크/프로필/저장/댓글/없음)·KST 시간대 버킷을 규칙으로 분류한다. 스냅샷 소스: `META_API`(insights), `BROWSER`(데스크톱 `post.readback`), `LEDGER`(원장만). 클릭·주문·매출은 항상 원장에서 창 경계(게시+24h/72h/7d)까지로 결합한다.
+- 실험 원장 `experiments`: 계정(USER)·전역(GLOBAL) × 채널 × 차원(HOOK/CTA/HOUR) × 변형. 7d 확정 시 누적하고 `evaluateLift`(게시물당 클릭+반응×0.1, 변형 vs 나머지, 표본≥`ANALYTICS_MIN_SAMPLES`(20)·+15%·z≥1.96)로 승격 → `playbooks` 규칙. 승격 규칙은 `content.requestGenerate` 페이로드 `playbook` 으로, 거절 사유 상위 3개는 `avoid` 로 프롬프트에 주입된다(§3 거절 패턴 학습 1차 구현).
+- readback 필드 중 노출·도달·저장은 API 계정에서만 채워지고, 브라우저 스크랩은 좋아요·댓글·공유·조회 위주다(플랫폼별 셀렉터 후보는 `apps/desktop/src/agent/recipes/readback.ts`).

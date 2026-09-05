@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import {
   CHANNELS,
   evaluatePiece,
@@ -20,6 +20,15 @@ import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireSuperAdmin, requireUser, roleOf } from "./lib/rbac";
 import { enqueueJob } from "./jobs";
+import { playbookHintsFor } from "./analytics";
+
+/** 내 거절 사유 상위 3개(생성 프롬프트 "피해야 할 것") */
+async function topRejectionReasons(ctx: MutationCtx, userId: Id<"users">): Promise<string[]> {
+  const rows = await ctx.db.query("contentRejections").withIndex("by_user", (q) => q.eq("userId", userId)).order("desc").take(50);
+  const by = new Map<string, number>();
+  for (const r of rows) by.set(r.reason, (by.get(r.reason) ?? 0) + 1);
+  return [...by.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r} (${n}회 거절)`);
+}
 
 const channelValidator = v.union(
   v.literal("INSTAGRAM_FEED"),
@@ -31,101 +40,108 @@ const channelValidator = v.union(
 );
 
 /** 유저: 매거진 또는 상품 기준으로 채널별 콘텐츠 생성 요청 → 내 PC 의 Codex 가 수행 */
-export const requestGenerate = mutation({
-  args: {
+const requestGenerateArgs = {
     magazineId: v.optional(v.id("magazines")),
     productId: v.optional(v.id("products")),
     channels: v.array(channelValidator),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    if (args.channels.length === 0)
-      fail("INVALID_ARGUMENT", "채널을 하나 이상 선택하세요.");
-    if (!args.magazineId && !args.productId)
-      fail("INVALID_ARGUMENT", "매거진 또는 상품을 선택하세요.");
-    const device = (
-      await ctx.db
-        .query("devices")
-        .withIndex("by_user", (q) =>
-          q.eq("userId", user._id).eq("status", "ACTIVE"),
-        )
-        .collect()
-    )[0];
-    if (!device)
-      fail(
-        "CONFLICT",
-        "콘텐츠 생성은 내 PC 의 에이전트(Codex)가 수행합니다. 먼저 데스크톱 에이전트를 페어링하세요.",
-      );
+  };
 
-    const atoms: ContentGeneratePayload["atoms"] = [];
-    const products: ProductBrief[] = [];
-    let magazineTitle: string | null = null;
-    if (args.magazineId) {
-      const m = await ctx.db.get(args.magazineId);
-      if (!m || m.status !== "ACTIVE")
-        fail("NOT_FOUND", "매거진을 찾을 수 없습니다.");
-      magazineTitle = m.title;
-      for (const a of await ctx.db
-        .query("contentAtoms")
-        .withIndex("by_magazine", (q) => q.eq("magazineId", m._id))
-        .collect())
+export async function requestGenerateFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof requestGenerateArgs>, source: "WEB" | "MCP" = "WEB") {
+  if (args.channels.length === 0)
+    fail("INVALID_ARGUMENT", "채널을 하나 이상 선택하세요.");
+  if (!args.magazineId && !args.productId)
+    fail("INVALID_ARGUMENT", "매거진 또는 상품을 선택하세요.");
+  const device = (
+    await ctx.db
+      .query("devices")
+      .withIndex("by_user", (q) =>
+        q.eq("userId", user._id).eq("status", "ACTIVE"),
+      )
+      .collect()
+  )[0];
+  if (!device)
+    fail(
+      "CONFLICT",
+      "콘텐츠 생성은 내 PC 의 에이전트(Codex)가 수행합니다. 먼저 데스크톱 에이전트를 페어링하세요.",
+    );
+
+  const atoms: ContentGeneratePayload["atoms"] = [];
+  const products: ProductBrief[] = [];
+  let magazineTitle: string | null = null;
+  if (args.magazineId) {
+    const m = await ctx.db.get(args.magazineId);
+    if (!m || m.status !== "ACTIVE")
+      fail("NOT_FOUND", "매거진을 찾을 수 없습니다.");
+    magazineTitle = m.title;
+    for (const a of await ctx.db
+      .query("contentAtoms")
+      .withIndex("by_magazine", (q) => q.eq("magazineId", m._id))
+      .collect())
+      atoms.push({
+        atomType: a.atomType,
+        text: a.text,
+        productId: a.attrangsProductId ?? null,
+        rank: a.rank,
+      });
+    for (const pid of m.productIds.slice(0, 5)) {
+      const p = await ctx.db.get(pid);
+      if (p) products.push(brief(p));
+    }
+  }
+  if (args.productId) {
+    const p = await ctx.db.get(args.productId);
+    if (!p) fail("NOT_FOUND", "상품을 찾을 수 없습니다.");
+    if (!products.some((b) => b.attrangsProductId === p.attrangsProductId))
+      products.unshift(brief(p));
+    // 상품만 있는 경우 큐레이션 제품 정보를 원자로 보강
+    const facts = await ctx.db
+      .query("curationItems")
+      .withIndex("by_product", (q) =>
+        q.eq("productId", p._id).eq("kind", "PRODUCT_FACT"),
+      )
+      .collect();
+    for (const f of facts)
+      if (f.body)
         atoms.push({
-          atomType: a.atomType,
-          text: a.text,
-          productId: a.attrangsProductId ?? null,
-          rank: a.rank,
+          atomType: "PRODUCT_POINT",
+          text: f.body,
+          productId: p.attrangsProductId,
+          rank: atoms.length + 1,
         });
-      for (const pid of m.productIds.slice(0, 5)) {
-        const p = await ctx.db.get(pid);
-        if (p) products.push(brief(p));
-      }
-    }
-    if (args.productId) {
-      const p = await ctx.db.get(args.productId);
-      if (!p) fail("NOT_FOUND", "상품을 찾을 수 없습니다.");
-      if (!products.some((b) => b.attrangsProductId === p.attrangsProductId))
-        products.unshift(brief(p));
-      // 상품만 있는 경우 큐레이션 제품 정보를 원자로 보강
-      const facts = await ctx.db
-        .query("curationItems")
-        .withIndex("by_product", (q) =>
-          q.eq("productId", p._id).eq("kind", "PRODUCT_FACT"),
-        )
-        .collect();
-      for (const f of facts)
-        if (f.body)
-          atoms.push({
-            atomType: "PRODUCT_POINT",
-            text: f.body,
-            productId: p.attrangsProductId,
-            rank: atoms.length + 1,
-          });
-    }
-    const payload: ContentGeneratePayload = {
+  }
+  const payload: ContentGeneratePayload = {
+    channels: args.channels,
+    atoms: atoms.slice(0, 20),
+    products,
+    magazineId: args.magazineId ?? null,
+    magazineTitle,
+    brand: "아뜨랑스",
+    playbook: await playbookHintsFor(ctx, user._id, args.channels),
+    avoid: await topRejectionReasons(ctx, user._id),
+  };
+  const jobId = await enqueueJob(ctx, {
+    userId: user._id,
+    jobType: "content.generate",
+    payload: payload as unknown as Record<string, unknown>,
+    source,
+  });
+  await audit(ctx, {
+    actorUserId: user._id,
+    action: "content.requestGenerate",
+    metadata: {
+      jobId,
       channels: args.channels,
-      atoms: atoms.slice(0, 20),
-      products,
       magazineId: args.magazineId ?? null,
-      magazineTitle,
-      brand: "아뜨랑스",
-    };
-    const jobId = await enqueueJob(ctx, {
-      userId: user._id,
-      jobType: "content.generate",
-      payload: payload as unknown as Record<string, unknown>,
-      source: "WEB",
-    });
-    await audit(ctx, {
-      actorUserId: user._id,
-      action: "content.requestGenerate",
-      metadata: {
-        jobId,
-        channels: args.channels,
-        magazineId: args.magazineId ?? null,
-        productId: args.productId ?? null,
-      },
-    });
-    return jobId;
+      productId: args.productId ?? null,
+    },
+  });
+  return jobId;
+}
+
+export const requestGenerate = mutation({
+  args: requestGenerateArgs,
+  handler: async (ctx, args) => {
+    return await requestGenerateFor(ctx, await requireUser(ctx), args);
   },
 });
 
@@ -254,52 +270,62 @@ async function decorate(
 }
 
 /** 라이브러리: 내 조각 + 공유(SHARED) 조각. RETIRED 제외 */
-export const listLibrary = query({
-  args: {
+const listLibraryArgs = {
     channel: v.optional(channelValidator),
     status: v.optional(v.union(v.literal("DRAFT"), v.literal("APPROVED"))),
     limit: v.optional(v.number()),
-  },
+  };
+
+export async function listLibraryFor(ctx: QueryCtx, user: Doc<"users">, args: ObjectType<typeof listLibraryArgs>) {
+  const mine = await ctx.db
+    .query("contentPieces")
+    .withIndex("by_owner", (q) => q.eq("ownerUserId", user._id))
+    .order("desc")
+    .take(200);
+  const shared = await ctx.db
+    .query("contentPieces")
+    .withIndex("by_visibility", (q) =>
+      q.eq("visibility", "SHARED").eq("status", "APPROVED"),
+    )
+    .order("desc")
+    .take(200);
+  const merged = [
+    ...mine,
+    ...shared.filter((s) => s.ownerUserId !== user._id),
+  ]
+    .filter((p) => p.status !== "RETIRED")
+    .filter((p) => !args.channel || p.channel === args.channel)
+    .filter((p) => !args.status || p.status === args.status)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, Math.min(args.limit ?? 100, 300));
+  return await decorate(ctx, merged, user._id);
+}
+
+export const listLibrary = query({
+  args: listLibraryArgs,
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    const mine = await ctx.db
-      .query("contentPieces")
-      .withIndex("by_owner", (q) => q.eq("ownerUserId", user._id))
-      .order("desc")
-      .take(200);
-    const shared = await ctx.db
-      .query("contentPieces")
-      .withIndex("by_visibility", (q) =>
-        q.eq("visibility", "SHARED").eq("status", "APPROVED"),
-      )
-      .order("desc")
-      .take(200);
-    const merged = [
-      ...mine,
-      ...shared.filter((s) => s.ownerUserId !== user._id),
-    ]
-      .filter((p) => p.status !== "RETIRED")
-      .filter((p) => !args.channel || p.channel === args.channel)
-      .filter((p) => !args.status || p.status === args.status)
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, Math.min(args.limit ?? 100, 300));
-    return await decorate(ctx, merged, user._id);
+    return await listLibraryFor(ctx, await requireUser(ctx), args);
   },
 });
 
+const getPieceArgs = { pieceId: v.id("contentPieces") };
+
+export async function getPieceFor(ctx: QueryCtx, user: Doc<"users">, args: ObjectType<typeof getPieceArgs>) {
+  const p = await ctx.db.get(args.pieceId);
+  if (!p) fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+  if (
+    p.ownerUserId !== user._id &&
+    !(p.visibility === "SHARED" && p.status === "APPROVED") &&
+    roleOf(user) !== "SUPER_ADMIN"
+  )
+    fail("FORBIDDEN", "접근할 수 없는 콘텐츠입니다.");
+  return (await decorate(ctx, [p], user._id))[0]!;
+}
+
 export const getPiece = query({
-  args: { pieceId: v.id("contentPieces") },
+  args: getPieceArgs,
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    const p = await ctx.db.get(args.pieceId);
-    if (!p) fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
-    if (
-      p.ownerUserId !== user._id &&
-      !(p.visibility === "SHARED" && p.status === "APPROVED") &&
-      roleOf(user) !== "SUPER_ADMIN"
-    )
-      fail("FORBIDDEN", "접근할 수 없는 콘텐츠입니다.");
-    return (await decorate(ctx, [p], user._id))[0]!;
+    return await getPieceFor(ctx, await requireUser(ctx), args);
   },
 });
 
