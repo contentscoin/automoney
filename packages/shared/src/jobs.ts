@@ -66,13 +66,21 @@ export interface PublishPayload {
 }
 
 /** 플랫폼별 발행 텍스트 규격 (docs/06 §2) */
-export const PLATFORM_LIMITS: Record<SnsPlatform, { maxChars: number; maxMedia: number; dailyDefault: number }> = {
-  THREADS: { maxChars: 500, maxMedia: 10, dailyDefault: 5 },
-  X: { maxChars: 280, maxMedia: 4, dailyDefault: 5 },
-  INSTAGRAM: { maxChars: 2200, maxMedia: 10, dailyDefault: 3 },
-  TIKTOK: { maxChars: 2200, maxMedia: 1, dailyDefault: 2 },
-  NAVER_BLOG: { maxChars: 20000, maxMedia: 30, dailyDefault: 1 },
+export const PLATFORM_LIMITS: Record<SnsPlatform, { maxChars: number; maxMedia: number; dailyDefault: number; mediaRequired: boolean; mediaKinds: ("image" | "video")[] }> = {
+  THREADS: { maxChars: 500, maxMedia: 10, dailyDefault: 5, mediaRequired: false, mediaKinds: ["image", "video"] },
+  X: { maxChars: 280, maxMedia: 4, dailyDefault: 5, mediaRequired: false, mediaKinds: ["image", "video"] },
+  INSTAGRAM: { maxChars: 2200, maxMedia: 10, dailyDefault: 3, mediaRequired: true, mediaKinds: ["image", "video"] },
+  TIKTOK: { maxChars: 2200, maxMedia: 1, dailyDefault: 2, mediaRequired: true, mediaKinds: ["video"] },
+  NAVER_BLOG: { maxChars: 20000, maxMedia: 30, dailyDefault: 1, mediaRequired: false, mediaKinds: ["image"] },
 };
+
+/** URL 확장자로 미디어 종류 추정 (다운로드 전 사전 검증용) */
+export function guessMediaKind(url: string): "image" | "video" | "unknown" {
+  const path = url.split("?")[0]!.toLowerCase();
+  if (/\.(jpe?g|png|webp|gif|heic)$/.test(path)) return "image";
+  if (/\.(mp4|mov|m4v|webm)$/.test(path)) return "video";
+  return "unknown";
+}
 
 export function validatePublishPayload(p: PublishPayload): string | null {
   const lim = PLATFORM_LIMITS[p.platform];
@@ -82,6 +90,11 @@ export function validatePublishPayload(p: PublishPayload): string | null {
   const full = p.linkUrl ? `${text}\n${p.linkUrl}` : text;
   if ([...full].length > lim.maxChars) return `text exceeds ${lim.maxChars} chars`;
   if (p.mediaUrls.length > lim.maxMedia) return `too many media (max ${lim.maxMedia})`;
-  for (const u of p.mediaUrls) if (!/^https?:\/\//.test(u)) return "media url must be http(s)";
+  if (lim.mediaRequired && p.mediaUrls.length === 0) return `${p.platform} requires media`;
+  for (const u of p.mediaUrls) {
+    if (!/^https?:\/\//.test(u)) return "media url must be http(s)";
+    const kind = guessMediaKind(u);
+    if (kind !== "unknown" && !lim.mediaKinds.includes(kind)) return `${p.platform} does not accept ${kind}`;
+  }
   return null;
 }

@@ -14,6 +14,10 @@ export interface AgentConfig {
   browserChannel?: string;
   executablePath?: string;
   headless: boolean;
+  /** 레시피 실패 시 Codex 오토파일럿으로 복구 시도 */
+  autopilot: boolean;
+  /** 자동 업데이트 피드 URL (generic provider). 없으면 비활성 */
+  updateFeedUrl?: string;
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {
@@ -24,6 +28,8 @@ export const DEFAULT_CONFIG: AgentConfig = {
   browserChannel: process.env.AUTOMONEY_BROWSER_CHANNEL,
   executablePath: process.env.AUTOMONEY_BROWSER_EXECUTABLE,
   headless: process.env.AUTOMONEY_HEADLESS === "1",
+  autopilot: process.env.AUTOMONEY_AUTOPILOT === "1",
+  updateFeedUrl: process.env.AUTOMONEY_UPDATE_FEED_URL,
 };
 
 export function loadConfig(): AgentConfig {
@@ -50,5 +56,5 @@ export function isPaired(cfg: AgentConfig): boolean {
 
 /** 토큰·경로 마스킹한 상태 스냅샷 (클라우드 보고·패널 표시용) */
 export function redactedConfig(cfg: AgentConfig) {
-  return { convexSiteUrl: cfg.convexSiteUrl, siteUrl: cfg.siteUrl, deviceId: cfg.deviceId ?? null, deviceName: cfg.deviceName, paired: isPaired(cfg), headless: cfg.headless };
+  return { convexSiteUrl: cfg.convexSiteUrl, siteUrl: cfg.siteUrl, deviceId: cfg.deviceId ?? null, deviceName: cfg.deviceName, paired: isPaired(cfg), headless: cfg.headless, autopilot: cfg.autopilot, updateFeedUrl: cfg.updateFeedUrl ?? null };
 }

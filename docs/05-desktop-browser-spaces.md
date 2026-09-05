@@ -70,6 +70,8 @@ stateDiagram-v2
 - **사용자 간섭 차단**: 잡 실행 중 스페이스 창은 별도 데스크톱 영역(최소화 또는 오프스크린)에서 동작하며 사용자의 기본 브라우저와 무관(ego lite의 "방해 없이 백그라운드" 개념).
 
 ## 4. AI 에이전트 조작 (Codex)
+
+> **구현 메모(M3-2)**: `apps/desktop/src/agent/autopilot/` — `snapshot.ts`(상호작용 요소 ref 부여·압축 렌더), `actions.ts`(click/type/upload/press/navigate/scroll/wait/done/fail, 금지 패턴·발행 패턴), `loop.ts`(최대 스텝·시간, 발행 게이트, 이력), `codexPlanner.ts`(`codex exec` 읽기 전용 샌드박스, JSON 액션), `scriptedPlanner.ts`(테스트). 레시피가 우선이고 실패 시에만 오토파일럿이 개입한다.
 - 루프: `snapshot`(접근성 트리 기반 시맨틱 스냅샷, 요소 ref 부여) → Codex가 다음 액션 계획 → `click(ref)` / `fill(ref, text)` / `type(ref, text, humanDelay)` / `press(key)` / `navigate(url)` / `wait(condition)` / `capture()` → 검증 → 반복. 최대 스텝·시간 제한.
 - 플랫폼별 **레시피** 우선: 안정적인 플로우(인스타 피드 업로드, 쓰레드 작성, X 작성, 틱톡 업로드, 블로그 에디터)는 셀렉터 기반 스크립트로 먼저 시도하고, 실패 시 Codex 에이전트 루프로 복구. 레시피는 버전 관리·원격 업데이트(플랫폼 UI 변경 대응).
 - 인간형 입력: 타이핑 지연, 마우스 이동 경로, 스크롤, 랜덤 대기(blogautomcp `random-schedule.ts` 지터 정책 확장).

@@ -1,0 +1,23 @@
+<!doctype html><html><body>
+<h1>Fake Instagram (fixture)</h1>
+<a data-automoney="handle" href="/e2e_insta/">profile</a>
+<button data-automoney="compose" id="create">만들기</button>
+<div id="dialog" style="display:none">
+  <input type="file" id="file" multiple />
+  <button data-automoney="next" id="next1">다음</button>
+  <button data-automoney="next" id="next2">다음</button>
+  <div data-automoney="editor" role="textbox" contenteditable="true" aria-label="문구 입력..." style="border:1px solid #999;min-height:40px;width:300px"></div>
+  <button data-automoney="post" id="share">공유하기</button>
+</div>
+<div id="result"></div>
+<script>
+  let files = 0;
+  document.getElementById("create").onclick = () => { document.getElementById("dialog").style.display = "block"; };
+  document.getElementById("file").onchange = (e) => { files = e.target.files.length; };
+  document.getElementById("share").onclick = () => {
+    if (files === 0) { document.getElementById("result").textContent = "no media"; return; }
+    const a = document.createElement("a"); a.setAttribute("data-automoney", "post-link"); a.href = "/p/ABC123/"; a.textContent = "게시물이 공유되었습니다";
+    document.getElementById("result").appendChild(a);
+  };
+</script>
+</body></html>

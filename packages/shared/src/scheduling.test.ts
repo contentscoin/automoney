@@ -40,5 +40,8 @@ describe("validatePublishPayload", () => {
     expect(validatePublishPayload({ spaceId: "s", platform: "THREADS", text: "hi", mediaUrls: ["https://a/1.jpg"] })).toBeNull();
     expect(validatePublishPayload({ spaceId: "s", platform: "THREADS", text: "", mediaUrls: [] })).toMatch(/required/);
     expect(validatePublishPayload({ spaceId: "s", platform: "X", text: "x", mediaUrls: ["ftp://a"] })).toMatch(/http/);
+    expect(validatePublishPayload({ spaceId: "s", platform: "INSTAGRAM", text: "x", mediaUrls: [] })).toMatch(/requires media/);
+    expect(validatePublishPayload({ spaceId: "s", platform: "TIKTOK", text: "x", mediaUrls: ["https://a/1.jpg"] })).toMatch(/does not accept image/);
+    expect(validatePublishPayload({ spaceId: "s", platform: "TIKTOK", text: "x", mediaUrls: ["https://a/1.mp4"] })).toBeNull();
   });
 });
