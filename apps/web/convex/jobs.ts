@@ -4,7 +4,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
-import { requireUser } from "./lib/rbac";
+import { requireUser, roleOf } from "./lib/rbac";
+import { consumePiece } from "./lib/pieces";
 import { internal } from "./_generated/api";
 
 export const jobTypeValidator = v.union(
@@ -12,7 +13,7 @@ export const jobTypeValidator = v.union(
   v.literal("space.create"),
   v.literal("space.login"),
   v.literal("space.verify"),
-  v.literal("codex.login"),
+  v.literal("codex.login"), v.literal("content.generate"),
 );
 const sourceValidator = v.union(v.literal("WEB"), v.literal("SCHEDULE"), v.literal("TELEGRAM"), v.literal("MCP"), v.literal("SYSTEM"));
 
@@ -68,21 +69,29 @@ export const enqueuePublish = mutation({
     text: v.string(),
     mediaUrls: v.array(v.string()),
     linkId: v.optional(v.id("marketingLinks")),
+    pieceId: v.optional(v.id("contentPieces")),
     requireApproval: v.optional(v.boolean()),
     dryRun: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     const space = await ownSpace(ctx, user._id, args.spaceId);
+    let text = args.text;
+    let mediaUrls = args.mediaUrls;
+    if (args.pieceId) {
+      const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
+      if (!text.trim()) text = piece.text;
+      if (mediaUrls.length === 0) mediaUrls = piece.mediaUrls;
+    }
     let linkUrl: string | null = null;
     if (args.linkId) {
       const link = await ctx.db.get(args.linkId);
       if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
       linkUrl = `${process.env.SITE_URL ?? ""}/r/${link.shortCode}`;
     }
-    const payload: PublishPayload = { spaceId: space._id, platform: space.platform, text: args.text, mediaUrls: args.mediaUrls, linkUrl, dryRun: args.dryRun ?? false };
+    const payload: PublishPayload & { pieceId?: string } = { spaceId: space._id, platform: space.platform, text, mediaUrls, linkUrl, dryRun: args.dryRun ?? false, ...(args.pieceId ? { pieceId: args.pieceId } : {}) };
     const id = await enqueueJob(ctx, { userId: user._id, jobType: "post.publish", payload: payload as unknown as Record<string, unknown>, spaceId: space._id, source: "WEB", needsApproval: args.requireApproval ?? false });
-    await audit(ctx, { actorUserId: user._id, action: "job.enqueuePublish", metadata: { jobId: id, spaceId: space._id } });
+    await audit(ctx, { actorUserId: user._id, action: "job.enqueuePublish", metadata: { jobId: id, spaceId: space._id, pieceId: args.pieceId ?? null } });
     return id;
   },
 });

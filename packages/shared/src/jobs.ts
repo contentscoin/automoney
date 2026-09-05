@@ -1,5 +1,6 @@
+import type { Channel, ContentAtom, ProductBrief } from "./content";
 /** 데스크톱 에이전트 ↔ 클라우드 잡 계약 (docs/01-architecture.md §2.2) */
-export const JOB_TYPES = ["post.publish", "space.create", "space.login", "space.verify", "codex.login"] as const;
+export const JOB_TYPES = ["post.publish", "space.create", "space.login", "space.verify", "codex.login", "content.generate"] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 export const JOB_STATUSES = ["NEEDS_APPROVAL", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"] as const;
@@ -97,4 +98,14 @@ export function validatePublishPayload(p: PublishPayload): string | null {
     if (kind !== "unknown" && !lim.mediaKinds.includes(kind)) return `${p.platform} does not accept ${kind}`;
   }
   return null;
+}
+
+/** 콘텐츠 생성 잡 페이로드 (유저 PC 의 Codex 가 수행) */
+export interface ContentGeneratePayload {
+  channels: Channel[];
+  atoms: ContentAtom[];
+  products: ProductBrief[];
+  magazineId?: string | null;
+  magazineTitle?: string | null;
+  brand?: string;
 }

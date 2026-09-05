@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { JOB_LEASE_MS } from "@automoney/shared";
 import { internal } from "./_generated/api";
+import { ingestGeneratedJob } from "./content";
 import type { Id } from "./_generated/dataModel";
 import { httpAction, internalMutation, internalQuery, type ActionCtx } from "./_generated/server";
 import { sha256Hex } from "./lib/crypto";
@@ -189,6 +190,7 @@ export const completeJob = internalMutation({
         });
       }
     }
+    if (j.jobType === "content.generate" && args.status === "SUCCEEDED" && !cancelled) await ingestGeneratedJob(ctx, j._id);
     await ctx.scheduler.runAfter(0, internal.telegram.notifyJob, { jobId: j._id });
     return { ok: true as const };
   },

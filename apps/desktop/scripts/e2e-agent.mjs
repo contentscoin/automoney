@@ -1,6 +1,7 @@
 /**
  * 에이전트 E2E (로컬 Convex + 데스크톱 CLI):
  *  가입 → 페어 코드 → cli pair → 스페이스 생성 → cli run(space.create) → 세션 검증(픽스처 X 페이지) → 드라이런 게시 → 클라우드 상태 확인
+ *  M4: 매거진 HTML 등록(수퍼어드민) → 콘텐츠 생성 요청 → cli run(content.generate, template) → 품질 게이트 APPROVED → pieceId 로 게시
  *  사전: apps/web 에서 `npx convex dev` 실행 중, `pnpm --filter @automoney/desktop build` 완료
  */
 import { execFile } from "node:child_process";
@@ -146,5 +147,54 @@ assert(String(apRes?.result?.data?.postUrl).includes("/status/999"), `오토파�
 const hist2 = fs.readFileSync(path.join(userData, "spaces", spaceId, "history.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
 assert(hist2.some((h) => h.action === "autopilot.step"), "오토파일럿 스텝 이력 기록");
 env.AUTOMONEY_AUTOPILOT_PLANNER = "off";
+env.AUTOMONEY_X_URL = fixture;
+
+// ───────── M4: 매거진 → 콘텐츠 생성(에이전트 template provider) → 라이브러리 → pieceId 게시 ─────────
+// SUPER_ADMIN_EMAILS=owner-e2e@automoney.test 가 설정되어 있어야 한다(web e2e 와 동일).
+const owner = new ConvexHttpClient(CONVEX_URL);
+let ownerRes;
+try {
+  ownerRes = await owner.action(api.auth.signIn, { provider: "password", params: { email: "owner-e2e@automoney.test", password: "Passw0rd!", flow: "signUp", name: "운영자" } });
+} catch {
+  ownerRes = await owner.action(api.auth.signIn, { provider: "password", params: { email: "owner-e2e@automoney.test", password: "Passw0rd!", flow: "signIn" } });
+}
+owner.setAuth(ownerRes.tokens.token);
+assert((await owner.query(api.users.me, {})).role === "SUPER_ADMIN", "운영자 로그인(SUPER_ADMIN)");
+await owner.action(api.products.syncFromAttrangs, {});
+const MAG_HTML = `<html><head><title>가을 니트 스타일링</title><meta property="og:title" content="E2E 가을 니트 스타일링 ${stamp}" /><meta property="og:description" content="니트 하나로 완성하는 데일리룩" /></head><body><article>
+<p>올가을 니트는 어깨선이 살짝 떨어지는 루즈핏이 대세입니다. 와이드 슬랙스와 매치하면 편안하면서도 단정해 보여요.</p>
+<img src="${MEDIA}/a.jpg" />
+<p>베이직 브이넥 니트 는 소매가 길어 손등을 살짝 덮는 디자인이라 가을 감성에 딱 맞아요. <a href="https://attrangs.co.kr/shop/view.php?index_no=100002">상품 보기</a></p>
+<p>하이웨스트 와이드 슬랙스 와 톤온톤으로 맞추면 키가 커 보이는 효과가 있습니다. <a href="/shop/view.php?index_no=100003">슬랙스</a></p>
+</article></body></html>`;
+const mag = await owner.action(api.magazines.register, { html: MAG_HTML, url: `https://attrangs.co.kr/magazine/e2e-${stamp}` });
+assert(mag.productCount === 2 && mag.atomCount >= 3, `매거진 등록: 소재 ${mag.atomCount} · 상품 ${mag.productCount}`);
+const magList = await client.query(api.magazines.list, {});
+assert(magList.some((m) => m._id === mag.magazineId), "유저에게 매거진 노출");
+
+env.AUTOMONEY_CONTENT_PROVIDER = "template";
+const genJob = await client.mutation(api.content.requestGenerate, { magazineId: mag.magazineId, channels: ["X", "THREADS", "INSTAGRAM_REEL"] });
+run = JSON.parse(await cli("run", "--max", "1"));
+assert(run.processed === 1, "content.generate 잡 처리(template provider)");
+const genRes = (await client.query(api.jobs.listMine, {})).find((j) => j._id === genJob);
+assert(genRes?.status === "SUCCEEDED" && genRes?.result?.data?.generatedBy === "template", `생성 잡 SUCCEEDED (${genRes?.status} by=${genRes?.result?.data?.generatedBy} ${genRes?.errorMessage ?? ""})`);
+const lib = await client.query(api.content.listLibrary, {});
+assert(lib.length === 3, `라이브러리 조각 3개 (${lib.length})`);
+const approvedX = lib.find((p) => p.channel === "X" && p.status === "APPROVED");
+assert(approvedX && approvedX.hashtags.includes("광고"), `X 조각 자동 승인 + #광고 (${lib.map((p) => `${p.channel}:${p.status}:${p.qualityScore}`).join(", ")})`);
+assert(lib.find((p) => p.channel === "INSTAGRAM_REEL")?.script, "릴스 조각에 숏폼 대본 포함");
+const pieceJob = await client.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: approvedX._id, requireApproval: false });
+await cli("run", "--max", "1");
+const pieceRes = (await client.query(api.jobs.listMine, {})).find((j) => j._id === pieceJob);
+assert(pieceRes?.status === "SUCCEEDED" && String(pieceRes?.result?.data?.postUrl).includes("/status/"), `라이브러리 조각으로 게시 (${pieceRes?.status} ${pieceRes?.result?.data?.postUrl ?? pieceRes?.errorMessage ?? ""})`);
+assert((await client.query(api.content.getPiece, { pieceId: approvedX._id })).usageCount === 1, "조각 사용 횟수 증가");
+await owner.mutation(api.content.setVisibility, { pieceId: approvedX._id, visibility: "SHARED" });
+const other = new ConvexHttpClient(CONVEX_URL);
+const otherRes = await other.action(api.auth.signIn, { provider: "password", params: { email: `agent2+${stamp}@test.com`, password: "Passw0rd!", flow: "signUp", name: "다른유저" } });
+other.setAuth(otherRes.tokens.token);
+assert((await other.query(api.content.listLibrary, {})).map((p) => p._id).join() === approvedX._id, "타 유저에게 공유 조각만 노출");
+const facts = await client.mutation(api.curation.buildProductFacts, { productId: magList.find((m) => m._id === mag.magazineId) && (await client.query(api.magazines.get, { magazineId: mag.magazineId })).products[0]._id });
+assert(facts.inserted + facts.updated === 5, "제품 정보 팩 5건");
+delete env.AUTOMONEY_CONTENT_PROVIDER;
 mediaServer.close();
-console.log("\nAGENT E2E OK (M3a + M3-2)");
+console.log("\nAGENT E2E OK (M3a + M3-2 + M4)");

@@ -316,7 +316,7 @@ export default defineSchema({
     deviceId: v.optional(v.id("devices")),
     spaceId: v.optional(v.id("spaces")),
     scheduleId: v.optional(v.id("schedules")),
-    jobType: v.union(v.literal("post.publish"), v.literal("space.create"), v.literal("space.login"), v.literal("space.verify"), v.literal("codex.login")),
+    jobType: v.union(v.literal("post.publish"), v.literal("space.create"), v.literal("space.login"), v.literal("space.verify"), v.literal("codex.login"), v.literal("content.generate")),
     payload: v.any(),
     status: v.union(
       v.literal("NEEDS_APPROVAL"),
@@ -359,6 +359,7 @@ export default defineSchema({
     text: v.string(),
     mediaUrls: v.array(v.string()),
     linkId: v.optional(v.id("marketingLinks")),
+    pieceId: v.optional(v.id("contentPieces")),
     autoApprove: v.boolean(),
     enabled: v.boolean(),
     nextRunAt: v.optional(v.number()),
@@ -406,4 +407,107 @@ export default defineSchema({
   })
     .index("by_createdAt", ["createdAt"])
     .index("by_target", ["targetUserId", "createdAt"]),
+
+  // ---- M4 콘텐츠 엔진 · 큐레이션 ----
+  magazines: defineTable({
+    sourceUrl: v.optional(v.string()),
+    title: v.string(),
+    description: v.optional(v.string()),
+    heroImage: v.optional(v.string()),
+    imageUrls: v.array(v.string()),
+    bodyText: v.string(),
+    attrangsProductIds: v.array(v.number()),
+    productIds: v.array(v.id("products")),
+    publishedAt: v.optional(v.number()),
+    ingestedAt: v.number(),
+    createdBy: v.id("users"),
+    atomCount: v.number(),
+    status: v.union(v.literal("ACTIVE"), v.literal("ARCHIVED")),
+  })
+    .index("by_status", ["status", "publishedAt"])
+    .index("by_sourceUrl", ["sourceUrl"]),
+
+  contentAtoms: defineTable({
+    magazineId: v.id("magazines"),
+    atomType: v.union(
+      v.literal("HOOK"),
+      v.literal("STYLE_TIP"),
+      v.literal("PRODUCT_POINT"),
+      v.literal("QUOTE"),
+      v.literal("TREND_TIE_IN"),
+    ),
+    text: v.string(),
+    attrangsProductId: v.optional(v.number()),
+    rank: v.number(),
+  }).index("by_magazine", ["magazineId", "rank"]),
+
+  contentPieces: defineTable({
+    ownerUserId: v.optional(v.id("users")),
+    visibility: v.union(v.literal("PRIVATE"), v.literal("SHARED")),
+    magazineId: v.optional(v.id("magazines")),
+    productId: v.optional(v.id("products")),
+    channel: v.union(
+      v.literal("INSTAGRAM_FEED"),
+      v.literal("INSTAGRAM_REEL"),
+      v.literal("THREADS"),
+      v.literal("X"),
+      v.literal("TIKTOK"),
+      v.literal("BLOG"),
+    ),
+    caption: v.string(),
+    hashtags: v.array(v.string()),
+    script: v.optional(v.string()),
+    mediaUrls: v.array(v.string()),
+    qualityScore: v.number(),
+    qualityReport: v.any(),
+    status: v.union(
+      v.literal("DRAFT"),
+      v.literal("APPROVED"),
+      v.literal("RETIRED"),
+    ),
+    generatedBy: v.union(
+      v.literal("codex"),
+      v.literal("template"),
+      v.literal("manual"),
+    ),
+    jobId: v.optional(v.id("agentJobs")),
+    usageCount: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_owner", ["ownerUserId", "createdAt"])
+    .index("by_visibility", ["visibility", "status", "createdAt"])
+    .index("by_job", ["jobId"]),
+
+  curationItems: defineTable({
+    kind: v.union(
+      v.literal("MEME"),
+      v.literal("TREND"),
+      v.literal("PRODUCT_FACT"),
+      v.literal("CELEB_MATCH"),
+    ),
+    title: v.string(),
+    body: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
+    mediaUrl: v.optional(v.string()),
+    productId: v.optional(v.id("products")),
+    licenseNote: v.optional(v.string()),
+    score: v.number(),
+    source: v.string(),
+    dedupeKey: v.string(),
+    fetchedAt: v.number(),
+    expiresAt: v.optional(v.number()),
+    status: v.union(v.literal("ACTIVE"), v.literal("HIDDEN")),
+  })
+    .index("by_kind", ["kind", "status", "score"])
+    .index("by_product", ["productId", "kind"])
+    .index("by_dedupeKey", ["dedupeKey"]),
+
+  contentRejections: defineTable({
+    userId: v.id("users"),
+    pieceId: v.optional(v.id("contentPieces")),
+    channel: v.string(),
+    reason: v.string(),
+    snippet: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_createdAt", ["createdAt"]),
 });

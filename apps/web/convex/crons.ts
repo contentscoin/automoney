@@ -11,4 +11,7 @@ crons.interval("sweep agent job leases", { minutes: 1 }, internal.jobs.sweep, {}
 // 예약 발행 틱
 crons.interval("schedule tick", { minutes: 5 }, internal.schedules.tick, {});
 
+// 큐레이션: 구글 트렌드(KR) RSS 6시간
+crons.interval("refresh trends", { hours: 6 }, internal.curation.refreshTrends, {});
+
 export default crons;

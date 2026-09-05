@@ -4,7 +4,7 @@ import { codexStatus } from "./codex";
 import { isPaired, loadConfig, saveConfig, type AgentConfig } from "./config";
 import { log } from "./logger";
 import { JobError, type JobContext, type JobOutcome } from "./jobs/context";
-import { handleCodexLogin, handlePublish, handleSpaceCreate, handleSpaceLogin, handleSpaceVerify } from "./jobs/handlers";
+import { handleCodexLogin, handleContentGenerate, handlePublish, handleSpaceCreate, handleSpaceLogin, handleSpaceVerify } from "./jobs/handlers";
 import { listLocalSpaces } from "./spaces/manager";
 
 export type Handler = (ctx: JobContext) => Promise<JobOutcome>;
@@ -14,6 +14,7 @@ export const HANDLERS: Record<JobType, Handler> = {
   "space.login": handleSpaceLogin,
   "space.verify": handleSpaceVerify,
   "codex.login": handleCodexLogin,
+  "content.generate": handleContentGenerate,
 };
 
 export interface LoopEvents {

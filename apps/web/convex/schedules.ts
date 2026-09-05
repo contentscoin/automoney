@@ -4,7 +4,8 @@ import { internal } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
-import { requireUser } from "./lib/rbac";
+import { requireUser, roleOf } from "./lib/rbac";
+import { consumePiece } from "./lib/pieces";
 import { enqueueJob } from "./jobs";
 
 const kindValidator = v.union(v.literal("ONE_SHOT"), v.literal("DAILY"), v.literal("WEEKLY"));
@@ -21,10 +22,16 @@ export const upsert = mutation({
     text: v.string(),
     mediaUrls: v.array(v.string()),
     linkId: v.optional(v.id("marketingLinks")),
+    pieceId: v.optional(v.id("contentPieces")),
     autoApprove: v.boolean(),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
+    if (args.pieceId) {
+      const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
+      if (!args.text.trim()) args.text = piece.text;
+      if (args.mediaUrls.length === 0) args.mediaUrls = piece.mediaUrls;
+    }
     const space = await ctx.db.get(args.spaceId);
     if (!space || space.userId !== user._id) fail("NOT_FOUND", "스페이스를 찾을 수 없습니다.");
     if (!parseTimeOfDay(args.timeOfDay)) fail("INVALID_ARGUMENT", "시간은 HH:MM 형식입니다.");

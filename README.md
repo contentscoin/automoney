@@ -98,13 +98,20 @@ Convex 추가 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELE
 - M3-2(구현): 인스타그램·틱톡·네이버 블로그 레시피(픽스처 검증), **오토파일럿**(`src/agent/autopilot/`: 시맨틱 스냅샷→플래너→액션 루프, 금지 컨트롤 차단, 발행 게이트; 플래너는 `codex exec` 또는 테스트용 scripted) — 레시피 실패 시 `autopilot: true` 설정 + Codex 로그인 상태면 자동 복구, 자동 업데이트(`src/updater.ts`, generic 피드, 유휴 확인 후 설치), electron-builder 서명·노터라이즈 설정과 `.github/workflows/desktop-build.yml`.
 - 남은 M3: 실제 SNS 에서 셀렉터 튜닝, Codex 플래너 실사용 검증, 설치 파일 서명 인증서 확보.
 
+### M4 콘텐츠 엔진 · 큐레이션 (구현)
+- 원칙: **클라우드 LLM 생성 없음** — 생성은 새 잡 `content.generate` 로 유저 PC 의 에이전트가 수행합니다(`codex exec`, 유저 구독 OAuth). Codex 미설치·미로그인·파싱 실패 시 규칙 템플릿(`packages/shared/src/content.ts` `templateGenerate`)으로 폴백하며 결과에 `generatedBy` 를 남깁니다. `AUTOMONEY_CONTENT_PROVIDER=template` 로 강제할 수 있습니다(테스트·E2E).
+- 클라우드(`apps/web/convex`): `magazines`(수퍼어드민이 URL 또는 HTML 등록 → og·본문·이미지·`index_no` 상품 링크 추출 → 원자 HOOK/STYLE_TIP/PRODUCT_POINT/QUOTE/TREND_TIE_IN), `content`(생성 요청 → 잡 → 완료 시 `evaluatePiece` 품질 게이트: 광고 표기 자동 삽입, 금칙 주장 차단(최저가·1위·직접 착용·100%), 채널 길이·해시태그 규격, 90점 이상·차단 0 이면 자동 APPROVED 아니면 DRAFT; 라이브러리 = 내 것 + 운영 공유(SHARED); 수정·승인·거절 사유 축적; `pieceId` 로 즉시 게시·예약 채우기), `curation`(구글 트렌드 KR RSS 6시간 크론, 제품 정보 팩(카탈로그 규칙), 연예인 착용 검색은 `lib/search/provider.ts` SearchProvider 추상화 — `BRAVE_API_KEY`/`SERPAPI_KEY` 있을 때만, 출처 링크만 저장·이미지 재게시 금지 라벨, 수퍼어드민 수동 등록은 라이선스 메모 필수).
+- 데스크톱: `src/agent/codexText.ts`(codex exec 텍스트 생성), `handleContentGenerate`(프롬프트 → provider → 파싱 → 결과 봉투 `data.pieces`).
+- 화면: `/dashboard/content`(생성 요청·오늘의 매거진·라이브러리/짤/트렌드/제품정보/연예인 탭·조각 카드 → "이 콘텐츠로 게시/예약"), `/super/magazines`(매거진 등록·소재 보기·큐레이션 수동 등록·트렌드 갱신·프로바이더 상태·전체 조각 공유 관리·거절 통계), 작업·예약 화면의 라이브러리 선택. 텔레그램 `/content`.
+- 검증: shared 27 · convex-test 34 · desktop 19 테스트, `e2e-agent.mjs` 에 매거진 등록 → 생성(template) → 자동 승인 → pieceId 게시 → 공유 가시성 추가.
+
 ### 데스크톱 배포·서명
 - 태그 `desktop-v*` 푸시 시 `desktop-build.yml` 이 Windows(NSIS)·macOS(dmg/zip) 를 빌드합니다. 시크릿 `CSC_LINK`/`CSC_KEY_PASSWORD`(코드사인 인증서 p12 base64/비밀번호), `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`(노터라이즈) 가 있으면 서명·노터라이즈, 없으면 서명 없이 빌드합니다. 자동 업데이트 피드는 변수 `AUTOMONEY_UPDATE_FEED_URL`(정적 호스팅에 `latest.yml`·설치 파일 업로드).
 - 에이전트 설정(`~/.automoney/config.json`): `autopilot`(레시피 실패 시 Codex 복구), `updateFeedUrl`, `browserChannel`, `headless`.
 
 ### M1 범위와 다음 단계
 - 구현: 회원·RBAC·총판 초대, KYC 제출·암호화·검수, 상품 CSV/Mock 동기화, 링크 발급·단축 URL·클릭 로그, 주문 웹훅(멱등·24h 재검증·취소 역분개), 유저/총판/수퍼어드민 대시보드(단일 요율 예상 수당, 간접구매는 수퍼어드민 전용).
-- 남은 로드맵: M3-2(추가 채널 레시피·Codex 에이전트 루프), M4 콘텐츠 엔진, M5 Meta API·MCP. 아뜨랑스 실제 API 어댑터는 규격 합의 후.
+- 남은 로드맵: M5 Meta API·MCP·분석 루프(readback). 아뜨랑스 실제 API 어댑터는 규격 합의 후.
 
 ## 전제 (사용자 확정)
 - 아뜨랑스에는 현재 파트너 API가 없으므로 **automoney가 인터페이스 규격을 제안**하고 아뜨랑스가 구현합니다. 초기 폴백은 CSV 배치입니다.

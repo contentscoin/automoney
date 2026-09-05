@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { okResult, type PublishPayload } from "@automoney/shared";
+import { buildGenerationPrompt, okResult, parseGeneratedPieces, templateGenerate, type ContentGeneratePayload, type PublishPayload } from "@automoney/shared";
+import { codexGenerateText } from "../codexText";
 import { codexStatus, startCodexLogin } from "../codex";
 import { createCodexPlanner, runAutopilot, scriptedPlanner, type Planner } from "../autopilot";
 import { log } from "../logger";
@@ -184,4 +185,33 @@ export async function handleCodexLogin(ctx: JobContext): Promise<JobOutcome> {
     if (codexStatus().loggedIn) return { result: okResult("codex.login", "Codex 로그인 완료", { started: started.detail }) };
   }
   throw new JobError("CODEX_LOGIN_REQUIRED", "Codex 로그인이 완료되지 않았습니다.");
+}
+
+export type ContentProvider = "codex" | "template";
+
+/** 콘텐츠 생성: 클라우드 LLM 없이 유저 PC 의 Codex 가 생성(ADR-0005). Codex 미설치·미로그인·파싱 실패 시 규칙 템플릿으로 폴백 */
+export async function handleContentGenerate(ctx: JobContext, deps: { generate?: (prompt: string) => Promise<{ ok: true; text: string } | { ok: false; reason: string }> } = {}): Promise<JobOutcome> {
+  const p = ctx.job.payload as unknown as ContentGeneratePayload;
+  const preferred = ((process.env.AUTOMONEY_CONTENT_PROVIDER ?? "codex").toLowerCase() === "template" ? "template" : "codex") as ContentProvider;
+  const input = { channels: p.channels, atoms: p.atoms, products: p.products, magazineTitle: p.magazineTitle ?? null, brand: p.brand };
+  await ctx.checkpoint("preparing", 10);
+  let generatedBy: ContentProvider = "template";
+  let pieces = [] as ReturnType<typeof templateGenerate>;
+  let fallbackReason: string | null = null;
+  if (preferred === "codex") {
+    await ctx.checkpoint("codex_generating", 30);
+    const r = await (deps.generate ?? codexGenerateText)(buildGenerationPrompt(input));
+    if (r.ok) {
+      pieces = parseGeneratedPieces(r.text, p.channels);
+      if (pieces.length > 0) generatedBy = "codex";
+      else fallbackReason = `unparseable codex output: ${r.text.slice(0, 120)}`;
+    } else fallbackReason = r.reason;
+    if (fallbackReason) log("warn", "content.generate: codex unavailable, falling back to template", { reason: fallbackReason });
+  }
+  if (generatedBy === "template") {
+    await ctx.checkpoint("template_generating", 60);
+    pieces = templateGenerate(input);
+  }
+  await ctx.checkpoint("done", 95);
+  return { result: okResult("content.generate", `${pieces.length}개 조각 생성 (${generatedBy})`, { pieces, generatedBy, fallbackReason }) };
 }
