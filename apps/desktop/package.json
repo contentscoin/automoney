@@ -10,22 +10,25 @@
     "start": "electron .",
     "agent": "node dist/cli.js",
     "test": "vitest run",
-    "dist": "electron-builder"
+    "dist": "electron-builder --publish never"
   },
   "dependencies": {
     "@automoney/shared": "workspace:*",
     "convex": "^1.45.0",
-    "playwright": "^1.63.0"
+    "playwright": "^1.63.0",
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "@types/node": "^22",
     "electron": "^44.2.0",
     "typescript": "^5.9.3",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "kr.automoney.desktop",
     "productName": "automoney",
+    "artifactName": "automoney-agent-${version}-${os}-${arch}.${ext}",
     "protocols": [
       {
         "name": "automoney",
@@ -38,11 +41,46 @@
       "dist/**",
       "package.json"
     ],
+    "asar": true,
+    "npmRebuild": false,
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "${env.AUTOMONEY_UPDATE_FEED_URL}",
+        "channel": "latest"
+      }
+    ],
     "win": {
-      "target": "nsis"
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true
     },
     "mac": {
-      "target": "dmg"
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": false
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    },
+    "directories": {
+      "output": "release"
     }
   }
 }

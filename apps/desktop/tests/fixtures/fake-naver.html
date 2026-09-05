@@ -1,0 +1,17 @@
+<!doctype html><html><body>
+<h1>Fake Naver SmartEditor (fixture)</h1>
+<a data-automoney="handle" href="/e2e_blogger">profile</a>
+<div data-automoney="title" contenteditable="true" placeholder="제목" style="border:1px solid #999;min-height:24px;width:400px" id="title"></div>
+<div data-automoney="editor" contenteditable="true" style="border:1px solid #999;min-height:80px;width:400px" id="body"></div>
+<input type="file" id="file" />
+<button data-automoney="post" id="publish">발행</button>
+<div id="layer" style="display:none"><button data-automoney="post-confirm" id="confirm">발행</button></div>
+<div id="result"></div>
+<script>
+  document.getElementById("publish").onclick = () => { document.getElementById("layer").style.display = "block"; };
+  document.getElementById("confirm").onclick = () => {
+    const a = document.createElement("a"); a.setAttribute("data-automoney", "post-link"); a.href = "/e2e_blogger/223000000001"; a.textContent = "발행 완료";
+    document.getElementById("result").appendChild(a);
+  };
+</script>
+</body></html>

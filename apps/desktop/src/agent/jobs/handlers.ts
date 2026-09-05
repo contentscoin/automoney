@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { okResult, type PublishPayload } from "@automoney/shared";
 import { codexStatus, startCodexLogin } from "../codex";
+import { createCodexPlanner, runAutopilot, scriptedPlanner, type Planner } from "../autopilot";
 import { log } from "../logger";
 import { getRecipe, type RecipeHelpers, type SessionCheck } from "../recipes";
 import { appendHistory, createSpace, openSpace, readMeta, writeMeta } from "../spaces/manager";
@@ -114,17 +115,60 @@ export async function handlePublish(ctx: JobContext): Promise<JobOutcome> {
     const session = await recipe.checkSession(space.page);
     if (session.state === "RESTRICTED") throw new JobError("SPACE_ACCOUNT_RESTRICTED", "계정 제한 안내가 감지되었습니다.", { sessionState: "RESTRICTED" });
     if (session.state !== "HEALTHY") throw new JobError("SPACE_SESSION_EXPIRED", "세션이 만료되었습니다. 스페이스에서 다시 로그인하세요.", { sessionState: "EXPIRED" });
-    const outcome = await recipe.publish(space.page, { text, mediaPaths }, helpers(ctx, { dryRun }));
-    appendHistory(p.spaceId, { action: "post.publish", dryRun, postUrl: outcome.postUrl, chars: text.length });
-    log("info", "published", { spaceId: p.spaceId, dryRun, postUrl: outcome.postUrl });
+    let outcome: { postUrl: string | null; detail?: string };
+    let recoveredBy: string | null = null;
+    try {
+      outcome = await recipe.publish(space.page, { text, mediaPaths }, helpers(ctx, { dryRun }));
+    } catch (recipeError) {
+      if ((recipeError as { code?: string }).code === "JOB_CANCELLED" || (recipeError as Error).name === "CancelledError") throw recipeError;
+      const planner = pickPlanner(ctx);
+      if (!planner) throw new JobError("RECIPE_FAILED", `레시피 실패: ${(recipeError as Error).message.split("\n")[0]}`);
+      log("warn", "recipe failed — trying autopilot", { spaceId: p.spaceId, planner: planner.name, error: String(recipeError).slice(0, 200) });
+      await ctx.checkpoint("autopilot", 40);
+      await space.page.goto(recipe.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => {});
+      const ap = await runAutopilot(space.page, planner, {
+        goal: `Publish a new post on ${p.platform} with the given text${mediaPaths.length ? " and attached media" : ""}, then report the post URL.`,
+        platform: p.platform,
+        text,
+        mediaPaths,
+        maxSteps: Number(process.env.AUTOMONEY_AUTOPILOT_MAX_STEPS ?? 15),
+        beforePublish: async () => {
+          await ctx.checkpoint("before_publish", 80);
+          return !dryRun;
+        },
+        onStep: async (step, action, out) => {
+          appendHistory(p.spaceId, { action: "autopilot.step", step, type: action.type, outcome: out });
+          await ctx.checkpoint(`autopilot:${step}`, Math.min(40 + step * 3, 85));
+        },
+      });
+      if (!ap.ok) throw new JobError("RECIPE_FAILED", `레시피 실패 후 오토파일럿도 실패: ${ap.summary}`);
+      outcome = { postUrl: ap.postUrl, detail: `autopilot(${planner.name}) ${ap.summary} in ${ap.steps} steps` };
+      recoveredBy = planner.name;
+    }
+    appendHistory(p.spaceId, { action: "post.publish", dryRun, postUrl: outcome.postUrl, chars: text.length, recoveredBy });
+    log("info", "published", { spaceId: p.spaceId, dryRun, postUrl: outcome.postUrl, recoveredBy });
     return {
-      result: okResult("post.publish", dryRun ? "테스트 실행(게시 안 함)" : "게시 완료", { postUrl: outcome.postUrl, dryRun, detail: outcome.detail ?? null }),
+      result: okResult("post.publish", dryRun ? "테스트 실행(게시 안 함)" : "게시 완료", { postUrl: outcome.postUrl, dryRun, detail: outcome.detail ?? null, recoveredBy }),
       spaceUpdate: { sessionState: "HEALTHY", ...(session.handle ? { handle: session.handle } : {}) },
     };
   } finally {
     await space.close();
     for (const m of mediaPaths) fs.rmSync(m, { force: true });
   }
+}
+
+/** 오토파일럿 플래너 선택: 테스트용 scripted, 아니면 설정 on + Codex 로그인 시 codex */
+function pickPlanner(ctx: JobContext): Planner | null {
+  const forced = process.env.AUTOMONEY_AUTOPILOT_PLANNER;
+  if (forced === "scripted") return scriptedPlanner;
+  if (forced === "off") return null;
+  if (!ctx.cfg.autopilot && forced !== "codex") return null;
+  const st = codexStatus();
+  if (!st.loggedIn) {
+    log("warn", "autopilot requested but codex not logged in", st);
+    return null;
+  }
+  return createCodexPlanner();
 }
 
 export async function handleCodexLogin(ctx: JobContext): Promise<JobOutcome> {

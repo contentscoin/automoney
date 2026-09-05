@@ -95,7 +95,12 @@ Convex 추가 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELE
 - 데스크톱(`apps/desktop`, Electron + Playwright): 트레이 + 최소 패널(페어링·상태), 딥링크 `automoney://pair?code=`, 스페이스별 격리 프로필·락·고정 지문, 오프스크린 실행, 쓰레드·X 레시피(세션 검증·게시), Codex 로그인 상태, `dist/cli.js` 로 Electron 없이 실행(`pair`, `run --once`, `status`).
 - 화면: `/dashboard/devices`, `/dashboard/spaces`, `/dashboard/jobs`, `/dashboard/schedules`, `/dashboard/telegram`.
 - 검증: `apps/desktop/scripts/e2e-agent.mjs` — 로컬 Convex 상대로 페어링 → 스페이스 생성 → 픽스처 페이지 세션 검증 → 승인 후 드라이런 게시 → 게시 URL 수집까지.
-- M3-2 로 이관: 인스타그램·틱톡·네이버 블로그 레시피, Codex 에이전트 루프(스냅샷→액션) 복구, 자동 업데이트, 설치 파일 서명.
+- M3-2(구현): 인스타그램·틱톡·네이버 블로그 레시피(픽스처 검증), **오토파일럿**(`src/agent/autopilot/`: 시맨틱 스냅샷→플래너→액션 루프, 금지 컨트롤 차단, 발행 게이트; 플래너는 `codex exec` 또는 테스트용 scripted) — 레시피 실패 시 `autopilot: true` 설정 + Codex 로그인 상태면 자동 복구, 자동 업데이트(`src/updater.ts`, generic 피드, 유휴 확인 후 설치), electron-builder 서명·노터라이즈 설정과 `.github/workflows/desktop-build.yml`.
+- 남은 M3: 실제 SNS 에서 셀렉터 튜닝, Codex 플래너 실사용 검증, 설치 파일 서명 인증서 확보.
+
+### 데스크톱 배포·서명
+- 태그 `desktop-v*` 푸시 시 `desktop-build.yml` 이 Windows(NSIS)·macOS(dmg/zip) 를 빌드합니다. 시크릿 `CSC_LINK`/`CSC_KEY_PASSWORD`(코드사인 인증서 p12 base64/비밀번호), `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`(노터라이즈) 가 있으면 서명·노터라이즈, 없으면 서명 없이 빌드합니다. 자동 업데이트 피드는 변수 `AUTOMONEY_UPDATE_FEED_URL`(정적 호스팅에 `latest.yml`·설치 파일 업로드).
+- 에이전트 설정(`~/.automoney/config.json`): `autopilot`(레시피 실패 시 Codex 복구), `updateFeedUrl`, `browserChannel`, `headless`.
 
 ### M1 범위와 다음 단계
 - 구현: 회원·RBAC·총판 초대, KYC 제출·암호화·검수, 상품 CSV/Mock 동기화, 링크 발급·단축 URL·클릭 로그, 주문 웹훅(멱등·24h 재검증·취소 역분개), 유저/총판/수퍼어드민 대시보드(단일 요율 예상 수당, 간접구매는 수퍼어드민 전용).

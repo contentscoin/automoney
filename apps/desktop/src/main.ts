@@ -3,6 +3,7 @@ import path from "node:path";
 import { AgentLoop, type AgentStatus } from "./agent/loop";
 import { loadConfig, saveConfig, redactedConfig } from "./agent/config";
 import { log } from "./agent/logger";
+import { createUpdater, type UpdaterState } from "./updater";
 
 /**
  * automoney 데스크톱 에이전트 (Electron main). blogautomcp main.cjs 의 트레이·단일 인스턴스·딥링크·워치독 패턴 계승.
@@ -15,6 +16,7 @@ let panel: BrowserWindow | null = null;
 let isQuitting = false;
 let pendingPairCode: string | null = null;
 const appVersion = app.getVersion();
+let updaterState: { state: UpdaterState; detail?: string } = { state: "disabled" };
 
 const loop = new AgentLoop(
   {
@@ -106,7 +108,7 @@ if (!gotLock) {
     else app.setAsDefaultProtocolClient("automoney");
     if (app.isPackaged && process.platform === "win32") app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: ["--hidden"] });
 
-    ipcMain.handle("agent:status", (): AgentStatus => ({ ...loop.status }));
+    ipcMain.handle("agent:status", (): AgentStatus & { updater: typeof updaterState; version: string } => ({ ...loop.status, updater: updaterState, version: appVersion }));
     ipcMain.handle("agent:pair", async (_e, code: string) => {
       await loop.pair(String(code).toUpperCase().replace(/[^A-Z2-9]/g, ""));
       return redactedConfig(loadConfig());
@@ -122,6 +124,18 @@ if (!gotLock) {
     ensureTray();
     if (!process.argv.includes("--hidden")) showPanel();
     loop.start();
+    const updater = createUpdater({
+      app,
+      feedUrl: loadConfig().updateFeedUrl,
+      getBusy: () => loop.status.activeJob !== null,
+      onState: (state, detail) => {
+        updaterState = { state, detail };
+        panel?.webContents.send("agent:status", { ...loop.status, updater: updaterState, version: appVersion });
+        log("info", "updater", { state, detail });
+      },
+    });
+    void updater.start();
+    app.on("before-quit", () => updater.stop());
     const initial = process.argv.find((a) => a.startsWith("automoney://"));
     const code = pendingPairCode ?? (initial ? parsePairDeepLink(initial) : null);
     if (code) void handlePair(code);

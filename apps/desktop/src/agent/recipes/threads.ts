@@ -4,8 +4,12 @@ import { RESTRICTION_HINTS, type PlatformRecipe, type SessionCheck } from "./typ
 /** Threads (threads.net) 웹 레시피. 셀렉터는 접근성 이름 기반으로 유지해 UI 변경에 견디게 한다. */
 export const threadsRecipe: PlatformRecipe = {
   platform: "THREADS",
-  loginUrl: process.env.AUTOMONEY_THREADS_URL ?? "https://www.threads.net/login",
-  homeUrl: process.env.AUTOMONEY_THREADS_URL ?? "https://www.threads.net/",
+  get loginUrl() {
+    return process.env.AUTOMONEY_THREADS_URL ?? "https://www.threads.net/login";
+  },
+  get homeUrl() {
+    return process.env.AUTOMONEY_THREADS_URL ?? "https://www.threads.net/";
+  },
 
   async checkSession(page: Page): Promise<SessionCheck> {
     await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });

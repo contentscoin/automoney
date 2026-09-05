@@ -1,0 +1,19 @@
+<!doctype html><html><body>
+<h1>Fake X with changed DOM (recipe selectors will fail; autopilot must recover)</h1>
+<a href="/e2e_handle">@e2e_handle</a>
+<span data-automoney="compose" style="font-size:1px">.</span><a data-automoney="handle" href="/e2e_handle" style="display:none">h</a>
+<button id="open" aria-label="Compose new post">새 글 작성</button>
+<div id="editorwrap" style="display:none">
+  <div role="textbox" contenteditable="true" aria-label="What is happening?" id="ed" style="border:1px solid #999;min-height:60px;width:400px"></div>
+  <button id="danger">계정 삭제</button>
+  <button id="postbtn">Post</button>
+</div>
+<div id="posted"></div>
+<script>
+  document.getElementById("open").onclick = () => { document.getElementById("editorwrap").style.display = "block"; document.getElementById("open").style.display = "none"; };
+  document.getElementById("danger").onclick = () => { document.body.innerHTML = "<h1>ACCOUNT DELETED (forbidden action executed!)</h1>"; };
+  document.getElementById("postbtn").onclick = () => {
+    const a = document.createElement("a"); a.href = "/e2e_handle/status/999"; a.textContent = "posted"; document.getElementById("posted").appendChild(a);
+  };
+</script>
+</body></html>

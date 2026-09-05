@@ -1,0 +1,15 @@
+<!doctype html><html><body>
+<h1>Fake TikTok Studio upload (fixture)</h1>
+<a data-automoney="handle" href="/@e2e_tok">profile</a>
+<input type="file" id="file" accept="video/*" />
+<div data-automoney="editor" contenteditable="true" data-e2e="caption-input" style="border:1px solid #999;min-height:40px;width:300px;display:none" id="cap"></div>
+<button data-automoney="post" id="post" data-e2e="post_video_button" disabled>게시</button>
+<div id="result"></div>
+<script>
+  document.getElementById("file").onchange = () => { document.getElementById("cap").style.display = "block"; document.getElementById("post").disabled = false; };
+  document.getElementById("post").onclick = () => {
+    const a = document.createElement("a"); a.setAttribute("data-automoney", "post-link"); a.href = "/@e2e_tok/video/7000000000000000001"; a.textContent = "posted";
+    document.getElementById("result").appendChild(a);
+  };
+</script>
+</body></html>

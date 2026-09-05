@@ -4,8 +4,12 @@ import { RESTRICTION_HINTS, type PlatformRecipe, type SessionCheck } from "./typ
 /** X (x.com) 웹 레시피 */
 export const xRecipe: PlatformRecipe = {
   platform: "X",
-  loginUrl: process.env.AUTOMONEY_X_URL ?? "https://x.com/i/flow/login",
-  homeUrl: process.env.AUTOMONEY_X_URL ?? "https://x.com/home",
+  get loginUrl() {
+    return process.env.AUTOMONEY_X_URL ?? "https://x.com/i/flow/login";
+  },
+  get homeUrl() {
+    return process.env.AUTOMONEY_X_URL ?? "https://x.com/home";
+  },
 
   async checkSession(page: Page): Promise<SessionCheck> {
     await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
