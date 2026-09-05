@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import {
   extractAtoms,
   extractMagazine,
@@ -7,7 +7,7 @@ import {
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { action, internalMutation, mutation, query } from "./_generated/server";
+import { action, internalMutation, mutation, query, type QueryCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireSuperAdmin, requireUser } from "./lib/rbac";
@@ -147,26 +147,32 @@ export const saveExtracted = internalMutation({
   },
 });
 
+const listArgs = { limit: v.optional(v.number()) };
+
+export async function listMagazines(ctx: QueryCtx, args: ObjectType<typeof listArgs>) {
+  const rows = await ctx.db
+    .query("magazines")
+    .withIndex("by_status", (q) => q.eq("status", "ACTIVE"))
+    .order("desc")
+    .take(Math.min(args.limit ?? 30, 100));
+  return rows.map((m) => ({
+    _id: m._id,
+    title: m.title,
+    description: m.description ?? null,
+    heroImage: m.heroImage ?? null,
+    publishedAt: m.publishedAt ?? null,
+    ingestedAt: m.ingestedAt,
+    atomCount: m.atomCount,
+    productCount: m.productIds.length,
+    sourceUrl: m.sourceUrl ?? null,
+  }));
+}
+
 export const list = query({
-  args: { limit: v.optional(v.number()) },
+  args: listArgs,
   handler: async (ctx, args) => {
     await requireUser(ctx);
-    const rows = await ctx.db
-      .query("magazines")
-      .withIndex("by_status", (q) => q.eq("status", "ACTIVE"))
-      .order("desc")
-      .take(Math.min(args.limit ?? 30, 100));
-    return rows.map((m) => ({
-      _id: m._id,
-      title: m.title,
-      description: m.description ?? null,
-      heroImage: m.heroImage ?? null,
-      publishedAt: m.publishedAt ?? null,
-      ingestedAt: m.ingestedAt,
-      atomCount: m.atomCount,
-      productCount: m.productIds.length,
-      sourceUrl: m.sourceUrl ?? null,
-    }));
+    return await listMagazines(ctx, args);
   },
 });
 

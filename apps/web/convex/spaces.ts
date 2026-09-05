@@ -1,6 +1,7 @@
-import { v } from "convex/values";
+import type { Doc } from "./_generated/dataModel";
+import { v, type ObjectType } from "convex/values";
 import { PLATFORM_LIMITS } from "@automoney/shared";
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx, type MutationCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
@@ -9,63 +10,78 @@ import { enqueueJob } from "./jobs";
 const platformValidator = v.union(v.literal("THREADS"), v.literal("X"), v.literal("INSTAGRAM"), v.literal("TIKTOK"), v.literal("NAVER_BLOG"));
 
 /** 스페이스 생성: 활성 디바이스 필요. 로컬 프로필 생성은 space.create 잡으로 에이전트가 수행. */
+const createArgs = { platform: platformValidator, name: v.string(), handle: v.optional(v.string()) };
+
+export async function createSpaceFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof createArgs>, source: "WEB" | "MCP" = "WEB") {
+  const device = (await ctx.db.query("devices").withIndex("by_user", (q) => q.eq("userId", user._id).eq("status", "ACTIVE")).collect())[0];
+  if (!device) fail("CONFLICT", "먼저 데스크톱 에이전트를 페어링하세요.");
+  const name = args.name.trim().slice(0, 40);
+  if (name.length < 1) fail("INVALID_ARGUMENT", "스페이스 이름을 입력하세요.");
+  const now = Date.now();
+  const spaceId = await ctx.db.insert("spaces", {
+    userId: user._id,
+    deviceId: device._id,
+    platform: args.platform,
+    name,
+    handle: args.handle?.trim().replace(/^@/, "") || undefined,
+    pinned: false,
+    sessionState: "CREATED",
+    dailyPostLimit: PLATFORM_LIMITS[args.platform].dailyDefault,
+    createdAt: now,
+  });
+  const jobId = await enqueueJob(ctx, { userId: user._id, jobType: "space.create", payload: { spaceId, platform: args.platform, name }, spaceId, source });
+  await audit(ctx, { actorUserId: user._id, action: "space.create", metadata: { spaceId, platform: args.platform } });
+  return { spaceId, jobId };
+}
+
 export const create = mutation({
-  args: { platform: platformValidator, name: v.string(), handle: v.optional(v.string()) },
+  args: createArgs,
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    const device = (await ctx.db.query("devices").withIndex("by_user", (q) => q.eq("userId", user._id).eq("status", "ACTIVE")).collect())[0];
-    if (!device) fail("CONFLICT", "먼저 데스크톱 에이전트를 페어링하세요.");
-    const name = args.name.trim().slice(0, 40);
-    if (name.length < 1) fail("INVALID_ARGUMENT", "스페이스 이름을 입력하세요.");
-    const now = Date.now();
-    const spaceId = await ctx.db.insert("spaces", {
-      userId: user._id,
-      deviceId: device._id,
-      platform: args.platform,
-      name,
-      handle: args.handle?.trim().replace(/^@/, "") || undefined,
-      pinned: false,
-      sessionState: "CREATED",
-      dailyPostLimit: PLATFORM_LIMITS[args.platform].dailyDefault,
-      createdAt: now,
-    });
-    const jobId = await enqueueJob(ctx, { userId: user._id, jobType: "space.create", payload: { spaceId, platform: args.platform, name }, spaceId, source: "WEB" });
-    await audit(ctx, { actorUserId: user._id, action: "space.create", metadata: { spaceId, platform: args.platform } });
-    return { spaceId, jobId };
+    return await createSpaceFor(ctx, await requireUser(ctx), args);
   },
 });
+
+export async function listSpacesFor(ctx: QueryCtx, user: Doc<"users">) {
+  const rows = await ctx.db.query("spaces").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
+  return rows
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((s) => ({
+      _id: s._id,
+      platform: s.platform,
+      name: s.name,
+      handle: s.handle ?? null,
+      pinned: s.pinned,
+      sessionState: s.sessionState,
+      dailyPostLimit: s.dailyPostLimit,
+      lastCheckedAt: s.lastCheckedAt ?? null,
+      lastError: s.lastError ?? null,
+      locked: !!s.lockJobId,
+      authMode: s.authMode ?? "BROWSER",
+      snsAccountId: s.snsAccountId ?? null,
+      createdAt: s.createdAt,
+    }));
+}
 
 export const listMine = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
-    const rows = await ctx.db.query("spaces").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
-    return rows
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .map((s) => ({
-        _id: s._id,
-        platform: s.platform,
-        name: s.name,
-        handle: s.handle ?? null,
-        pinned: s.pinned,
-        sessionState: s.sessionState,
-        dailyPostLimit: s.dailyPostLimit,
-        lastCheckedAt: s.lastCheckedAt ?? null,
-        lastError: s.lastError ?? null,
-        locked: !!s.lockJobId,
-        createdAt: s.createdAt,
-      }));
+    return await listSpacesFor(ctx, await requireUser(ctx));
   },
 });
 
+const setPinnedArgs = { spaceId: v.id("spaces"), pinned: v.boolean() };
+
+export async function setPinnedFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof setPinnedArgs>) {
+  const s = await ctx.db.get(args.spaceId);
+  if (!s || s.userId !== user._id) fail("NOT_FOUND", "스페이스를 찾을 수 없습니다.");
+  await ctx.db.patch(s._id, { pinned: args.pinned });
+  await audit(ctx, { actorUserId: user._id, action: "space.pin", metadata: { spaceId: s._id, pinned: args.pinned } });
+}
+
 export const setPinned = mutation({
-  args: { spaceId: v.id("spaces"), pinned: v.boolean() },
+  args: setPinnedArgs,
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    const s = await ctx.db.get(args.spaceId);
-    if (!s || s.userId !== user._id) fail("NOT_FOUND", "스페이스를 찾을 수 없습니다.");
-    await ctx.db.patch(s._id, { pinned: args.pinned });
-    await audit(ctx, { actorUserId: user._id, action: "space.pin", metadata: { spaceId: s._id, pinned: args.pinned } });
+    return await setPinnedFor(ctx, await requireUser(ctx), args);
   },
 });
 

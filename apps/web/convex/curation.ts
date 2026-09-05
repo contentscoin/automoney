@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -9,8 +9,7 @@ import {
   internalQuery,
   mutation,
   query,
-  type MutationCtx,
-} from "./_generated/server";
+  type MutationCtx, type QueryCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireSuperAdmin, requireUser } from "./lib/rbac";
@@ -28,43 +27,49 @@ const kindValidator = v.union(
 );
 const DAY = 86_400_000;
 
-export const list = query({
-  args: {
+const listArgs = {
     kind: v.optional(kindValidator),
     productId: v.optional(v.id("products")),
     limit: v.optional(v.number()),
-  },
+  };
+
+export async function listCuration(ctx: QueryCtx, args: ObjectType<typeof listArgs>) {
+  let rows;
+  if (args.productId)
+    rows = await ctx.db
+      .query("curationItems")
+      .withIndex("by_product", (q) =>
+        args.kind
+          ? q.eq("productId", args.productId).eq("kind", args.kind)
+          : q.eq("productId", args.productId),
+      )
+      .collect();
+  else if (args.kind)
+    rows = await ctx.db
+      .query("curationItems")
+      .withIndex("by_kind", (q) =>
+        q.eq("kind", args.kind!).eq("status", "ACTIVE"),
+      )
+      .order("desc")
+      .take(Math.min(args.limit ?? 50, 200));
+  else
+    rows = await ctx.db
+      .query("curationItems")
+      .order("desc")
+      .take(Math.min(args.limit ?? 100, 300));
+  const now = Date.now();
+  return rows
+    .filter(
+      (r) => r.status === "ACTIVE" && (!r.expiresAt || r.expiresAt > now),
+    )
+    .sort((a, b) => b.score - a.score || b.fetchedAt - a.fetchedAt);
+}
+
+export const list = query({
+  args: listArgs,
   handler: async (ctx, args) => {
     await requireUser(ctx);
-    let rows;
-    if (args.productId)
-      rows = await ctx.db
-        .query("curationItems")
-        .withIndex("by_product", (q) =>
-          args.kind
-            ? q.eq("productId", args.productId).eq("kind", args.kind)
-            : q.eq("productId", args.productId),
-        )
-        .collect();
-    else if (args.kind)
-      rows = await ctx.db
-        .query("curationItems")
-        .withIndex("by_kind", (q) =>
-          q.eq("kind", args.kind!).eq("status", "ACTIVE"),
-        )
-        .order("desc")
-        .take(Math.min(args.limit ?? 50, 200));
-    else
-      rows = await ctx.db
-        .query("curationItems")
-        .order("desc")
-        .take(Math.min(args.limit ?? 100, 300));
-    const now = Date.now();
-    return rows
-      .filter(
-        (r) => r.status === "ACTIVE" && (!r.expiresAt || r.expiresAt > now),
-      )
-      .sort((a, b) => b.score - a.score || b.fetchedAt - a.fetchedAt);
+    return await listCuration(ctx, args);
   },
 });
 

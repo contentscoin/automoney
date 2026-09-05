@@ -1,7 +1,7 @@
-import { v } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import { APPROVAL_TTL_MS, JOB_LEASE_MS, validatePublishPayload, type JobType, type PublishPayload } from "@automoney/shared";
 import type { Doc, Id } from "./_generated/dataModel";
-import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireUser, roleOf } from "./lib/rbac";
@@ -13,7 +13,10 @@ export const jobTypeValidator = v.union(
   v.literal("space.create"),
   v.literal("space.login"),
   v.literal("space.verify"),
-  v.literal("codex.login"), v.literal("content.generate"),
+  v.literal("codex.login"),
+  v.literal("content.generate"),
+  v.literal("post.readback"),
+  v.literal("meta.token_refresh"),
 );
 const sourceValidator = v.union(v.literal("WEB"), v.literal("SCHEDULE"), v.literal("TELEGRAM"), v.literal("MCP"), v.literal("SYSTEM"));
 
@@ -24,6 +27,8 @@ export interface EnqueueInput {
   spaceId?: Id<"spaces">;
   scheduleId?: Id<"schedules">;
   source: "WEB" | "SCHEDULE" | "TELEGRAM" | "MCP" | "SYSTEM";
+  executor?: "DESKTOP" | "CLOUD";
+  fallbackFromJobId?: Id<"agentJobs">;
   needsApproval?: boolean;
   runAfter?: number;
   idempotencyKey?: string;
@@ -40,13 +45,26 @@ export async function enqueueJob(ctx: MutationCtx, input: EnqueueInput): Promise
     if (err) fail("INVALID_ARGUMENT", `발행 내용 오류: ${err}`);
   }
   const now = Date.now();
-  return await ctx.db.insert("agentJobs", {
+  // 실행 주체: Meta API 로 연결된 스페이스의 발행·토큰 갱신은 클라우드(Convex 액션), 나머지는 데스크톱 에이전트 (ADR-0004)
+  let executor: "DESKTOP" | "CLOUD" = input.executor ?? "DESKTOP";
+  if (!input.executor && input.jobType === "post.publish" && input.spaceId) {
+    const space = await ctx.db.get(input.spaceId);
+    if (space?.authMode === "META_API" && space.snsAccountId) {
+      const acct = await ctx.db.get(space.snsAccountId);
+      if (acct?.status === "ACTIVE") executor = "CLOUD";
+    }
+  }
+  if (input.jobType === "meta.token_refresh") executor = "CLOUD";
+  const status = input.needsApproval ? "NEEDS_APPROVAL" : "QUEUED";
+  const id = await ctx.db.insert("agentJobs", {
     userId: input.userId,
     spaceId: input.spaceId,
     scheduleId: input.scheduleId,
     jobType: input.jobType,
     payload: input.payload,
-    status: input.needsApproval ? "NEEDS_APPROVAL" : "QUEUED",
+    status,
+    executor,
+    fallbackFromJobId: input.fallbackFromJobId,
     runAfter: input.runAfter ?? now,
     idempotencyKey: input.idempotencyKey,
     cancelRequested: false,
@@ -54,6 +72,8 @@ export async function enqueueJob(ctx: MutationCtx, input: EnqueueInput): Promise
     createdAt: now,
     updatedAt: now,
   });
+  if (executor === "CLOUD" && status === "QUEUED") await ctx.scheduler.runAfter(Math.max(0, (input.runAfter ?? now) - now), internal.meta.runCloudJob, { jobId: id });
+  return id;
 }
 
 async function ownSpace(ctx: MutationCtx, userId: Id<"users">, spaceId: Id<"spaces">): Promise<Doc<"spaces">> {
@@ -63,8 +83,7 @@ async function ownSpace(ctx: MutationCtx, userId: Id<"users">, spaceId: Id<"spac
 }
 
 /** 유저: 즉시 발행 잡 (웹) */
-export const enqueuePublish = mutation({
-  args: {
+const enqueuePublishArgs = {
     spaceId: v.id("spaces"),
     text: v.string(),
     mediaUrls: v.array(v.string()),
@@ -72,57 +91,68 @@ export const enqueuePublish = mutation({
     pieceId: v.optional(v.id("contentPieces")),
     requireApproval: v.optional(v.boolean()),
     dryRun: v.optional(v.boolean()),
-  },
+  };
+
+export async function enqueuePublishFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof enqueuePublishArgs>, source: "WEB" | "MCP" = "WEB") {
+  const space = await ownSpace(ctx, user._id, args.spaceId);
+  let text = args.text;
+  let mediaUrls = args.mediaUrls;
+  if (args.pieceId) {
+    const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
+    if (!text.trim()) text = piece.text;
+    if (mediaUrls.length === 0) mediaUrls = piece.mediaUrls;
+  }
+  let linkUrl: string | null = null;
+  if (args.linkId) {
+    const link = await ctx.db.get(args.linkId);
+    if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
+    linkUrl = `${process.env.SITE_URL ?? ""}/r/${link.shortCode}`;
+  }
+  const payload: PublishPayload & { pieceId?: string } = { spaceId: space._id, platform: space.platform, text, mediaUrls, linkUrl, dryRun: args.dryRun ?? false, ...(args.pieceId ? { pieceId: args.pieceId } : {}) };
+  const id = await enqueueJob(ctx, { userId: user._id, jobType: "post.publish", payload: payload as unknown as Record<string, unknown>, spaceId: space._id, source, needsApproval: args.requireApproval ?? false });
+  await audit(ctx, { actorUserId: user._id, action: "job.enqueuePublish", metadata: { jobId: id, spaceId: space._id, pieceId: args.pieceId ?? null } });
+  return id;
+}
+
+export const enqueuePublish = mutation({
+  args: enqueuePublishArgs,
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    const space = await ownSpace(ctx, user._id, args.spaceId);
-    let text = args.text;
-    let mediaUrls = args.mediaUrls;
-    if (args.pieceId) {
-      const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
-      if (!text.trim()) text = piece.text;
-      if (mediaUrls.length === 0) mediaUrls = piece.mediaUrls;
-    }
-    let linkUrl: string | null = null;
-    if (args.linkId) {
-      const link = await ctx.db.get(args.linkId);
-      if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
-      linkUrl = `${process.env.SITE_URL ?? ""}/r/${link.shortCode}`;
-    }
-    const payload: PublishPayload & { pieceId?: string } = { spaceId: space._id, platform: space.platform, text, mediaUrls, linkUrl, dryRun: args.dryRun ?? false, ...(args.pieceId ? { pieceId: args.pieceId } : {}) };
-    const id = await enqueueJob(ctx, { userId: user._id, jobType: "post.publish", payload: payload as unknown as Record<string, unknown>, spaceId: space._id, source: "WEB", needsApproval: args.requireApproval ?? false });
-    await audit(ctx, { actorUserId: user._id, action: "job.enqueuePublish", metadata: { jobId: id, spaceId: space._id, pieceId: args.pieceId ?? null } });
-    return id;
+    return await enqueuePublishFor(ctx, await requireUser(ctx), args);
   },
 });
 
+const listMineArgs = { limit: v.optional(v.number()) };
+
+export async function listJobsFor(ctx: QueryCtx, user: Doc<"users">, args: ObjectType<typeof listMineArgs>) {
+  const rows = await ctx.db.query("agentJobs").withIndex("by_user", (q) => q.eq("userId", user._id)).order("desc").take(Math.min(args.limit ?? 50, 200));
+  const out = [];
+  for (const j of rows) {
+    const space = j.spaceId ? await ctx.db.get(j.spaceId) : null;
+    out.push({
+      _id: j._id,
+      jobType: j.jobType,
+      status: j.status,
+      stage: j.stage ?? null,
+      progress: j.progress ?? null,
+      source: j.source,
+      spaceName: space?.name ?? null,
+      platform: space?.platform ?? null,
+      preview: typeof j.payload?.text === "string" ? String(j.payload.text).slice(0, 80) : null,
+      errorCode: j.errorCode ?? null,
+      errorMessage: j.errorMessage ?? null,
+      result: j.result ?? null,
+      runAfter: j.runAfter,
+      createdAt: j.createdAt,
+      finishedAt: j.finishedAt ?? null,
+    });
+  }
+  return out;
+}
+
 export const listMine = query({
-  args: { limit: v.optional(v.number()) },
+  args: listMineArgs,
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    const rows = await ctx.db.query("agentJobs").withIndex("by_user", (q) => q.eq("userId", user._id)).order("desc").take(Math.min(args.limit ?? 50, 200));
-    const out = [];
-    for (const j of rows) {
-      const space = j.spaceId ? await ctx.db.get(j.spaceId) : null;
-      out.push({
-        _id: j._id,
-        jobType: j.jobType,
-        status: j.status,
-        stage: j.stage ?? null,
-        progress: j.progress ?? null,
-        source: j.source,
-        spaceName: space?.name ?? null,
-        platform: space?.platform ?? null,
-        preview: typeof j.payload?.text === "string" ? String(j.payload.text).slice(0, 80) : null,
-        errorCode: j.errorCode ?? null,
-        errorMessage: j.errorMessage ?? null,
-        result: j.result ?? null,
-        runAfter: j.runAfter,
-        createdAt: j.createdAt,
-        finishedAt: j.finishedAt ?? null,
-      });
-    }
-    return out;
+    return await listJobsFor(ctx, await requireUser(ctx), args);
   },
 });
 
@@ -134,22 +164,28 @@ export const approve = mutation({
     if (!j || j.userId !== user._id) fail("NOT_FOUND", "작업을 찾을 수 없습니다.");
     if (j.status !== "NEEDS_APPROVAL") fail("CONFLICT", "승인 대기 상태가 아닙니다.");
     await ctx.db.patch(j._id, { status: "QUEUED", runAfter: Date.now(), updatedAt: Date.now() });
+    if (j.executor === "CLOUD") await ctx.scheduler.runAfter(0, internal.meta.runCloudJob, { jobId: j._id });
     await audit(ctx, { actorUserId: user._id, action: "job.approve", metadata: { jobId: j._id } });
   },
 });
 
+const cancelArgs = { jobId: v.id("agentJobs") };
+
+export async function cancelJobFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof cancelArgs>) {
+  const j = await ctx.db.get(args.jobId);
+  if (!j || j.userId !== user._id) fail("NOT_FOUND", "작업을 찾을 수 없습니다.");
+  const now = Date.now();
+  if (j.status === "QUEUED" || j.status === "NEEDS_APPROVAL") {
+    await ctx.db.patch(j._id, { status: "CANCELLED", finishedAt: now, updatedAt: now, errorCode: "JOB_CANCELLED" });
+  } else if (j.status === "RUNNING") {
+    await ctx.db.patch(j._id, { cancelRequested: true, updatedAt: now });
+  } else fail("CONFLICT", "이미 종료된 작업입니다.");
+}
+
 export const cancel = mutation({
-  args: { jobId: v.id("agentJobs") },
+  args: cancelArgs,
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    const j = await ctx.db.get(args.jobId);
-    if (!j || j.userId !== user._id) fail("NOT_FOUND", "작업을 찾을 수 없습니다.");
-    const now = Date.now();
-    if (j.status === "QUEUED" || j.status === "NEEDS_APPROVAL") {
-      await ctx.db.patch(j._id, { status: "CANCELLED", finishedAt: now, updatedAt: now, errorCode: "JOB_CANCELLED" });
-    } else if (j.status === "RUNNING") {
-      await ctx.db.patch(j._id, { cancelRequested: true, updatedAt: now });
-    } else fail("CONFLICT", "이미 종료된 작업입니다.");
+    return await cancelJobFor(ctx, await requireUser(ctx), args);
   },
 });
 

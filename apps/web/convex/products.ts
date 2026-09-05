@@ -1,7 +1,7 @@
-import { v } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import { parseProductCsv } from "@automoney/shared";
 import { internal } from "./_generated/api";
-import { action, internalMutation, mutation, query } from "./_generated/server";
+import { action, internalMutation, mutation, query, type QueryCtx } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { audit } from "./lib/audit";
 import type { AttrangsProduct } from "./lib/attrangs/adapter";
@@ -21,23 +21,29 @@ const productInput = v.object({
   status: productStatusValidator,
 });
 
-export const search = query({
-  args: { term: v.optional(v.string()), limit: v.optional(v.number()) },
-  handler: async (ctx, args) => {
-    await requireUser(ctx);
-    const limit = Math.min(Math.max(args.limit ?? 30, 1), 100);
-    const term = args.term?.trim();
-    if (term) {
-      return await ctx.db
-        .query("products")
-        .withSearchIndex("search_name", (q) => q.search("name", term).eq("status", "ACTIVE"))
-        .take(limit);
-    }
+const searchArgs = { term: v.optional(v.string()), limit: v.optional(v.number()) };
+
+export async function searchProducts(ctx: QueryCtx, args: ObjectType<typeof searchArgs>) {
+  const limit = Math.min(Math.max(args.limit ?? 30, 1), 100);
+  const term = args.term?.trim();
+  if (term) {
     return await ctx.db
       .query("products")
-      .withIndex("by_status", (q) => q.eq("status", "ACTIVE"))
-      .order("desc")
+      .withSearchIndex("search_name", (q) => q.search("name", term).eq("status", "ACTIVE"))
       .take(limit);
+  }
+  return await ctx.db
+    .query("products")
+    .withIndex("by_status", (q) => q.eq("status", "ACTIVE"))
+    .order("desc")
+    .take(limit);
+}
+
+export const search = query({
+  args: searchArgs,
+  handler: async (ctx, args) => {
+    await requireUser(ctx);
+    return await searchProducts(ctx, args);
   },
 });
 

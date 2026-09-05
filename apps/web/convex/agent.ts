@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { JOB_LEASE_MS } from "@automoney/shared";
 import { internal } from "./_generated/api";
 import { ingestGeneratedJob } from "./content";
+import { ingestReadbackJob, recordPublishedPost } from "./analytics";
 import type { Id } from "./_generated/dataModel";
 import { httpAction, internalMutation, internalQuery, type ActionCtx } from "./_generated/server";
 import { sha256Hex } from "./lib/crypto";
@@ -119,6 +120,7 @@ export const claimJob = internalMutation({
       .order("asc")
       .take(20);
     for (const j of candidates) {
+      if (j.executor === "CLOUD") continue;
       if (j.spaceId) {
         const s = await ctx.db.get(j.spaceId);
         if (!s) {
@@ -191,6 +193,11 @@ export const completeJob = internalMutation({
       }
     }
     if (j.jobType === "content.generate" && args.status === "SUCCEEDED" && !cancelled) await ingestGeneratedJob(ctx, j._id);
+    if (args.status === "SUCCEEDED" && !cancelled) {
+      const done = (await ctx.db.get(j._id))!;
+      if (j.jobType === "post.publish") await recordPublishedPost(ctx, done);
+      if (j.jobType === "post.readback") await ingestReadbackJob(ctx, done);
+    }
     await ctx.scheduler.runAfter(0, internal.telegram.notifyJob, { jobId: j._id });
     return { ok: true as const };
   },

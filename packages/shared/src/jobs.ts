@@ -1,6 +1,16 @@
 import type { Channel, ContentAtom, ProductBrief } from "./content";
 /** 데스크톱 에이전트 ↔ 클라우드 잡 계약 (docs/01-architecture.md §2.2) */
-export const JOB_TYPES = ["post.publish", "space.create", "space.login", "space.verify", "codex.login", "content.generate"] as const;
+export const JOB_TYPES = ["post.publish", "space.create", "space.login", "space.verify", "codex.login", "content.generate", "post.readback", "meta.token_refresh"] as const;
+/** 잡 실행 주체: DESKTOP = 유저 PC 에이전트, CLOUD = Convex 액션(Meta API 발행·토큰 갱신) */
+export const JOB_EXECUTORS = ["DESKTOP", "CLOUD"] as const;
+export type JobExecutor = (typeof JOB_EXECUTORS)[number];
+export interface ReadbackPayload {
+  spaceId: string;
+  platform: SnsPlatform;
+  postUrl: string;
+  metricsId: string;
+  window: "24h" | "72h" | "7d";
+}
 export type JobType = (typeof JOB_TYPES)[number];
 
 export const JOB_STATUSES = ["NEEDS_APPROVAL", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"] as const;
@@ -13,6 +23,13 @@ export const SPACE_STATES = ["CREATED", "LOGIN_REQUIRED", "HEALTHY", "RUNNING", 
 export type SpaceState = (typeof SPACE_STATES)[number];
 
 export const AGENT_ERROR_CODES = [
+  "META_NOT_CONNECTED",
+  "META_TOKEN_EXPIRED",
+  "META_PERMISSION",
+  "META_RATE_LIMITED",
+  "META_PUBLISH_FAILED",
+  "META_CONFIG",
+  "READBACK_FAILED",
   "SPACE_LOCKED",
   "SPACE_SESSION_EXPIRED",
   "SPACE_ACCOUNT_RESTRICTED",
@@ -108,4 +125,8 @@ export interface ContentGeneratePayload {
   magazineId?: string | null;
   magazineTitle?: string | null;
   brand?: string;
+  /** 분석 루프 플레이북 힌트(승격된 패턴) */
+  playbook?: string[];
+  /** 거절 사유 상위 패턴(피해야 할 것) */
+  avoid?: string[];
 }

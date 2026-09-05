@@ -137,3 +137,8 @@
 - 모든 write 툴은 잡 id를 즉시 반환하고 결과는 `job_get`으로 조회(장시간 작업은 데스크톱에서 수행되므로 비동기).
 - 결과 봉투는 `automoney.job-result/v1`(01 §2.2). 위험 툴(`post_publish`, `space_create`)은 `confirmed` 없이 호출 시 미리보기만 반환.
 - 레이트리밋: IP 600 req/min, 유저 120 calls/min(blogautomcp 값 유지). 최소 데스크톱 버전 미달 시 `APP_UPDATE_REQUIRED`.
+
+## 6. 구현 메모 (M5, 2026-09-05)
+- **Meta**: `apps/web/convex/lib/meta/` — `adapter.ts` 계약, `graph.ts`(Threads `graph.threads.net/v1.0` 컨테이너→`threads_publish`, Instagram `graph.instagram.com/v21.0` `media`→`media_publish`, 릴스 `status_code` 폴링, 에러 코드 190/463/467→`META_TOKEN_EXPIRED`, 10/200/299→`META_PERMISSION`, 4/17/32→`META_RATE_LIMITED`), `mock.ts`(코드 `mock:<이름>`, 토큰 `expired-` 접두로 만료 시뮬레이션, 본문 `[meta-fail]` 로 발행 실패 시뮬레이션). 콜백 `GET /meta/callback`, 계정 `snsAccounts`(토큰 AES-GCM 암호화, `META_TOKEN_ENC_KEY` 없으면 `KYC_ENC_KEY`), 스페이스 `authMode=META_API` + `snsAccountId`. 발행 잡은 `agentJobs.executor=CLOUD` 로 분기해 `internal.meta.runCloudJob` 이 실행한다. 앱 리뷰 전 실 API 는 테스터 계정만 동작(§2.4).
+- **MCP**: `POST /mcp` 라우터(`convex/mcp.ts`), 툴 스키마 `packages/shared/src/mcpTools.ts`(21종 — §5.2 의 18종 + `content_get`, `space_pin`, `job_cancel` 분리). `link_issue` 만 액션 컨텍스트(아뜨랑스 어댑터)에서 처리하고 나머지는 하나의 내부 뮤테이션 디스패처(`lib/mcpTools.ts`)가 기존 `*For` 헬퍼를 호출한다. 레이트리밋은 `mcpRateBuckets` 고정 창(1분). OAuth 경로는 ADR-0007 참고.
+

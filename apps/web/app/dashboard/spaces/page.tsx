@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Badge } from "@/components/Badge";
 import { dateTime, errorMessage } from "@/lib/format";
 import { PLATFORM_LABEL, SPACE_STATE_LABEL, SPACE_STATE_TONE } from "@/lib/agent-format";
+import { MetaConnect } from "@/components/MetaConnect";
 
 type Platform = "THREADS" | "X" | "INSTAGRAM" | "TIKTOK" | "NAVER_BLOG";
 
@@ -29,6 +30,9 @@ export default function SpacesPage() {
         <h1 className="text-xl font-bold">브라우저 스페이스</h1>
         <p className="text-sm text-stone-500">SNS 계정 1개 = 스페이스 1개. 쿠키·세션·작업 이력이 계정별로 격리되며, 고정(핀)하면 다른 계정 로그인과 지문 변경이 차단됩니다. 최초 로그인은 내 PC 에서 직접 합니다.</p>
       </div>
+      <Suspense fallback={null}>
+        <MetaConnect />
+      </Suspense>
       {!hasDevice && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">먼저 <a className="underline" href="/dashboard/devices">데스크톱 에이전트</a>를 페어링하세요.</div>}
       <section className="card">
         <h2 className="font-semibold">새 스페이스</h2>
@@ -49,6 +53,7 @@ export default function SpacesPage() {
               <div className="flex items-center gap-1">
                 {s.pinned && <span className="badge bg-orange-100 text-orange-800">고정</span>}
                 <Badge value={SPACE_STATE_TONE[s.sessionState] ?? "PENDING"} label={SPACE_STATE_LABEL[s.sessionState]} />
+                {s.authMode === "META_API" && <span className="rounded bg-sky-50 px-2 py-0.5 text-xs text-sky-800" title="Meta API 로 발행(브라우저 불필요). 토큰 만료 시 브라우저 스페이스로 폴백">Meta API</span>}
               </div>
             </div>
             <div className="text-xs text-stone-500">일일 한도 {s.dailyPostLimit}회 · 마지막 확인 {s.lastCheckedAt ? dateTime(s.lastCheckedAt) : "-"}{s.locked ? " · 작업 진행 중" : ""}</div>

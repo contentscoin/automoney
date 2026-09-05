@@ -1,7 +1,8 @@
-import { v } from "convex/values";
+import type { Doc } from "./_generated/dataModel";
+import { v, type ObjectType } from "convex/values";
 import { computeNextRunAt, kstDayKey, parseTimeOfDay, validatePublishPayload, type PublishPayload } from "@automoney/shared";
 import { internal } from "./_generated/api";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query, type QueryCtx, type MutationCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireUser, roleOf } from "./lib/rbac";
@@ -10,8 +11,7 @@ import { enqueueJob } from "./jobs";
 
 const kindValidator = v.union(v.literal("ONE_SHOT"), v.literal("DAILY"), v.literal("WEEKLY"));
 
-export const upsert = mutation({
-  args: {
+const upsertArgs = {
     id: v.optional(v.id("schedules")),
     spaceId: v.id("spaces"),
     kind: kindValidator,
@@ -24,47 +24,56 @@ export const upsert = mutation({
     linkId: v.optional(v.id("marketingLinks")),
     pieceId: v.optional(v.id("contentPieces")),
     autoApprove: v.boolean(),
-  },
+  };
+
+export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof upsertArgs>) {
+  if (args.pieceId) {
+    const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
+    if (!args.text.trim()) args.text = piece.text;
+    if (args.mediaUrls.length === 0) args.mediaUrls = piece.mediaUrls;
+  }
+  const space = await ctx.db.get(args.spaceId);
+  if (!space || space.userId !== user._id) fail("NOT_FOUND", "스페이스를 찾을 수 없습니다.");
+  if (!parseTimeOfDay(args.timeOfDay)) fail("INVALID_ARGUMENT", "시간은 HH:MM 형식입니다.");
+  if (args.kind === "WEEKLY" && args.daysOfWeek.length === 0) fail("INVALID_ARGUMENT", "요일을 선택하세요.");
+  if (args.kind === "ONE_SHOT" && !args.runDate) fail("INVALID_ARGUMENT", "실행 일자를 입력하세요.");
+  if (args.jitterMinutes < 0 || args.jitterMinutes > 120) fail("INVALID_ARGUMENT", "지터는 0~120분입니다.");
+  if (args.linkId) {
+    const link = await ctx.db.get(args.linkId);
+    if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
+  }
+  const err = validatePublishPayload({ spaceId: space._id, platform: space.platform, text: args.text, mediaUrls: args.mediaUrls, linkUrl: args.linkId ? "https://x/r/XXXXXXX" : null });
+  if (err) fail("INVALID_ARGUMENT", `발행 내용 오류: ${err}`);
+  const { id, ...fields } = args;
+  const seed = id ?? `${space._id}:${Date.now()}`;
+  const nextRunAt = computeNextRunAt({ kind: args.kind, timeOfDay: args.timeOfDay, daysOfWeek: args.daysOfWeek, jitterMinutes: args.jitterMinutes, runDate: args.runDate ?? null }, Date.now(), seed) ?? undefined;
+  const doc = { ...fields, userId: user._id, enabled: true, nextRunAt };
+  const scheduleId = id ? (await ctx.db.patch(id, doc), id) : await ctx.db.insert("schedules", { ...doc, createdAt: Date.now() });
+  await audit(ctx, { actorUserId: user._id, action: "schedule.upsert", metadata: { scheduleId, kind: args.kind, nextRunAt: nextRunAt ?? null } });
+  return { scheduleId, nextRunAt: nextRunAt ?? null };
+}
+
+export const upsert = mutation({
+  args: upsertArgs,
   handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    if (args.pieceId) {
-      const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
-      if (!args.text.trim()) args.text = piece.text;
-      if (args.mediaUrls.length === 0) args.mediaUrls = piece.mediaUrls;
-    }
-    const space = await ctx.db.get(args.spaceId);
-    if (!space || space.userId !== user._id) fail("NOT_FOUND", "스페이스를 찾을 수 없습니다.");
-    if (!parseTimeOfDay(args.timeOfDay)) fail("INVALID_ARGUMENT", "시간은 HH:MM 형식입니다.");
-    if (args.kind === "WEEKLY" && args.daysOfWeek.length === 0) fail("INVALID_ARGUMENT", "요일을 선택하세요.");
-    if (args.kind === "ONE_SHOT" && !args.runDate) fail("INVALID_ARGUMENT", "실행 일자를 입력하세요.");
-    if (args.jitterMinutes < 0 || args.jitterMinutes > 120) fail("INVALID_ARGUMENT", "지터는 0~120분입니다.");
-    if (args.linkId) {
-      const link = await ctx.db.get(args.linkId);
-      if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
-    }
-    const err = validatePublishPayload({ spaceId: space._id, platform: space.platform, text: args.text, mediaUrls: args.mediaUrls, linkUrl: args.linkId ? "https://x/r/XXXXXXX" : null });
-    if (err) fail("INVALID_ARGUMENT", `발행 내용 오류: ${err}`);
-    const { id, ...fields } = args;
-    const seed = id ?? `${space._id}:${Date.now()}`;
-    const nextRunAt = computeNextRunAt({ kind: args.kind, timeOfDay: args.timeOfDay, daysOfWeek: args.daysOfWeek, jitterMinutes: args.jitterMinutes, runDate: args.runDate ?? null }, Date.now(), seed) ?? undefined;
-    const doc = { ...fields, userId: user._id, enabled: true, nextRunAt };
-    const scheduleId = id ? (await ctx.db.patch(id, doc), id) : await ctx.db.insert("schedules", { ...doc, createdAt: Date.now() });
-    await audit(ctx, { actorUserId: user._id, action: "schedule.upsert", metadata: { scheduleId, kind: args.kind, nextRunAt: nextRunAt ?? null } });
-    return { scheduleId, nextRunAt: nextRunAt ?? null };
+    return await upsertScheduleFor(ctx, await requireUser(ctx), args);
   },
 });
+
+export async function listSchedulesFor(ctx: QueryCtx, user: Doc<"users">) {
+  const rows = await ctx.db.query("schedules").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
+  const out = [];
+  for (const s of rows) {
+    const space = await ctx.db.get(s.spaceId);
+    out.push({ ...s, spaceName: space?.name ?? "(삭제됨)", platform: space?.platform ?? null, nextRunAt: s.nextRunAt ?? null, lastRunAt: s.lastRunAt ?? null });
+  }
+  return out.sort((a, b) => (a.nextRunAt ?? Infinity) - (b.nextRunAt ?? Infinity));
+}
 
 export const listMine = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
-    const rows = await ctx.db.query("schedules").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
-    const out = [];
-    for (const s of rows) {
-      const space = await ctx.db.get(s.spaceId);
-      out.push({ ...s, spaceName: space?.name ?? "(삭제됨)", platform: space?.platform ?? null, nextRunAt: s.nextRunAt ?? null, lastRunAt: s.lastRunAt ?? null });
-    }
-    return out.sort((a, b) => (a.nextRunAt ?? Infinity) - (b.nextRunAt ?? Infinity));
+    return await listSchedulesFor(ctx, await requireUser(ctx));
   },
 });
 

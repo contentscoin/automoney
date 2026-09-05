@@ -237,6 +237,8 @@ export interface GenerationInput {
   magazineTitle?: string | null;
   tone?: "polite" | "casual";
   brand?: string;
+  playbook?: string[];
+  avoid?: string[];
 }
 
 function won(n: number): string {
@@ -292,6 +294,8 @@ export function buildGenerationPrompt(input: GenerationInput): string {
     `상품: ${JSON.stringify(input.products)}`,
     `소재(원자): ${JSON.stringify(input.atoms.map((a) => ({ type: a.atomType, text: a.text })))}`,
     `채널 규격:\n${spec}`,
+    ...(input.playbook && input.playbook.length ? [`검증된 패턴(성과 데이터 기반, 우선 적용):\n${input.playbook.map((h) => `- ${h}`).join("\n")}`] : []),
+    ...(input.avoid && input.avoid.length ? [`피해야 할 것(거절 사유 상위):\n${input.avoid.map((h) => `- ${h}`).join("\n")}`] : []),
     '출력: JSON 배열만. 각 원소 {"channel":"<채널>","caption":"본문(줄바꿈 \\n)","hashtags":["태그"],"script":"숏폼 대본 또는 null"}',
   ].join("\n\n");
 }

@@ -315,12 +315,15 @@ const settlementView = (s: Doc<"settlements">) => ({
 });
 
 /** 유저: 본인 정산 히스토리 (USER 항목만; 총판 계정이면 ADMIN 차액 정산도 함께) */
+export async function listSettlementsFor(ctx: QueryCtx, user: Doc<"users">) {
+  const rows = await ctx.db.query("settlements").withIndex("by_beneficiary", (q) => q.eq("beneficiaryUserId", user._id)).collect();
+  return rows.sort((a, b) => b.month.localeCompare(a.month)).map(settlementView);
+}
+
 export const listMine = query({
   args: {},
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
-    const rows = await ctx.db.query("settlements").withIndex("by_beneficiary", (q) => q.eq("beneficiaryUserId", user._id)).collect();
-    return rows.sort((a, b) => b.month.localeCompare(a.month)).map(settlementView);
+    return await listSettlementsFor(ctx, await requireUser(ctx));
   },
 });
 

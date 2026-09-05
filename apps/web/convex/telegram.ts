@@ -10,6 +10,7 @@ import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
 import { kstMonth } from "./lib/time";
 import { enqueueJob } from "./jobs";
+import { weeklySummaryFor } from "./analytics";
 
 const BIND_CODE_LENGTH = 6;
 const BIND_TTL_MS = 10 * 60_000;
@@ -129,7 +130,7 @@ export const processUpdate = internalMutation({
 
     switch (cmd) {
       case "/help":
-        return reply(chatId, ["/status — 에이전트·스페이스 상태", "/earnings — 이번 달 실적·예상 수당", "/links — 최근 링크", "/schedule — 예약 목록", "/post <스페이스명> <내용> — 발행(승인 후 게시)", "/jobs — 최근 작업", "/content — 오늘 추천 콘텐츠 3개"].join("\n"), userId);
+        return reply(chatId, ["/status — 에이전트·스페이스 상태", "/earnings — 이번 달 실적·예상 수당", "/links — 최근 링크", "/schedule — 예약 목록", "/post <스페이스명> <내용> — 발행(승인 후 게시)", "/jobs — 최근 작업", "/content — 오늘 추천 콘텐츠 3개", "/report — 최근 7일 게시 성과"].join("\n"), userId);
       case "/status": {
         const devices = await ctx.db.query("devices").withIndex("by_user", (q) => q.eq("userId", userId).eq("status", "ACTIVE")).collect();
         const spaces = await ctx.db.query("spaces").withIndex("by_user", (q) => q.eq("userId", userId)).collect();
@@ -169,6 +170,11 @@ export const processUpdate = internalMutation({
         const jobs = await ctx.db.query("agentJobs").withIndex("by_user", (q) => q.eq("userId", userId)).order("desc").take(5);
         if (jobs.length === 0) return reply(chatId, "작업이 없습니다.", userId);
         return reply(chatId, jobs.map((j) => `- ${j.jobType} · ${j.status}${j.errorCode ? ` (${j.errorCode})` : ""} · ${fmtKst(j.createdAt)}`).join("\n"), userId);
+      }
+      case "/report": {
+        const r = await weeklySummaryFor(ctx, userId);
+        if (r.posts === 0) return reply(chatId, "최근 7일 게시물이 없습니다.", userId);
+        return reply(chatId, [`최근 7일 성과 (게시 ${r.posts}건 · 측정 ${r.measured}건)`, `반응(좋아요·댓글·저장·공유) ${r.engagement.toLocaleString("ko-KR")}`, `링크 클릭 ${r.clicks} · 주문 ${r.orders} · 매출 ${r.sales.toLocaleString("ko-KR")}원`, "자세히: 대시보드 > 성과 분석"].join("\n"), userId);
       }
       case "/content": {
         const mine = (await ctx.db.query("contentPieces").withIndex("by_owner", (q) => q.eq("ownerUserId", userId)).order("desc").take(20)).filter((p) => p.status === "APPROVED").slice(0, 3);
@@ -225,6 +231,7 @@ async function handleCallback(ctx: MutationCtx, binding: Doc<"telegramBindings">
   if (m[1] === "approve") {
     if (job.status !== "NEEDS_APPROVAL") return { toast: `이미 ${job.status} 상태입니다.` };
     await ctx.db.patch(job._id, { status: "QUEUED", runAfter: now, updatedAt: now });
+    if (job.executor === "CLOUD") await ctx.scheduler.runAfter(0, internal.meta.runCloudJob, { jobId: job._id });
     await audit(ctx, { actorUserId: binding.userId, action: "job.approve", metadata: { jobId: job._id, via: "telegram" } });
     return { text: "승인했습니다. 에이전트가 곧 게시합니다.", toast: "승인됨" };
   }

@@ -179,10 +179,11 @@ assert(run.processed === 1, "content.generate 잡 처리(template provider)");
 const genRes = (await client.query(api.jobs.listMine, {})).find((j) => j._id === genJob);
 assert(genRes?.status === "SUCCEEDED" && genRes?.result?.data?.generatedBy === "template", `생성 잡 SUCCEEDED (${genRes?.status} by=${genRes?.result?.data?.generatedBy} ${genRes?.errorMessage ?? ""})`);
 const lib = await client.query(api.content.listLibrary, {});
-assert(lib.length === 3, `라이브러리 조각 3개 (${lib.length})`);
-const approvedX = lib.find((p) => p.channel === "X" && p.status === "APPROVED");
+const mineLib = lib.filter((p) => p.mine);
+assert(mineLib.length === 3, `내 라이브러리 조각 3개 (${mineLib.length}, 공유 포함 ${lib.length})`);
+const approvedX = mineLib.find((p) => p.channel === "X" && p.status === "APPROVED");
 assert(approvedX && approvedX.hashtags.includes("광고"), `X 조각 자동 승인 + #광고 (${lib.map((p) => `${p.channel}:${p.status}:${p.qualityScore}`).join(", ")})`);
-assert(lib.find((p) => p.channel === "INSTAGRAM_REEL")?.script, "릴스 조각에 숏폼 대본 포함");
+assert(mineLib.find((p) => p.channel === "INSTAGRAM_REEL")?.script, "릴스 조각에 숏폼 대본 포함");
 const pieceJob = await client.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: approvedX._id, requireApproval: false });
 await cli("run", "--max", "1");
 const pieceRes = (await client.query(api.jobs.listMine, {})).find((j) => j._id === pieceJob);
@@ -192,9 +193,25 @@ await owner.mutation(api.content.setVisibility, { pieceId: approvedX._id, visibi
 const other = new ConvexHttpClient(CONVEX_URL);
 const otherRes = await other.action(api.auth.signIn, { provider: "password", params: { email: `agent2+${stamp}@test.com`, password: "Passw0rd!", flow: "signUp", name: "다른유저" } });
 other.setAuth(otherRes.tokens.token);
-assert((await other.query(api.content.listLibrary, {})).map((p) => p._id).join() === approvedX._id, "타 유저에게 공유 조각만 노출");
+const otherLib = await other.query(api.content.listLibrary, {});
+assert(otherLib.some((p) => p._id === approvedX._id) && otherLib.every((p) => !p.mine), "타 유저에게 공유 조각만 노출");
 const facts = await client.mutation(api.curation.buildProductFacts, { productId: magList.find((m) => m._id === mag.magazineId) && (await client.query(api.magazines.get, { magazineId: mag.magazineId })).products[0]._id });
 assert(facts.inserted + facts.updated === 5, "제품 정보 팩 5건");
 delete env.AUTOMONEY_CONTENT_PROVIDER;
+
+// ───────── M5: readback(post.readback) — 게시물 지표를 스페이스 세션으로 읽어 24h 스냅샷 확정 ─────────
+const metricsRow = await client.query(api.analytics.listMine, {});
+const target = metricsRow.posts.find((p) => p.jobId === pieceJob);
+assert(target && target.nextWindow === "24h", "게시 성공 → postMetrics 행(24h 대기)");
+env.AUTOMONEY_READBACK_URL = fx("fake-post.html");
+// 크론 대신 즉시 틱(24h 경과 시각으로) → 데스크톱 잡 생성
+const tickRes = await client.mutation(api.analytics.tickNow, { now: target.postedAt + 24 * 3600_000 + 1 });
+assert(tickRes.browser >= 1, `readback 틱 → 브라우저 잡 ${tickRes.browser}건`);
+run = JSON.parse(await cli("run", "--max", String(tickRes.browser)));
+assert(run.processed === tickRes.browser, "post.readback 잡 처리(픽스처 게시물 페이지)");
+const after = (await client.query(api.analytics.listMine, {})).posts.find((p) => p.jobId === pieceJob);
+assert(after.snapshots.length === 1 && after.snapshots[0].source === "BROWSER" && after.snapshots[0].likes === 12000, `24h 스냅샷 (좋아요 ${after.snapshots[0]?.likes}, 댓글 ${after.snapshots[0]?.comments})`);
+assert(after.nextWindow === "72h", "다음 창 72h 예약");
+delete env.AUTOMONEY_READBACK_URL;
 mediaServer.close();
-console.log("\nAGENT E2E OK (M3a + M3-2 + M4)");
+console.log("\nAGENT E2E OK (M3a + M3-2 + M4 + M5 readback)");

@@ -9,6 +9,9 @@ export type T = TestConvex<typeof schema>;
 export function setupEnv() {
   process.env.SUPER_ADMIN_EMAILS = "owner@automoney.test";
   process.env.REDIRECT_SHARED_SECRET = "redirect-secret";
+  process.env.SITE_URL = "https://app.automoney.test";
+  process.env.CONVEX_SITE_URL = "https://convex.automoney.test";
+  process.env.META_MODE = "mock";
   process.env.ATTRANGS_WEBHOOK_SECRET = "webhook-secret";
   // 32 bytes base64
   process.env.KYC_ENC_KEY = Buffer.from(new Uint8Array(32).fill(7)).toString("base64");

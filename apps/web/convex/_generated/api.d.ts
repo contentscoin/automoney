@@ -9,6 +9,7 @@
  */
 
 import type * as agent from "../agent.js";
+import type * as analytics from "../analytics.js";
 import type * as audit from "../audit.js";
 import type * as auth from "../auth.js";
 import type * as clicks from "../clicks.js";
@@ -28,6 +29,11 @@ import type * as lib_audit from "../lib/audit.js";
 import type * as lib_commissionEngine from "../lib/commissionEngine.js";
 import type * as lib_crypto from "../lib/crypto.js";
 import type * as lib_errors from "../lib/errors.js";
+import type * as lib_mcpTools from "../lib/mcpTools.js";
+import type * as lib_meta_adapter from "../lib/meta/adapter.js";
+import type * as lib_meta_graph from "../lib/meta/graph.js";
+import type * as lib_meta_index from "../lib/meta/index.js";
+import type * as lib_meta_mock from "../lib/meta/mock.js";
 import type * as lib_onboarding from "../lib/onboarding.js";
 import type * as lib_pieces from "../lib/pieces.js";
 import type * as lib_rbac from "../lib/rbac.js";
@@ -36,6 +42,8 @@ import type * as lib_stats from "../lib/stats.js";
 import type * as lib_time from "../lib/time.js";
 import type * as links from "../links.js";
 import type * as magazines from "../magazines.js";
+import type * as mcp from "../mcp.js";
+import type * as meta from "../meta.js";
 import type * as orders from "../orders.js";
 import type * as products from "../products.js";
 import type * as schedules from "../schedules.js";
@@ -53,6 +61,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   agent: typeof agent;
+  analytics: typeof analytics;
   audit: typeof audit;
   auth: typeof auth;
   clicks: typeof clicks;
@@ -72,6 +81,11 @@ declare const fullApi: ApiFromModules<{
   "lib/commissionEngine": typeof lib_commissionEngine;
   "lib/crypto": typeof lib_crypto;
   "lib/errors": typeof lib_errors;
+  "lib/mcpTools": typeof lib_mcpTools;
+  "lib/meta/adapter": typeof lib_meta_adapter;
+  "lib/meta/graph": typeof lib_meta_graph;
+  "lib/meta/index": typeof lib_meta_index;
+  "lib/meta/mock": typeof lib_meta_mock;
   "lib/onboarding": typeof lib_onboarding;
   "lib/pieces": typeof lib_pieces;
   "lib/rbac": typeof lib_rbac;
@@ -80,6 +94,8 @@ declare const fullApi: ApiFromModules<{
   "lib/time": typeof lib_time;
   links: typeof links;
   magazines: typeof magazines;
+  mcp: typeof mcp;
+  meta: typeof meta;
   orders: typeof orders;
   products: typeof products;
   schedules: typeof schedules;

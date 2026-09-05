@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildGenerationPrompt, okResult, parseGeneratedPieces, templateGenerate, type ContentGeneratePayload, type PublishPayload } from "@automoney/shared";
+import { buildGenerationPrompt, okResult, parseGeneratedPieces, templateGenerate, type ContentGeneratePayload, type PublishPayload, type ReadbackPayload } from "@automoney/shared";
 import { codexGenerateText } from "../codexText";
 import { codexStatus, startCodexLogin } from "../codex";
 import { createCodexPlanner, runAutopilot, scriptedPlanner, type Planner } from "../autopilot";
 import { log } from "../logger";
 import { getRecipe, type RecipeHelpers, type SessionCheck } from "../recipes";
+import { readPostMetrics } from "../recipes/readback";
 import { appendHistory, createSpace, openSpace, readMeta, writeMeta } from "../spaces/manager";
 import { JobError, type JobContext, type JobOutcome } from "./context";
 
@@ -214,4 +215,35 @@ export async function handleContentGenerate(ctx: JobContext, deps: { generate?: 
   }
   await ctx.checkpoint("done", 95);
   return { result: okResult("content.generate", `${pieces.length}개 조각 생성 (${generatedBy})`, { pieces, generatedBy, fallbackReason }) };
+}
+
+/** 게시물 지표 readback(분석 루프): 스페이스 세션으로 게시물 페이지를 열어 좋아요·댓글·조회 등을 읽는다 */
+export async function handleReadback(ctx: JobContext): Promise<JobOutcome> {
+  const p = ctx.job.payload as unknown as ReadbackPayload;
+  const recipe = getRecipe(p.platform);
+  if (!recipe) throw new JobError("RECIPE_UNSUPPORTED", `${p.platform} 은 아직 브라우저 레시피가 없습니다.`);
+  const url = process.env.AUTOMONEY_READBACK_URL ?? p.postUrl; // 테스트·E2E 픽스처 오버라이드
+  const space = await openSpace(ctx.cfg, p.spaceId, { visible: false, purpose: "readback", waitLockMs: 30_000 });
+  try {
+    await ctx.checkpoint("opening_post", 30);
+    await space.page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    const body = (await space.page.textContent("body").catch(() => "")) ?? "";
+    if (/log in|로그인/i.test(body) && !(await space.page.locator('[data-automoney="likes"]').count())) {
+      const session = await recipe.checkSession(space.page);
+      if (session.state !== "HEALTHY") throw new JobError("SPACE_SESSION_EXPIRED", "세션이 만료되어 지표를 읽을 수 없습니다.", { sessionState: "EXPIRED" });
+      await space.page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    }
+    await ctx.checkpoint("reading", 60);
+    const metrics = await readPostMetrics(space.page, p.platform);
+    if (Object.keys(metrics).length === 0) throw new JobError("READBACK_FAILED", "지표 요소를 찾지 못했습니다.");
+    appendHistory(p.spaceId, { action: "post.readback", window: p.window, metrics });
+    return { result: okResult("post.readback", `지표 수집 (${p.window})`, { metrics, window: p.window, metricsId: p.metricsId }) };
+  } finally {
+    await space.close();
+  }
+}
+
+/** meta.token_refresh 는 클라우드 전용 잡 — 데스크톱이 받으면 계약 위반 */
+export async function handleCloudOnly(ctx: JobContext): Promise<JobOutcome> {
+  throw new JobError("INTERNAL", `${ctx.job.jobType} 은 클라우드에서만 실행됩니다.`);
 }

@@ -109,9 +109,15 @@ Convex 추가 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELE
 - 태그 `desktop-v*` 푸시 시 `desktop-build.yml` 이 Windows(NSIS)·macOS(dmg/zip) 를 빌드합니다. 시크릿 `CSC_LINK`/`CSC_KEY_PASSWORD`(코드사인 인증서 p12 base64/비밀번호), `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`(노터라이즈) 가 있으면 서명·노터라이즈, 없으면 서명 없이 빌드합니다. 자동 업데이트 피드는 변수 `AUTOMONEY_UPDATE_FEED_URL`(정적 호스팅에 `latest.yml`·설치 파일 업로드).
 - 에이전트 설정(`~/.automoney/config.json`): `autopilot`(레시피 실패 시 Codex 복구), `updateFeedUrl`, `browserChannel`, `headless`.
 
+### M5 Meta API · Stateless MCP · 분석 루프 (구현)
+- **Meta API 발행**(ADR-0004): `convex/lib/meta/` 어댑터(`graph.ts` 실 Threads/Instagram Graph API, `mock.ts` 앱 자격증명 없이 전체 흐름 검증). `/dashboard/spaces` 에서 "스레드/인스타그램 연결" → OAuth(`/meta/callback`) → 장기 토큰 암호화 저장(`snsAccounts`) → `authMode=META_API` 스페이스(디바이스 불필요). 이 스페이스의 `post.publish` 는 `executor=CLOUD` 로 Convex 액션이 실행하고, 토큰 만료·권한 오류 시 같은 페이로드를 브라우저 스페이스 잡으로 자동 폴백(`fallbackFromJobId`). 만료 7일 전 `meta.token_refresh` 크론. `META_APP_ID/META_APP_SECRET` 이 있으면 실 API, 없거나 `META_MODE=mock` 이면 Mock.
+- **Stateless MCP**(ADR-0003·0007): `packages/shared/src/mcpTools.ts` 가 툴 카탈로그(21종) 단일 소스. `POST /mcp/{endpointId}.{secret}` 또는 `POST /mcp` + `Authorization: Bearer am_mcp_…`, JSON-RPC 2.0(`initialize`/`tools/list`/`tools/call`/`ping`), 세션 상태 없음. 스코프 `mcp:read|mcp:write|admin:read|super:read` 는 역할 범위로 제한, 레이트리밋 유저 120/min·IP 600/min, 위험 툴(`post_publish`·`space_create`)은 `confirmed:true` 없이는 미리보기, write 툴은 잡 id 반환 → `job_get` 폴링, 모든 호출 감사 기록, 응답 필드 화이트리스트(간접 구매는 `super:read` 만). `/dashboard/mcp` 에서 발급·폐기·Claude/Cursor 설정 스니펫. OAuth(PKCE·DCR) 경로는 후속.
+- **분석 루프**(docs/06 §5): 게시 성공 시 `postMetrics` 생성 → 1시간 크론이 24h/72h/7d 창마다 (a) Meta 계정은 insights API (b) 브라우저 스페이스는 데스크톱 잡 `post.readback`(레시피 공통 `readPostMetrics`, 픽스처 훅) (c) 원장(링크 클릭·주문·매출, 창 경계 고정)을 결합. 7d 확정 시 `experiments`(계정×채널×훅/CTA/시간대) 누적 → `evaluateLift`(표본≥20·+15%·z≥1.96) 통과 시 `playbooks` 승격 → `content.requestGenerate` 프롬프트에 "검증된 패턴"·"피해야 할 것(거절 사유)" 주입. 화면 `/dashboard/analytics`, `/super/analytics`(전역 실험 승격/철회), 텔레그램 `/report`.
+- 검증: shared 33 · convex-test 44 · desktop 22 테스트, `apps/web/scripts/e2e-mcp.mjs`(순수 JSON-RPC 클라이언트로 initialize→tools/list→product_search→link_issue→Meta mock 연결→post_publish(confirmed)→job_get→post_verify_published→post_schedule→earnings_get→폐기 401), `e2e-agent.mjs` 에 readback 잡 추가.
+
 ### M1 범위와 다음 단계
 - 구현: 회원·RBAC·총판 초대, KYC 제출·암호화·검수, 상품 CSV/Mock 동기화, 링크 발급·단축 URL·클릭 로그, 주문 웹훅(멱등·24h 재검증·취소 역분개), 유저/총판/수퍼어드민 대시보드(단일 요율 예상 수당, 간접구매는 수퍼어드민 전용).
-- 남은 로드맵: M5 Meta API·MCP·분석 루프(readback). 아뜨랑스 실제 API 어댑터는 규격 합의 후.
+- 남은 로드맵: MCP OAuth(PKCE·DCR) 경로, Meta 앱 리뷰 후 실 API 검증, 코디 제안 카드. 아뜨랑스 실제 API 어댑터는 규격 합의 후.
 
 ## 전제 (사용자 확정)
 - 아뜨랑스에는 현재 파트너 API가 없으므로 **automoney가 인터페이스 규격을 제안**하고 아뜨랑스가 구현합니다. 초기 폴백은 CSV 배치입니다.

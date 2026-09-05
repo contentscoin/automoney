@@ -287,7 +287,7 @@ export default defineSchema({
 
   spaces: defineTable({
     userId: v.id("users"),
-    deviceId: v.id("devices"),
+    deviceId: v.optional(v.id("devices")),
     platform: v.union(v.literal("THREADS"), v.literal("X"), v.literal("INSTAGRAM"), v.literal("TIKTOK"), v.literal("NAVER_BLOG")),
     name: v.string(),
     handle: v.optional(v.string()),
@@ -306,6 +306,8 @@ export default defineSchema({
     lastCheckedAt: v.optional(v.number()),
     lastError: v.optional(v.string()),
     lockJobId: v.optional(v.id("agentJobs")),
+    authMode: v.optional(v.union(v.literal("BROWSER"), v.literal("META_API"))),
+    snsAccountId: v.optional(v.id("snsAccounts")),
     createdAt: v.number(),
   })
     .index("by_user", ["userId"])
@@ -316,7 +318,9 @@ export default defineSchema({
     deviceId: v.optional(v.id("devices")),
     spaceId: v.optional(v.id("spaces")),
     scheduleId: v.optional(v.id("schedules")),
-    jobType: v.union(v.literal("post.publish"), v.literal("space.create"), v.literal("space.login"), v.literal("space.verify"), v.literal("codex.login"), v.literal("content.generate")),
+    jobType: v.union(v.literal("post.publish"), v.literal("space.create"), v.literal("space.login"), v.literal("space.verify"), v.literal("codex.login"), v.literal("content.generate"), v.literal("post.readback"), v.literal("meta.token_refresh")),
+    executor: v.optional(v.union(v.literal("DESKTOP"), v.literal("CLOUD"))),
+    fallbackFromJobId: v.optional(v.id("agentJobs")),
     payload: v.any(),
     status: v.union(
       v.literal("NEEDS_APPROVAL"),
@@ -509,5 +513,124 @@ export default defineSchema({
     reason: v.string(),
     snippet: v.optional(v.string()),
     createdAt: v.number(),
-  }).index("by_createdAt", ["createdAt"]),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_user", ["userId", "createdAt"]),
+
+  // ---- M5 Stateless MCP ----
+  mcpCredentials: defineTable({
+    userId: v.id("users"),
+    endpointId: v.string(),
+    secretHash: v.string(),
+    keyHash: v.string(),
+    label: v.string(),
+    scopes: v.array(v.string()),
+    status: v.union(v.literal("ACTIVE"), v.literal("REVOKED")),
+    lastUsedAt: v.optional(v.number()),
+    callCount: v.number(),
+    createdAt: v.number(),
+    revokedAt: v.optional(v.number()),
+  })
+    .index("by_user", ["userId", "createdAt"])
+    .index("by_endpointId", ["endpointId"])
+    .index("by_keyHash", ["keyHash"]),
+
+  mcpRateBuckets: defineTable({
+    key: v.string(),
+    windowStart: v.number(),
+    count: v.number(),
+  }).index("by_key", ["key"]),
+
+  // ---- M5 Meta API 계정 ----
+  snsAccounts: defineTable({
+    userId: v.id("users"),
+    platform: v.union(v.literal("THREADS"), v.literal("INSTAGRAM")),
+    providerUserId: v.string(),
+    username: v.optional(v.string()),
+    tokenEnc: v.string(),
+    tokenExpiresAt: v.number(),
+    scopes: v.array(v.string()),
+    status: v.union(v.literal("ACTIVE"), v.literal("EXPIRED"), v.literal("REVOKED")),
+    spaceId: v.optional(v.id("spaces")),
+    mode: v.union(v.literal("mock"), v.literal("graph")),
+    lastError: v.optional(v.string()),
+    lastRefreshedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId", "platform"])
+    .index("by_status_expiry", ["status", "tokenExpiresAt"]),
+
+  metaOauthStates: defineTable({
+    userId: v.id("users"),
+    platform: v.union(v.literal("THREADS"), v.literal("INSTAGRAM")),
+    state: v.string(),
+    expiresAt: v.number(),
+  }).index("by_state", ["state"]),
+
+  // ---- M5 분석 루프 ----
+  postMetrics: defineTable({
+    jobId: v.id("agentJobs"),
+    userId: v.id("users"),
+    spaceId: v.optional(v.id("spaces")),
+    snsAccountId: v.optional(v.id("snsAccounts")),
+    platform: v.string(),
+    channel: v.string(),
+    postUrl: v.string(),
+    externalPostId: v.optional(v.string()),
+    pieceId: v.optional(v.id("contentPieces")),
+    linkId: v.optional(v.id("marketingLinks")),
+    hookType: v.string(),
+    ctaType: v.string(),
+    hourKst: v.number(),
+    postedAt: v.number(),
+    snapshots: v.array(
+      v.object({
+        window: v.union(v.literal("24h"), v.literal("72h"), v.literal("7d")),
+        at: v.number(),
+        source: v.union(v.literal("META_API"), v.literal("BROWSER"), v.literal("LEDGER")),
+        impressions: v.optional(v.number()),
+        reach: v.optional(v.number()),
+        likes: v.optional(v.number()),
+        comments: v.optional(v.number()),
+        saves: v.optional(v.number()),
+        shares: v.optional(v.number()),
+        clicks: v.number(),
+        orders: v.number(),
+        sales: v.number(),
+      }),
+    ),
+    nextWindow: v.optional(v.union(v.literal("24h"), v.literal("72h"), v.literal("7d"))),
+    nextWindowAt: v.optional(v.number()),
+    pendingJobId: v.optional(v.id("agentJobs")),
+    done: v.boolean(),
+  })
+    .index("by_job", ["jobId"])
+    .index("by_user", ["userId", "postedAt"])
+    .index("by_due", ["done", "nextWindowAt"]),
+
+  experiments: defineTable({
+    scope: v.union(v.literal("USER"), v.literal("GLOBAL")),
+    userId: v.optional(v.id("users")),
+    channel: v.string(),
+    dimension: v.union(v.literal("HOOK"), v.literal("CTA"), v.literal("HOUR")),
+    variant: v.string(),
+    samples: v.number(),
+    sumClicks: v.number(),
+    sumOrders: v.number(),
+    sumSales: v.number(),
+    sumEngagement: v.number(),
+    status: v.union(v.literal("RUNNING"), v.literal("PROMOTED"), v.literal("RETIRED")),
+    lift: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_scope_user", ["scope", "userId", "channel"])
+    .index("by_scope_channel", ["scope", "channel", "dimension"]),
+
+  playbooks: defineTable({
+    scope: v.union(v.literal("USER"), v.literal("GLOBAL")),
+    userId: v.optional(v.id("users")),
+    channel: v.string(),
+    rules: v.array(v.object({ dimension: v.string(), variant: v.string(), lift: v.number(), samples: v.number(), promotedAt: v.number() })),
+    updatedAt: v.number(),
+  }).index("by_scope_user_channel", ["scope", "userId", "channel"]),
 });
