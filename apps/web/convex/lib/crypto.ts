@@ -60,3 +60,10 @@ export async function decryptField(keyB64: string, payload: string): Promise<str
   const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(ivB64) }, key, base64ToBytes(ctB64));
   return new TextDecoder().decode(pt);
 }
+
+/** PKCE S256: base64url(sha256(verifier)) */
+export async function sha256Base64Url(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return bytesToBase64(new Uint8Array(buf)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+

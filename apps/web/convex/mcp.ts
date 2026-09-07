@@ -25,6 +25,7 @@ import { fail } from "./lib/errors";
 import { requireUser, roleOf } from "./lib/rbac";
 import { issueLinkFor } from "./links";
 import { runMcpTool } from "./lib/mcpTools";
+import { isCredentialUsable } from "./oauth";
 
 const ALNUM = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
 const scopeValidator = v.union(v.literal("mcp:read"), v.literal("mcp:write"), v.literal("admin:read"), v.literal("super:read"));
@@ -79,7 +80,8 @@ export const listMine = query({
     const rows = await ctx.db.query("mcpCredentials").withIndex("by_user", (q) => q.eq("userId", user._id)).order("desc").collect();
     return {
       allowedScopes: allowedScopesForRole(roleOf(user)),
-      credentials: rows.map((c) => ({ _id: c._id, endpointId: c.endpointId, label: c.label, scopes: c.scopes, status: c.status, lastUsedAt: c.lastUsedAt ?? null, callCount: c.callCount, createdAt: c.createdAt, revokedAt: c.revokedAt ?? null })),
+      oauth: { serverUrl: `${process.env.CONVEX_SITE_URL ?? process.env.SITE_URL ?? ""}/mcp` },
+      credentials: rows.map((c) => ({ _id: c._id, endpointId: c.endpointId, label: c.label, scopes: c.scopes, status: c.status, lastUsedAt: c.lastUsedAt ?? null, callCount: c.callCount, createdAt: c.createdAt, revokedAt: c.revokedAt ?? null, kind: c.kind ?? "API_KEY", expiresAt: c.expiresAt ?? null })),
     };
   },
 });
@@ -108,7 +110,7 @@ export const authenticate = internalQuery({
     } else if (args.keyHash) {
       c = await ctx.db.query("mcpCredentials").withIndex("by_keyHash", (q) => q.eq("keyHash", args.keyHash!)).unique();
     }
-    if (!c || c.status !== "ACTIVE") return null;
+    if (!c || !isCredentialUsable(c)) return null;
     const u = await ctx.db.get(c.userId);
     if (!u || (u.status ?? "ACTIVE") !== "ACTIVE") return null;
     // 역할이 낮아진 경우 스코프를 현재 역할 범위로 축소
@@ -145,7 +147,7 @@ export const callTool = internalMutation({
   args: { credentialId: v.id("mcpCredentials"), tool: v.string(), args: v.any() },
   handler: async (ctx, args) => {
     const c = await ctx.db.get(args.credentialId);
-    if (!c || c.status !== "ACTIVE") fail("UNAUTHENTICATED", "credential revoked");
+    if (!c || !isCredentialUsable(c)) fail("UNAUTHENTICATED", "credential revoked or expired");
     const user = await ctx.db.get(c.userId);
     if (!user) fail("UNAUTHENTICATED", "user missing");
     const allowed = allowedScopesForRole(roleOf(user));
@@ -170,6 +172,12 @@ export const touchCredential = internalMutation({
 type RpcId = string | number | null;
 const rpcError = (id: RpcId, code: number, message: string, data?: unknown, status = 200) =>
   new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message, ...(data !== undefined ? { data } : {}) } }), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+const unauthorized = (message: string) => {
+  const res = rpcError(null, -32001, message, undefined, 401);
+  const site = process.env.CONVEX_SITE_URL ?? "";
+  res.headers.set("www-authenticate", `Bearer realm="automoney", resource_metadata="${site}/.well-known/oauth-protected-resource"`);
+  return res;
+};
 const rpcResult = (id: RpcId, result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
 function toolError(e: unknown): { code: string; message: string } {
@@ -184,7 +192,7 @@ function toolError(e: unknown): { code: string; message: string } {
 export const mcpHttp = httpAction(async (ctx, request) => {
   const url = new URL(request.url);
   if (request.method === "GET") {
-    return new Response(JSON.stringify({ name: MCP_SERVER_INFO.name, version: MCP_SERVER_INFO.version, protocolVersion: MCP_PROTOCOL_VERSION, transport: "streamable-http (POST only, stateless)", auth: ["path: /mcp/{endpointId}.{secret}", `header: Authorization: Bearer ${MCP_KEY_PREFIX}...`], tools: visibleTools(MCP_SCOPES).map((t) => t.name) }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ name: MCP_SERVER_INFO.name, version: MCP_SERVER_INFO.version, protocolVersion: MCP_PROTOCOL_VERSION, transport: "streamable-http (POST only, stateless)", auth: ["oauth2: /.well-known/oauth-authorization-server (PKCE, dynamic registration)", "path: /mcp/{endpointId}.{secret}", `header: Authorization: Bearer ${MCP_KEY_PREFIX}...`], tools: visibleTools(MCP_SCOPES).map((t) => t.name) }), { status: 200, headers: { "content-type": "application/json" } });
   }
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405, headers: { allow: "GET, POST" } });
 
@@ -194,9 +202,9 @@ export const mcpHttp = httpAction(async (ctx, request) => {
   const bearer = request.headers.get("authorization") ?? "";
   if (m) authArgs = { endpointId: m[1]!, secretHash: await sha256Hex(m[2]!) };
   else if (url.pathname === "/mcp" && bearer.startsWith(`Bearer ${MCP_KEY_PREFIX}`)) authArgs = { keyHash: await sha256Hex(bearer.slice(7).trim()) };
-  if (!authArgs) return rpcError(null, -32001, "unauthorized: use /mcp/{endpointId}.{secret} or Authorization: Bearer am_mcp_...", undefined, 401);
+  if (!authArgs) return unauthorized("unauthorized: use OAuth (see WWW-Authenticate), /mcp/{endpointId}.{secret} or Authorization: Bearer am_mcp_...");
   const cred = await ctx.runQuery(internal.mcp.authenticate, authArgs);
-  if (!cred) return rpcError(null, -32001, "unauthorized: invalid or revoked credential", undefined, 401);
+  if (!cred) return unauthorized("unauthorized: invalid, expired or revoked credential");
 
   // 2) 레이트리밋 (유저 120/min, IP 600/min)
   const ip = (request.headers.get("x-forwarded-for") ?? "").split(",")[0]!.trim() || "unknown";

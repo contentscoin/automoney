@@ -57,6 +57,33 @@ describe("magazines", () => {
     expect((await user.as.query(api.magazines.list, {})).length).toBe(1);
     await expect(owner.as.action(api.magazines.register, { html: "<html><body><p>짧음</p></body></html>" })).rejects.toThrow();
   });
+
+  it("builds OUTFIT curation sets from magazine theme + product roles, and replaces them on re-register", async () => {
+    const { t, owner, p1 } = await setup();
+    const user = await signup(t, "u2@test.com");
+    // 100002 를 아우터로 바꿔 원피스+아우터 조합이 성립하게 한다
+    const p2 = await t.run(async (ctx) => {
+      const row = (await ctx.db.query("products").withIndex("by_attrangsProductId", (q) => q.eq("attrangsProductId", 100002)).unique())!;
+      await ctx.db.patch(row._id, { name: "트위드 크롭 자켓", category: "아우터" });
+      return row._id;
+    });
+    const html = MAG_HTML.replace("가을 니트 스타일링 5가지", "가을 하객룩 5가지").replace("올가을 니트는", "결혼식 하객룩으로 올가을 니트는");
+    const r = await owner.as.action(api.magazines.register, { html, url: "https://attrangs.co.kr/magazine/outfit" });
+    expect(r.outfitCount).toBeGreaterThanOrEqual(1);
+    const items = await user.as.query(api.curation.list, { kind: "OUTFIT" });
+    expect(items.length).toBe(r.outfitCount);
+    const set = items[0]!;
+    expect(set.title).toMatch(/하객룩 코디 · /);
+    expect(set.body).toMatch(/합계: [\d,]+원/);
+    expect(set.body).toContain("스타일링:");
+    expect(set.magazineId).toBe(r.magazineId);
+    expect(set.productIds!.sort()).toEqual([p1, p2].sort());
+    expect(set.licenseNote).toMatch(/상품 링크만/);
+    // 재등록해도 dedupeKey 로 갱신만 (중복 없음)
+    const r2 = await owner.as.action(api.magazines.register, { html, url: "https://attrangs.co.kr/magazine/outfit" });
+    expect(r2.outfitCount).toBe(r.outfitCount);
+    expect((await user.as.query(api.curation.list, { kind: "OUTFIT" })).length).toBe(r.outfitCount);
+  });
 });
 
 describe("content generation gate", () => {

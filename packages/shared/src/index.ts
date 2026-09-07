@@ -10,3 +10,4 @@ export * from "./scheduling";
 export * from "./content";
 export * from "./mcpTools";
 export * from "./analytics";
+export * from "./outfit";

@@ -8,7 +8,7 @@ import { PieceCard } from "@/components/PieceCard";
 import { dateTime, errorMessage } from "@/lib/format";
 import { CURATION_KIND_LABEL } from "@/lib/content-format";
 
-type Kind = "MEME" | "TREND" | "PRODUCT_FACT" | "CELEB_MATCH";
+type Kind = "MEME" | "TREND" | "PRODUCT_FACT" | "CELEB_MATCH" | "OUTFIT";
 
 export default function SuperMagazinesPage() {
   const magazines = useQuery(api.magazines.list, { limit: 50 });

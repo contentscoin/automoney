@@ -6,6 +6,7 @@ import { auth } from "./auth";
 import { claim, config, jobsRouter, spacesSync } from "./agent";
 import { webhook as telegramWebhook } from "./telegram";
 import { mcpHttp } from "./mcp";
+import { authServerMetadata, preflight, register as oauthRegister, resourceMetadata, revoke as oauthRevoke, token as oauthToken } from "./oauth";
 import { callback as metaCallback } from "./meta";
 import { hmacSha256Hex, timingSafeEqual } from "./lib/crypto";
 
@@ -65,6 +66,16 @@ http.route({ path: "/mcp", method: "POST", handler: mcpHttp });
 http.route({ path: "/mcp", method: "GET", handler: mcpHttp });
 http.route({ pathPrefix: "/mcp/", method: "POST", handler: mcpHttp });
 http.route({ pathPrefix: "/mcp/", method: "GET", handler: mcpHttp });
+
+// MCP OAuth 2.1 (메타데이터 · 동적 등록 · 토큰 · 폐기). 인가 화면은 웹 /oauth/authorize
+http.route({ path: "/.well-known/oauth-authorization-server", method: "GET", handler: authServerMetadata });
+http.route({ path: "/.well-known/oauth-authorization-server/mcp", method: "GET", handler: authServerMetadata });
+http.route({ path: "/.well-known/oauth-protected-resource", method: "GET", handler: resourceMetadata });
+http.route({ path: "/.well-known/oauth-protected-resource/mcp", method: "GET", handler: resourceMetadata });
+http.route({ path: "/oauth/register", method: "POST", handler: oauthRegister });
+http.route({ path: "/oauth/token", method: "POST", handler: oauthToken });
+http.route({ path: "/oauth/revoke", method: "POST", handler: oauthRevoke });
+for (const path of ["/mcp", "/oauth/register", "/oauth/token", "/oauth/revoke", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource"]) http.route({ path, method: "OPTIONS", handler: preflight });
 
 // 텔레그램 봇 웹훅 (X-Telegram-Bot-Api-Secret-Token 검증)
 http.route({ path: "/telegram/webhook", method: "POST", handler: telegramWebhook });

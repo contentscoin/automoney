@@ -44,6 +44,7 @@ import type * as links from "../links.js";
 import type * as magazines from "../magazines.js";
 import type * as mcp from "../mcp.js";
 import type * as meta from "../meta.js";
+import type * as oauth from "../oauth.js";
 import type * as orders from "../orders.js";
 import type * as products from "../products.js";
 import type * as schedules from "../schedules.js";
@@ -96,6 +97,7 @@ declare const fullApi: ApiFromModules<{
   magazines: typeof magazines;
   mcp: typeof mcp;
   meta: typeof meta;
+  oauth: typeof oauth;
   orders: typeof orders;
   products: typeof products;
   schedules: typeof schedules;

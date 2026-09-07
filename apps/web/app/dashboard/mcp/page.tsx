@@ -27,7 +27,13 @@ export default function McpPage() {
         <p className="text-sm text-stone-500">Claude·Cursor 같은 AI 클라이언트에서 automoney 툴(링크 발급·발행·예약·실적 조회)을 직접 호출합니다. 세션 상태 없는 HTTP(POST) 서버이며, 발행·스페이스 생성은 확인(confirmed) 없이는 미리보기만 반환합니다.</p>
       </div>
       <section className="card">
-        <h2 className="font-semibold">자격증명 발급</h2>
+        <h2 className="font-semibold">OAuth 로 연결 (권장)</h2>
+        <p className="mt-1 text-sm text-stone-600">Claude.ai 커넥터, Claude Code, Cursor 등 OAuth 를 지원하는 클라이언트에는 아래 서버 URL 만 넣으세요. 로그인·권한 동의 화면을 거쳐 자동으로 연결되고, 토큰은 1시간마다 갱신됩니다. 발급된 연결은 아래 목록에 &quot;OAuth · 클라이언트명&quot; 으로 표시되며 언제든 폐기할 수 있습니다.</p>
+        <code className="mt-2 block break-all rounded bg-stone-50 p-2 text-xs" data-automoney="mcp-oauth-url">{data?.oauth.serverUrl ?? "…"}</code>
+        <pre className="mt-2 overflow-x-auto rounded bg-stone-50 p-2 text-xs">{`claude mcp add --transport http automoney ${data?.oauth.serverUrl ?? ""}`}</pre>
+      </section>
+      <section className="card">
+        <h2 className="font-semibold">API 키 직접 발급 (OAuth 를 지원하지 않는 클라이언트)</h2>
         <form className="mt-2 grid gap-3 sm:grid-cols-2" onSubmit={async (e) => { e.preventDefault(); try { const r = await create({ label, scopes }); setIssued(r); setMsg("발급했습니다. 시크릿은 지금만 표시됩니다."); } catch (err) { setMsg(errorMessage(err)); } }}>
           <div><label className="label">이름</label><input className="input" value={label} onChange={(e) => setLabel(e.target.value)} required /></div>
           <div className="flex flex-col gap-1 text-sm">
@@ -56,7 +62,7 @@ export default function McpPage() {
             {data?.credentials.length === 0 && <tr><td colSpan={7} className="text-center text-stone-500">발급된 자격증명이 없습니다.</td></tr>}
             {data?.credentials.map((c) => (
               <tr key={c._id}>
-                <td className="text-sm">{c.label}</td>
+                <td className="text-sm">{c.label}{c.kind === "OAUTH" && <span className="ml-1 rounded bg-stone-100 px-1 text-[10px] text-stone-500">OAuth</span>}</td>
                 <td className="font-mono text-xs">{c.endpointId}</td>
                 <td className="text-xs">{c.scopes.join(", ")}</td>
                 <td><Badge value={c.status === "ACTIVE" ? "ACTIVE" : "DISABLED"} label={c.status === "ACTIVE" ? "활성" : "폐기"} /></td>

@@ -1,5 +1,7 @@
 import { v, type ObjectType } from "convex/values";
 import {
+  buildOutfitSets,
+  detectThemes,
   extractAtoms,
   extractMagazine,
   type ProductBrief,
@@ -8,6 +10,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { action, internalMutation, mutation, query, type QueryCtx } from "./_generated/server";
+import { upsertCuration } from "./curation";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireSuperAdmin, requireUser } from "./lib/rbac";
@@ -26,6 +29,7 @@ export const register = action({
     magazineId: Id<"magazines">;
     atomCount: number;
     productCount: number;
+    outfitCount: number;
   }> => {
     const userId = await getAuthUserId(ctx);
     if (!userId) fail("UNAUTHENTICATED", "로그인이 필요합니다.");
@@ -134,15 +138,35 @@ export const saveExtracted = internalMutation({
         attrangsProductId: a.productId ?? undefined,
         rank: a.rank,
       });
+    // 코디 제안 카드(06 §4): 테마 감지 + 상품 역할 조합 → OUTFIT 큐레이션
+    const themes = detectThemes(`${ex.title}\n${ex.bodyText}`);
+    const byAttrangsId = new Map(products.map((p) => [p.attrangsProductId, p._id]));
+    const outfits = buildOutfitSets(briefs, themes, atoms).map((o) => ({
+      kind: "OUTFIT" as const,
+      title: o.title,
+      body: o.body,
+      sourceUrl: args.sourceUrl,
+      mediaUrl: ex.heroImage ?? ex.imageUrls[0] ?? undefined,
+      productId: byAttrangsId.get(o.productIds[0]!),
+      productIds: o.productIds.map((id) => byAttrangsId.get(id)).filter((id): id is Id<"products"> => !!id),
+      magazineId,
+      licenseNote: "매거진 기반 코디 제안 · 상품 링크만 사용",
+      score: o.score,
+      source: "magazine",
+      dedupeKey: `outfit:${magazineId}:${o.key}`,
+    }));
+    if (outfits.length > 0) await upsertCuration(ctx, outfits);
+
     await audit(ctx, {
       actorUserId: args.userId,
       action: "magazine.register",
-      metadata: { magazineId, atoms: atoms.length, products: products.length },
+      metadata: { magazineId, atoms: atoms.length, products: products.length, outfits: outfits.length },
     });
     return {
       magazineId,
       atomCount: atoms.length,
       productCount: products.length,
+      outfitCount: outfits.length,
     };
   },
 });

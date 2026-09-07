@@ -488,12 +488,15 @@ export default defineSchema({
       v.literal("TREND"),
       v.literal("PRODUCT_FACT"),
       v.literal("CELEB_MATCH"),
+      v.literal("OUTFIT"),
     ),
     title: v.string(),
     body: v.optional(v.string()),
     sourceUrl: v.optional(v.string()),
     mediaUrl: v.optional(v.string()),
     productId: v.optional(v.id("products")),
+    productIds: v.optional(v.array(v.id("products"))), // OUTFIT: 세트 구성 상품
+    magazineId: v.optional(v.id("magazines")),
     licenseNote: v.optional(v.string()),
     score: v.number(),
     source: v.string(),
@@ -530,10 +533,52 @@ export default defineSchema({
     callCount: v.number(),
     createdAt: v.number(),
     revokedAt: v.optional(v.number()),
+    // OAuth 로 발급된 경우: kind=OAUTH, keyHash 가 액세스 토큰, expiresAt 만료(리프레시로 회전)
+    kind: v.optional(v.union(v.literal("API_KEY"), v.literal("OAUTH"))),
+    clientId: v.optional(v.string()),
+    expiresAt: v.optional(v.number()),
   })
     .index("by_user", ["userId", "createdAt"])
     .index("by_endpointId", ["endpointId"])
     .index("by_keyHash", ["keyHash"]),
+
+  // ---- MCP OAuth 2.1 (동적 클라이언트 등록 · PKCE · 리프레시 회전) ----
+  oauthClients: defineTable({
+    clientId: v.string(),
+    clientName: v.string(),
+    redirectUris: v.array(v.string()),
+    tokenEndpointAuthMethod: v.union(v.literal("none"), v.literal("client_secret_post")),
+    clientSecretHash: v.optional(v.string()),
+    clientUri: v.optional(v.string()),
+    logoUri: v.optional(v.string()),
+    createdAt: v.number(),
+    lastUsedAt: v.optional(v.number()),
+  }).index("by_clientId", ["clientId"]),
+
+  oauthCodes: defineTable({
+    codeHash: v.string(),
+    clientId: v.string(),
+    userId: v.id("users"),
+    redirectUri: v.string(),
+    scopes: v.array(v.string()),
+    codeChallenge: v.string(),
+    resource: v.optional(v.string()),
+    expiresAt: v.number(),
+    usedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  }).index("by_codeHash", ["codeHash"]),
+
+  oauthRefreshTokens: defineTable({
+    tokenHash: v.string(),
+    credentialId: v.id("mcpCredentials"),
+    clientId: v.string(),
+    userId: v.id("users"),
+    status: v.union(v.literal("ACTIVE"), v.literal("ROTATED"), v.literal("REVOKED")),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_tokenHash", ["tokenHash"])
+    .index("by_credential", ["credentialId"]),
 
   mcpRateBuckets: defineTable({
     key: v.string(),

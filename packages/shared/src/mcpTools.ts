@@ -46,7 +46,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   { name: "content_generate", description: "매거진 또는 상품 기준으로 채널별 콘텐츠 생성을 요청합니다. 생성은 내 PC 의 Codex 가 수행하며 잡 id 를 반환합니다.", scope: "mcp:write", returnsJob: true, inputSchema: obj({ magazineId: str("magazine_today 결과의 _id"), productId: str("상품 _id"), channels: { type: "array", items: { type: "string", enum: CHANNEL_ENUM }, minItems: 1, description: "생성할 채널" } }, ["channels"]) },
   { name: "content_list", description: "내 콘텐츠 라이브러리(내 조각 + 운영 공유 조각)를 조회합니다.", scope: "mcp:read", inputSchema: obj({ channel: str("채널 필터", { enum: CHANNEL_ENUM }), status: str("상태 필터", { enum: ["DRAFT", "APPROVED"] }), limit: num("최대 개수(1~100)", { minimum: 1, maximum: 100 }) }) },
   { name: "content_get", description: "콘텐츠 조각 하나(본문·해시태그·대본·품질 리포트)를 조회합니다.", scope: "mcp:read", inputSchema: obj({ pieceId: str("조각 _id") }, ["pieceId"]) },
-  { name: "curation_fetch", description: "큐레이션(짤·트렌드·제품 정보·연예인 착용)을 조회합니다.", scope: "mcp:read", inputSchema: obj({ kind: str("종류", { enum: ["MEME", "TREND", "PRODUCT_FACT", "CELEB_MATCH"] }), productId: str("상품 _id 로 필터"), limit: num("최대 개수(1~100)", { minimum: 1, maximum: 100 }) }) },
+  { name: "curation_fetch", description: "큐레이션(짤·트렌드·제품 정보·연예인 착용·코디 제안)을 조회합니다.", scope: "mcp:read", inputSchema: obj({ kind: str("종류", { enum: ["MEME", "TREND", "PRODUCT_FACT", "CELEB_MATCH", "OUTFIT"] }), productId: str("상품 _id 로 필터"), limit: num("최대 개수(1~100)", { minimum: 1, maximum: 100 }) }) },
   { name: "space_list", description: "내 브라우저 스페이스(계정) 목록과 세션 상태·발행 방식(BROWSER/META_API)을 조회합니다.", scope: "mcp:read", inputSchema: obj({}) },
   { name: "space_create", description: "새 스페이스를 만듭니다(데스크톱 에이전트가 격리 프로필을 생성). 위험 툴: confirmed=true 필요.", scope: "mcp:write", dangerous: true, returnsJob: true, inputSchema: obj({ platform: str("플랫폼", { enum: PLATFORM_ENUM }), name: str("스페이스 이름(40자 이내)"), handle: str("계정 핸들(선택)"), confirmed: bool("true 일 때만 실제 생성") }, ["platform", "name"]) },
   { name: "space_pin", description: "스페이스를 고정/해제합니다.", scope: "mcp:write", inputSchema: obj({ spaceId: str("스페이스 _id"), pinned: bool("고정 여부") }, ["spaceId", "pinned"]) },
@@ -101,3 +101,26 @@ export const MCP_ENDPOINT_ID_LENGTH = 16;
 export const MCP_SECRET_LENGTH = 32;
 export const MCP_KEY_PREFIX = "am_mcp_";
 export const MCP_PATH_RE = /^\/mcp\/([A-Za-z0-9]{16})\.([A-Za-z0-9]{32})$/;
+
+/** MCP OAuth 2.1 (PKCE·DCR) — 액세스 토큰은 API 키와 같은 형식(`am_mcp_…`)으로 발급되어 같은 인증 경로를 탄다. */
+export const MCP_OAUTH = {
+  accessTtlMs: 60 * 60_000, // 1시간
+  refreshTtlMs: 30 * 24 * 3600_000, // 30일(회전)
+  codeTtlMs: 10 * 60_000, // 인가 코드 10분
+  defaultScopes: ["mcp:read", "mcp:write"] as McpScope[],
+  maxRedirectUris: 10,
+} as const;
+
+/** 등록 가능한 리다이렉트 URI: https 또는 루프백(http://localhost|127.0.0.1) 또는 커스텀 스킴(네이티브 앱). */
+export function isAllowedRedirectUri(uri: string): boolean {
+  try {
+    const u = new URL(uri);
+    if (u.hash) return false;
+    if (u.protocol === "https:") return true;
+    if (u.protocol === "http:") return u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+    return /^[a-z][a-z0-9+.-]*:$/i.test(u.protocol) && u.protocol !== "javascript:" && u.protocol !== "data:";
+  } catch {
+    return false;
+  }
+}
+

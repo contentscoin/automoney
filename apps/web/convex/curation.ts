@@ -24,6 +24,7 @@ const kindValidator = v.union(
   v.literal("TREND"),
   v.literal("PRODUCT_FACT"),
   v.literal("CELEB_MATCH"),
+  v.literal("OUTFIT"),
 );
 const DAY = 86_400_000;
 
@@ -80,6 +81,8 @@ const itemValidator = v.object({
   sourceUrl: v.optional(v.string()),
   mediaUrl: v.optional(v.string()),
   productId: v.optional(v.id("products")),
+  productIds: v.optional(v.array(v.id("products"))),
+  magazineId: v.optional(v.id("magazines")),
   licenseNote: v.optional(v.string()),
   score: v.number(),
   source: v.string(),
