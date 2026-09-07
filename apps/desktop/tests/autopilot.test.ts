@@ -2,6 +2,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testExecutablePath } from "./browser";
 import { isForbidden, isPublishLike, parseAction, renderSnapshot, runAutopilot, scriptedPlanner, takeSnapshot } from "../src/agent/autopilot";
 import type { Planner } from "../src/agent/autopilot";
 
@@ -10,7 +11,7 @@ let browser: Browser;
 let page: Page;
 
 beforeAll(async () => {
-  browser = await chromium.launch({ executablePath: process.env.AUTOMONEY_BROWSER_EXECUTABLE ?? "/opt/pw-browsers/chromium" });
+  browser = await chromium.launch({ executablePath: testExecutablePath() });
   page = await browser.newPage();
 });
 afterAll(async () => {

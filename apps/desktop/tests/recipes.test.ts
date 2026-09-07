@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testExecutablePath } from "./browser";
 import { getRecipe, SUPPORTED_PLATFORMS, type RecipeHelpers } from "../src/agent/recipes";
 
 const fixture = (name: string) => pathToFileURL(path.join(__dirname, "fixtures", name)).toString();
@@ -27,7 +28,7 @@ const helpers = (allowPublish: boolean): RecipeHelpers => ({
 });
 
 beforeAll(async () => {
-  browser = await chromium.launch({ executablePath: process.env.AUTOMONEY_BROWSER_EXECUTABLE ?? "/opt/pw-browsers/chromium" });
+  browser = await chromium.launch({ executablePath: testExecutablePath() });
 });
 afterAll(async () => {
   await browser?.close();

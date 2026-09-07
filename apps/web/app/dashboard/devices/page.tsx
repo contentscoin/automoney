@@ -21,7 +21,7 @@ export default function DevicesPage() {
       <section className="card">
         <h2 className="font-semibold">페어링</h2>
         <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-stone-700">
-          <li>PC 에 automoney 데스크톱 앱을 설치하고 실행합니다.</li>
+          <li>PC 에 automoney 데스크톱 앱을 설치하고 실행합니다. <a className="underline" href="https://github.com/contentscoin/automoney/releases/latest" target="_blank" rel="noreferrer">최신 설치 파일 받기 (Windows · macOS)</a> — 서명이 없어 처음 실행 시 SmartScreen/Gatekeeper 경고가 뜨면 &quot;추가 정보 → 실행&quot; 을 누르세요.</li>
           <li>아래에서 페어링 코드를 발급합니다(10분 유효, 1회용).</li>
           <li>앱 트레이 패널에 코드를 입력하거나 링크를 클릭합니다.</li>
         </ol>
