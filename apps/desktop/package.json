@@ -46,9 +46,10 @@
     "npmRebuild": false,
     "publish": [
       {
-        "provider": "generic",
-        "url": "${env.AUTOMONEY_UPDATE_FEED_URL}",
-        "channel": "latest"
+        "provider": "github",
+        "owner": "contentscoin",
+        "repo": "automoney",
+        "releaseType": "release"
       }
     ],
     "win": {
