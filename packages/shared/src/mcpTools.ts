@@ -101,3 +101,26 @@ export const MCP_ENDPOINT_ID_LENGTH = 16;
 export const MCP_SECRET_LENGTH = 32;
 export const MCP_KEY_PREFIX = "am_mcp_";
 export const MCP_PATH_RE = /^\/mcp\/([A-Za-z0-9]{16})\.([A-Za-z0-9]{32})$/;
+
+/** MCP OAuth 2.1 (PKCE·DCR) — 액세스 토큰은 API 키와 같은 형식(`am_mcp_…`)으로 발급되어 같은 인증 경로를 탄다. */
+export const MCP_OAUTH = {
+  accessTtlMs: 60 * 60_000, // 1시간
+  refreshTtlMs: 30 * 24 * 3600_000, // 30일(회전)
+  codeTtlMs: 10 * 60_000, // 인가 코드 10분
+  defaultScopes: ["mcp:read", "mcp:write"] as McpScope[],
+  maxRedirectUris: 10,
+} as const;
+
+/** 등록 가능한 리다이렉트 URI: https 또는 루프백(http://localhost|127.0.0.1) 또는 커스텀 스킴(네이티브 앱). */
+export function isAllowedRedirectUri(uri: string): boolean {
+  try {
+    const u = new URL(uri);
+    if (u.hash) return false;
+    if (u.protocol === "https:") return true;
+    if (u.protocol === "http:") return u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+    return /^[a-z][a-z0-9+.-]*:$/i.test(u.protocol) && u.protocol !== "javascript:" && u.protocol !== "data:";
+  } catch {
+    return false;
+  }
+}
+

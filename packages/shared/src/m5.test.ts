@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MCP_OAUTH, isAllowedRedirectUri } from "./mcpTools";
 import { MCP_TOOLS, MCP_TOOL_MAP, allowedScopesForRole, validateToolArgs, visibleTools } from "./mcpTools";
 import { classifyCta, classifyHook, evaluateLift, hourBucket, kstHour, playbookHint } from "./analytics";
 import { buildGenerationPrompt } from "./content";
@@ -73,3 +74,18 @@ describe("analytics helpers", () => {
     expect(buildGenerationPrompt({ channels: ["X"], atoms: [], products: [] })).not.toContain("검증된 패턴");
   });
 });
+
+describe("MCP OAuth redirect URI policy", () => {
+  it("allows https, loopback http and custom schemes; rejects plain http, fragments, javascript:", () => {
+    expect(isAllowedRedirectUri("https://claude.ai/api/mcp/auth_callback")).toBe(true);
+    expect(isAllowedRedirectUri("http://localhost:6274/oauth/callback")).toBe(true);
+    expect(isAllowedRedirectUri("http://127.0.0.1:33418/cb")).toBe(true);
+    expect(isAllowedRedirectUri("cursor://anysphere.cursor-mcp/oauth/callback")).toBe(true);
+    expect(isAllowedRedirectUri("http://evil.example.com/cb")).toBe(false);
+    expect(isAllowedRedirectUri("https://a.example/cb#frag")).toBe(false);
+    expect(isAllowedRedirectUri("javascript:alert(1)")).toBe(false);
+    expect(isAllowedRedirectUri("not a url")).toBe(false);
+    expect(MCP_OAUTH.accessTtlMs).toBeLessThan(MCP_OAUTH.refreshTtlMs);
+  });
+});
+

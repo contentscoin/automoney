@@ -32,7 +32,8 @@ export default function AuthForm({ flow }: { flow: "signIn" | "signUp" }) {
             if (flow === "signUp" && !inviteCode.trim()) fd.delete("inviteCode");
             try {
               await signIn("password", fd);
-              router.replace("/dashboard");
+              const next = params.get("next") ?? "";
+              router.replace(next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard");
             } catch (err) {
               setError(errorMessage(err));
             } finally {

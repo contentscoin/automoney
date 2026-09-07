@@ -108,7 +108,7 @@
 
 ### 5.1 서버
 - Streamable HTTP, POST 전용, 세션 상태 없음(요청마다 토큰으로 유저·스코프 결정). blogautomcp `apps/sites/app/api/mcp/[credential]/route.ts` 계승.
-- 엔드포인트: OAuth 연결 `/api/mcp`(Dynamic Client Registration, PKCE, `.well-known/oauth-authorization-server`)와 원타임 발급 URL `/api/mcp/{endpointId}.{secret}` 두 경로.
+- 엔드포인트: OAuth 연결(`/.well-known/oauth-authorization-server` · `/oauth/register` DCR · 웹 `/oauth/authorize` · `/oauth/token` PKCE · `/oauth/revoke`)과 원타임 발급 URL `/mcp/{endpointId}.{secret}`·API 키 `Bearer am_mcp_…` 두 경로. 구현 메모는 ADR-0007.
 - 스코프: `mcp:read`, `mcp:write`, `admin:read`, `super:read`. 툴 노출은 스코프와 역할로 필터.
 - 툴 인자 스키마는 `tool-schema.ts` 한 곳에서 정의하고 문서·검증에 공용.
 
