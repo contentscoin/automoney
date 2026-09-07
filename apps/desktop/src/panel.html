@@ -32,6 +32,7 @@
   <div class="row"><span class="k">현재 작업</span><span id="job">-</span></div>
   <div class="row"><span class="k">처리한 작업</span><span id="processed">0</span></div>
   <div class="row"><span class="k">Codex</span><span id="codex">-</span></div>
+  <div class="row"><span class="k">브라우저</span><span id="browsers">-</span></div>
   <div class="row"><span class="k">마지막 오류</span><span id="err" class="bad">-</span></div>
   <div class="row"><span class="k">업데이트</span><span id="upd" class="muted">-</span></div>
   <div class="row"><span class="k">버전</span><span id="ver" class="muted">-</span></div>
@@ -47,6 +48,10 @@
     $("job").textContent = s.activeJob ? `${s.activeJob.jobType} · ${s.activeJob.stage}` : "없음";
     $("processed").textContent = String(s.processed ?? 0);
     $("codex").textContent = s.codex ? (s.codex.loggedIn ? "로그인됨" : s.codex.installed ? "로그인 필요" : "미설치") : "-";
+    if (s.browsers) {
+      $("browsers").textContent = s.browsers.length ? s.browsers.join(", ") : "없음 — Chrome 설치 필요";
+      $("browsers").className = s.browsers.length ? "ok" : "bad";
+    }
     $("err").textContent = s.lastError ?? "-";
     if (s.updater) $("upd").textContent = s.updater.state + (s.updater.detail ? ` (${s.updater.detail})` : "");
     if (s.version) $("ver").textContent = s.version;

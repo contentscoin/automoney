@@ -148,7 +148,7 @@ export class AgentLoop {
       await this.api.complete(job.id, { status: "SUCCEEDED", result: outcome.result, spaceUpdate: outcome.spaceUpdate });
       log("info", "job succeeded", { id: job.id, jobType: job.jobType });
     } catch (e) {
-      const code = e instanceof CancelledError ? "JOB_CANCELLED" : e instanceof JobError ? e.code : (e as { code?: string })?.code === "SPACE_LOCKED" ? "SPACE_LOCKED" : (e as { code?: string })?.code === "SPACE_NOT_FOUND" ? "SPACE_NOT_FOUND" : "RECIPE_FAILED";
+      const code = e instanceof CancelledError ? "JOB_CANCELLED" : e instanceof JobError ? e.code : (e as { code?: string })?.code === "SPACE_LOCKED" ? "SPACE_LOCKED" : (e as { code?: string })?.code === "SPACE_NOT_FOUND" ? "SPACE_NOT_FOUND" : (e as { code?: string })?.code === "BROWSER_NOT_FOUND" ? "BROWSER_NOT_FOUND" : "RECIPE_FAILED";
       const message = e instanceof Error ? e.message : String(e);
       log("error", "job failed", { id: job.id, jobType: job.jobType, code, message });
       try {

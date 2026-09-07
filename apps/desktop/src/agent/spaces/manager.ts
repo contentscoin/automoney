@@ -101,10 +101,43 @@ export interface OpenedSpace {
  */
 type LaunchOpts = { headless: boolean; args: string[]; viewport: { width: number; height: number }; locale: string; timezoneId: string; userAgent?: string; ignoreDefaultArgs: string[] };
 
+/** OS 별 Chrome·Edge 기본 설치 경로. 사전 점검과 오류 안내에 쓴다. */
+const BROWSER_PATHS: Record<string, { label: string; paths: string[] }[]> = {
+  win32: [
+    { label: "Chrome", paths: ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe", `${process.env.LOCALAPPDATA ?? ""}\\Google\\Chrome\\Application\\chrome.exe`] },
+    { label: "Edge", paths: ["C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"] },
+  ],
+  darwin: [
+    { label: "Chrome", paths: ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"] },
+    { label: "Edge", paths: ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"] },
+  ],
+  linux: [
+    { label: "Chrome", paths: ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/opt/google/chrome/chrome"] },
+    { label: "Edge", paths: ["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"] },
+  ],
+};
+
+/** 설치돼 있어 실제로 쓸 수 있는 브라우저 목록. 패널·오류 안내용(실행은 하지 않는다). */
+export function detectBrowsers(platform: string = process.platform): { label: string; path: string }[] {
+  const found: { label: string; path: string }[] = [];
+  for (const { label, paths } of BROWSER_PATHS[platform] ?? []) {
+    const hit = paths.find((p) => p && fs.existsSync(p));
+    if (hit) found.push({ label, path: hit });
+  }
+  try {
+    const bundled = chromium.executablePath();
+    if (bundled && fs.existsSync(bundled)) found.push({ label: "번들 Chromium", path: bundled });
+  } catch {
+    /* 번들 없음(패키징 앱) */
+  }
+  return found;
+}
+
 /**
  * 브라우저 후보를 순서대로 시도한다. 설정(executablePath/browserChannel)이 있으면 그것만,
  * 없으면 Playwright 번들 Chromium → 시스템 Chrome → Edge. 패키징된 앱에는 번들 Chromium 이 없으므로
  * 일반 유저 PC 에서는 보통 시스템 Chrome 으로 열린다.
+ * 모두 실패하면 설치된 브라우저 목록을 담은 BROWSER_NOT_FOUND 오류를 던져 원인을 바로 알 수 있게 한다.
  */
 export async function launchWithFallback(profileDir: string, cfg: AgentConfig, opts: LaunchOpts): Promise<BrowserContext> {
   const candidates: { executablePath?: string; channel?: string; label: string }[] = cfg.executablePath
@@ -123,7 +156,13 @@ export async function launchWithFallback(profileDir: string, cfg: AgentConfig, o
       log("warn", "browser launch failed, trying next candidate", { tried: c.label, error: msg.split("\n")[0] });
     }
   }
-  throw new Error(`사용할 브라우저를 찾지 못했습니다. Chrome 또는 Edge 를 설치하거나 AUTOMONEY_BROWSER_CHANNEL / AUTOMONEY_BROWSER_EXECUTABLE 을 설정하세요. (${String((lastErr as Error)?.message ?? lastErr).split("\n")[0]})`);
+  const installed = detectBrowsers();
+  const hint = installed.length > 0
+    ? `설치된 브라우저: ${installed.map((b) => `${b.label}(${b.path})`).join(", ")}. AUTOMONEY_BROWSER_EXECUTABLE 로 경로를 지정해 보세요.`
+    : "PC 에서 Chrome 또는 Edge 를 찾지 못했습니다. Chrome 을 설치하거나 `npx playwright install chromium` 을 실행하세요.";
+  const err = new Error(`사용할 브라우저를 찾지 못했습니다. 시도: ${candidates.map((c) => c.label).join(" → ")}. ${hint} (${String((lastErr as Error)?.message ?? lastErr).split("\n")[0]})`) as Error & { code: string };
+  err.code = "BROWSER_NOT_FOUND";
+  throw err;
 }
 
 export async function openSpace(cfg: AgentConfig, spaceId: string, opts: { visible?: boolean; purpose: string; waitLockMs?: number }): Promise<OpenedSpace> {
