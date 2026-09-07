@@ -60,6 +60,7 @@ export default function Home() {
           <div className="flex flex-wrap gap-3">
             <Link href="/signup" className="btn-primary !px-6 !py-3 !text-base">무료로 시작하기</Link>
             <a href="#how" className="btn-ghost !px-6 !py-3 !text-base">어떻게 하나요?</a>
+            <a href="https://github.com/contentscoin/automoney/releases/latest" target="_blank" rel="noreferrer" className="btn-ghost !px-6 !py-3 !text-base">데스크톱 앱 다운로드</a>
           </div>
           <ul className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-stone-500">
             <li>✓ 가입·링크 발급 무료</li>

@@ -2,13 +2,14 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testExecutablePath } from "./browser";
 import { parseCount, readPostMetrics } from "../src/agent/recipes/readback";
 import { HANDLERS } from "../src/agent/loop";
 
 const fixture = (name: string) => pathToFileURL(path.join(__dirname, "fixtures", name)).toString();
 let browser: Browser;
 beforeAll(async () => {
-  browser = await chromium.launch({ executablePath: process.env.AUTOMONEY_BROWSER_EXECUTABLE ?? "/opt/pw-browsers/chromium" });
+  browser = await chromium.launch({ executablePath: testExecutablePath() });
 });
 afterAll(async () => {
   await browser?.close();

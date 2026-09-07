@@ -106,6 +106,7 @@ Convex 추가 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELE
 - 검증: shared 27 · convex-test 34 · desktop 19 테스트, `e2e-agent.mjs` 에 매거진 등록 → 생성(template) → 자동 승인 → pieceId 게시 → 공유 가시성 추가.
 
 ### 데스크톱 배포·서명
+- 설치 파일 다운로드: https://github.com/contentscoin/automoney/releases/latest (`desktop-v*` 태그 푸시 시 GitHub Release 에 Windows `.exe`·macOS `.dmg/.zip` 자동 첨부). 패키징된 앱은 번들 Chromium 이 없으므로 시스템 Chrome → Edge 순으로 자동 폴백하며, `AUTOMONEY_BROWSER_CHANNEL`/`AUTOMONEY_BROWSER_EXECUTABLE` 로 고정할 수 있다.
 - 태그 `desktop-v*` 푸시 시 `desktop-build.yml` 이 Windows(NSIS)·macOS(dmg/zip) 를 빌드합니다. 시크릿 `CSC_LINK`/`CSC_KEY_PASSWORD`(코드사인 인증서 p12 base64/비밀번호), `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`(노터라이즈) 가 있으면 서명·노터라이즈, 없으면 서명 없이 빌드합니다. 자동 업데이트 피드는 변수 `AUTOMONEY_UPDATE_FEED_URL`(정적 호스팅에 `latest.yml`·설치 파일 업로드).
 - 에이전트 설정(`~/.automoney/config.json`): `autopilot`(레시피 실패 시 Codex 복구), `updateFeedUrl`, `browserChannel`, `headless`.
 

@@ -5,6 +5,9 @@ on:
     tags: ["desktop-v*"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -28,6 +31,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @automoney/shared build
       - run: pnpm --filter @automoney/desktop build
+      - name: Install test browser
+        working-directory: apps/desktop
+        run: npx playwright install chromium
       - run: pnpm --filter @automoney/desktop test
       # 서명 시크릿이 있으면 서명·(mac) 노터라이즈, 없으면 서명 없이 빌드
       - name: Package
@@ -50,3 +56,32 @@ jobs:
             apps/desktop/release/*.yml
             apps/desktop/release/*.blockmap
           if-no-files-found: warn
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: List artifacts
+        run: ls -la artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: automoney 데스크톱 에이전트 ${{ github.ref_name }}
+          body: |
+            automoney 데스크톱 에이전트 설치 파일입니다.
+            - Windows: `automoney-agent-*-win-x64.exe` (NSIS 설치 프로그램)
+            - macOS: `automoney-agent-*-mac-*.dmg` / `.zip`
+            코드 서명이 없어 처음 실행 시 SmartScreen / Gatekeeper 경고가 뜰 수 있습니다. 설치 후 대시보드 > 데스크톱 에이전트에서 발급한 코드로 페어링하세요.
+          files: |
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/*.zip
+            artifacts/*.yml
+            artifacts/*.blockmap
+          fail_on_unmatched_files: false
+

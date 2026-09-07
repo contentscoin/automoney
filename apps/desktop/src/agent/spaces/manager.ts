@@ -99,6 +99,33 @@ export interface OpenedSpace {
  * 스페이스 브라우저 열기: 락 → persistent context(프로필 격리) → 고정 지문.
  * visible=true 면 사용자 로그인용으로 창을 보이게, 아니면 오프스크린(blogautomcp background 모드).
  */
+type LaunchOpts = { headless: boolean; args: string[]; viewport: { width: number; height: number }; locale: string; timezoneId: string; userAgent?: string; ignoreDefaultArgs: string[] };
+
+/**
+ * 브라우저 후보를 순서대로 시도한다. 설정(executablePath/browserChannel)이 있으면 그것만,
+ * 없으면 Playwright 번들 Chromium → 시스템 Chrome → Edge. 패키징된 앱에는 번들 Chromium 이 없으므로
+ * 일반 유저 PC 에서는 보통 시스템 Chrome 으로 열린다.
+ */
+export async function launchWithFallback(profileDir: string, cfg: AgentConfig, opts: LaunchOpts): Promise<BrowserContext> {
+  const candidates: { executablePath?: string; channel?: string; label: string }[] = cfg.executablePath
+    ? [{ executablePath: cfg.executablePath, label: `executable ${cfg.executablePath}` }]
+    : cfg.browserChannel
+      ? [{ channel: cfg.browserChannel, label: `channel ${cfg.browserChannel}` }]
+      : [{ label: "bundled chromium" }, { channel: "chrome", label: "channel chrome" }, { channel: "msedge", label: "channel msedge" }];
+  let lastErr: unknown;
+  for (const c of candidates) {
+    try {
+      return await chromium.launchPersistentContext(profileDir, { ...opts, channel: c.channel, executablePath: c.executablePath });
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e as Error).message ?? e);
+      if (!/Executable doesn't exist|Failed to launch|not found|ENOENT|Chromium distribution/i.test(msg)) throw e;
+      log("warn", "browser launch failed, trying next candidate", { tried: c.label, error: msg.split("\n")[0] });
+    }
+  }
+  throw new Error(`사용할 브라우저를 찾지 못했습니다. Chrome 또는 Edge 를 설치하거나 AUTOMONEY_BROWSER_CHANNEL / AUTOMONEY_BROWSER_EXECUTABLE 을 설정하세요. (${String((lastErr as Error)?.message ?? lastErr).split("\n")[0]})`);
+}
+
 export async function openSpace(cfg: AgentConfig, spaceId: string, opts: { visible?: boolean; purpose: string; waitLockMs?: number }): Promise<OpenedSpace> {
   const meta = readMeta(spaceId);
   if (!meta) {
@@ -112,17 +139,8 @@ export async function openSpace(cfg: AgentConfig, spaceId: string, opts: { visib
   const args = ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check", `--window-size=${fp.viewport.width},${fp.viewport.height}`];
   if (!opts.visible && !headless) args.push("--window-position=-32000,-32000", "--start-minimized", "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding");
   try {
-    const context = await chromium.launchPersistentContext(spaceProfileDir(spaceId), {
-      headless,
-      channel: cfg.executablePath ? undefined : cfg.browserChannel,
-      executablePath: cfg.executablePath,
-      args,
-      viewport: fp.viewport,
-      locale: fp.locale,
-      timezoneId: fp.timezoneId,
-      userAgent: fp.userAgent,
-      ignoreDefaultArgs: ["--enable-automation"],
-    });
+    const launchOpts = { headless, args, viewport: fp.viewport, locale: fp.locale, timezoneId: fp.timezoneId, userAgent: fp.userAgent, ignoreDefaultArgs: ["--enable-automation"] };
+    const context = await launchWithFallback(spaceProfileDir(spaceId), cfg, launchOpts);
     const page = context.pages()[0] ?? (await context.newPage());
     log("info", "space opened", { spaceId, purpose: opts.purpose, visible: !!opts.visible });
     return {
