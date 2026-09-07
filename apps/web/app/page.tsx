@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { DownloadButtons } from "@/components/DownloadButtons";
 
 export const metadata: Metadata = {
   title: "automoney — 아뜨랑스 파트너 부업, 링크 하나로 시작",
@@ -60,7 +61,7 @@ export default function Home() {
           <div className="flex flex-wrap gap-3">
             <Link href="/signup" className="btn-primary !px-6 !py-3 !text-base">무료로 시작하기</Link>
             <a href="#how" className="btn-ghost !px-6 !py-3 !text-base">어떻게 하나요?</a>
-            <a href="https://github.com/contentscoin/automoney/releases/latest" target="_blank" rel="noreferrer" className="btn-ghost !px-6 !py-3 !text-base">데스크톱 앱 다운로드</a>
+            <a href="#download" className="btn-ghost !px-6 !py-3 !text-base">데스크톱 앱 다운로드</a>
           </div>
           <ul className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-stone-500">
             <li>✓ 가입·링크 발급 무료</li>
@@ -133,6 +134,24 @@ export default function Home() {
             <li className="rounded-lg border border-stone-200 p-4"><b>정산 정보(KYC) 승인 후 지급.</b> 계좌·통장 사본은 암호화되어 저장됩니다.</li>
             <li className="rounded-lg border border-stone-200 p-4"><b>명세서는 대시보드에서</b> 언제든 확인하고 PDF 로 저장할 수 있습니다.</li>
           </ul>
+        </div>
+      </section>
+
+      <section id="download" className="mx-auto max-w-6xl px-6 py-16">
+        <div className="card grid gap-6 lg:grid-cols-2 lg:items-center">
+          <div>
+            <h2 className="text-2xl font-bold">데스크톱 앱 설치</h2>
+            <p className="mt-2 text-stone-600">내 PC 에서 SNS 로그인 세션을 안전하게 보관하고, 예약된 글을 대신 올려 주는 작은 트레이 앱입니다. 한 번 설치하면 새 버전은 자동으로 갱신됩니다.</p>
+            <ol className="mt-4 list-decimal space-y-1 pl-5 text-sm text-stone-700">
+              <li>설치 파일을 받아 실행합니다. 서명 전 버전이라 SmartScreen/Gatekeeper 경고가 뜨면 &quot;추가 정보 → 실행&quot; 을 누르세요.</li>
+              <li>대시보드 &gt; 데스크톱 에이전트에서 페어링 코드를 발급해 앱에 입력합니다.</li>
+              <li>스페이스를 만들고 &quot;로그인 창 열기&quot; 로 SNS 에 한 번만 직접 로그인하면 준비 끝.</li>
+            </ol>
+          </div>
+          <div className="flex flex-col gap-3">
+            <DownloadButtons />
+            <p className="text-xs text-stone-500">Windows 10 이상 · macOS(Apple Silicon). 브라우저 게시는 Chrome 또는 Edge 가 설치돼 있어야 합니다.</p>
+          </div>
         </div>
       </section>
 
