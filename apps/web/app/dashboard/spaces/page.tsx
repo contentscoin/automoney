@@ -57,7 +57,16 @@ export default function SpacesPage() {
               </div>
             </div>
             <div className="text-xs text-stone-500">일일 한도 {s.dailyPostLimit}회 · 마지막 확인 {s.lastCheckedAt ? dateTime(s.lastCheckedAt) : "-"}{s.locked ? " · 작업 진행 중" : ""}</div>
-            {s.lastError && <div className="rounded bg-rose-50 p-2 text-xs text-rose-700">{s.lastError}</div>}
+            {s.lastError && (
+              <div className="rounded bg-rose-50 p-2 text-xs text-rose-700">
+                {s.lastError}
+                {/^사용할 브라우저를 찾지 못했습니다/.test(s.lastError) && (
+                  <div className="mt-1 border-t border-rose-200 pt-1 text-rose-800">
+                    PC 에 Chrome 을 설치한 뒤 앱을 다시 시작하세요. 설치돼 있는데도 이 오류가 나면 앱 트레이 패널의 &quot;브라우저&quot; 항목을 확인하고, 터미널에서 <code>npx playwright install chromium</code> 을 실행해 보세요.
+                  </div>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap gap-1">
               <button className="btn-ghost !px-2 !py-1 text-xs" disabled={s.locked} onClick={() => wrap(() => requestLogin({ spaceId: s._id }), "PC 에서 로그인 창이 열립니다.")}>로그인 창 열기</button>
               <button className="btn-ghost !px-2 !py-1 text-xs" disabled={s.locked} onClick={() => wrap(() => requestVerify({ spaceId: s._id }), "세션 검증을 요청했습니다.")}>세션 검증</button>

@@ -3,6 +3,7 @@ import path from "node:path";
 import { AgentLoop, type AgentStatus } from "./agent/loop";
 import { loadConfig, saveConfig, redactedConfig } from "./agent/config";
 import { log } from "./agent/logger";
+import { detectBrowsers } from "./agent/spaces/manager";
 import { createUpdater, type UpdaterState } from "./updater";
 
 /**
@@ -108,7 +109,7 @@ if (!gotLock) {
     else app.setAsDefaultProtocolClient("automoney");
     if (app.isPackaged && process.platform === "win32") app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: ["--hidden"] });
 
-    ipcMain.handle("agent:status", (): AgentStatus & { updater: typeof updaterState; version: string } => ({ ...loop.status, updater: updaterState, version: appVersion }));
+    ipcMain.handle("agent:status", (): AgentStatus & { updater: typeof updaterState; version: string; browsers: string[] } => ({ ...loop.status, updater: updaterState, version: appVersion, browsers: detectBrowsers().map((b) => b.label) }));
     ipcMain.handle("agent:pair", async (_e, code: string) => {
       await loop.pair(String(code).toUpperCase().replace(/[^A-Z2-9]/g, ""));
       return redactedConfig(loadConfig());
