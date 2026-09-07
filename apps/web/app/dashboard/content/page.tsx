@@ -9,7 +9,7 @@ import { dateTime, errorMessage } from "@/lib/format";
 import { CHANNEL_LABEL, CHANNEL_ORDER, CURATION_KIND_LABEL } from "@/lib/content-format";
 
 type Channel = (typeof CHANNEL_ORDER)[number];
-type Tab = "PIECES" | "MEME" | "TREND" | "PRODUCT_FACT" | "CELEB_MATCH";
+type Tab = "PIECES" | "OUTFIT" | "MEME" | "TREND" | "PRODUCT_FACT" | "CELEB_MATCH";
 
 export default function ContentPage() {
   const magazines = useQuery(api.magazines.list, { limit: 20 });
@@ -90,7 +90,7 @@ export default function ContentPage() {
 
       <section className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          {(["PIECES", "MEME", "TREND", "PRODUCT_FACT", "CELEB_MATCH"] as Tab[]).map((k) => (
+          {(["PIECES", "OUTFIT", "MEME", "TREND", "PRODUCT_FACT", "CELEB_MATCH"] as Tab[]).map((k) => (
             <button key={k} className={`rounded-lg px-3 py-1.5 text-sm ${tab === k ? "bg-orange-50 font-medium text-orange-800" : "text-stone-700 hover:bg-stone-100"}`} onClick={() => setTab(k)}>{k === "PIECES" ? "콘텐츠 라이브러리" : CURATION_KIND_LABEL[k]}</button>
           ))}
           {tab === "PIECES" && <select className="input ml-auto w-auto py-1 text-sm" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as "" | "DRAFT" | "APPROVED")}><option value="">전체</option><option value="APPROVED">승인</option><option value="DRAFT">검토 필요</option></select>}
@@ -110,7 +110,7 @@ export default function ContentPage() {
             <table className="table">
               <thead><tr><th>제목</th><th>내용</th><th>출처</th><th>라이선스</th><th>점수</th><th>수집</th></tr></thead>
               <tbody>
-                {curation?.length === 0 && <tr><td colSpan={6} className="text-center text-stone-500">항목이 없습니다.{tab === "TREND" ? " 트렌드는 6시간마다 구글 트렌드(KR)에서 갱신됩니다." : tab === "PRODUCT_FACT" ? " 위에서 상품을 고르고 '제품 정보 팩 만들기'를 누르세요." : ""}</td></tr>}
+                {curation?.length === 0 && <tr><td colSpan={6} className="text-center text-stone-500">항목이 없습니다.{tab === "TREND" ? " 트렌드는 6시간마다 구글 트렌드(KR)에서 갱신됩니다." : tab === "PRODUCT_FACT" ? " 위에서 상품을 고르고 '제품 정보 팩 만들기'를 누르세요." : tab === "OUTFIT" ? " 매거진이 등록되면 테마별 코디 세트가 자동으로 만들어집니다." : ""}</td></tr>}
                 {curation?.map((c) => (
                   <tr key={c._id}>
                     <td className="text-sm font-medium">{c.mediaUrl && <img src={c.mediaUrl} alt="" className="mr-2 inline h-8 w-8 rounded object-cover" />}{c.title}</td>

@@ -11,6 +11,7 @@ export const CURATION_KIND_LABEL: Record<string, string> = {
   MEME: "짤·밈",
   TREND: "트렌드",
   PRODUCT_FACT: "제품 정보",
+  OUTFIT: "코디 제안",
   CELEB_MATCH: "연예인 착용",
 };
 export const PIECE_STATUS_LABEL: Record<string, string> = { DRAFT: "검토 필요", APPROVED: "승인", RETIRED: "폐기" };
