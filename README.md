@@ -107,7 +107,7 @@ Convex 추가 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELE
 
 ### 데스크톱 배포·서명
 - 설치 파일 다운로드: https://github.com/contentscoin/automoney/releases/latest (`desktop-v*` 태그 푸시 시 GitHub Release 에 Windows `.exe`·macOS `.dmg/.zip` 자동 첨부). 패키징된 앱은 번들 Chromium 이 없으므로 시스템 Chrome → Edge 순으로 자동 폴백하며, `AUTOMONEY_BROWSER_CHANNEL`/`AUTOMONEY_BROWSER_EXECUTABLE` 로 고정할 수 있다.
-- 태그 `desktop-v*` 푸시 시 `desktop-build.yml` 이 Windows(NSIS)·macOS(dmg/zip) 를 빌드합니다. 시크릿 `CSC_LINK`/`CSC_KEY_PASSWORD`(코드사인 인증서 p12 base64/비밀번호), `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`(노터라이즈) 가 있으면 서명·노터라이즈, 없으면 서명 없이 빌드합니다. 자동 업데이트 피드는 변수 `AUTOMONEY_UPDATE_FEED_URL`(정적 호스팅에 `latest.yml`·설치 파일 업로드).
+- 태그 `desktop-v*` 푸시 시 `desktop-build.yml` 이 Windows(NSIS)·macOS(dmg/zip) 를 빌드합니다. 시크릿 `CSC_LINK`/`CSC_KEY_PASSWORD`(코드사인 인증서 p12 base64/비밀번호), `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`(노터라이즈) 가 있으면 서명·노터라이즈, 없으면 서명 없이 빌드합니다. 자동 업데이트는 기본으로 GitHub Releases(`latest.yml`) 를 피드로 쓰며, 새 `desktop-v*` 릴리스가 올라오면 설치된 앱이 유휴 시점에 스스로 갱신합니다(서명 없는 macOS 빌드는 electron-updater 제약으로 자동 갱신이 되지 않아 수동 재설치). 사설 피드를 쓰려면 `AUTOMONEY_UPDATE_FEED_URL`(https 정적 호스팅), 끄려면 `off`. 태그 푸시 없이 릴리스하려면 Actions 에서 `desktop-build` 를 `release_tag=desktop-vX.Y.Z` 입력과 함께 수동 실행하면 현재 커밋에 태그와 Release 를 만듭니다.
 - 에이전트 설정(`~/.automoney/config.json`): `autopilot`(레시피 실패 시 Codex 복구), `updateFeedUrl`, `browserChannel`, `headless`.
 
 ### M5 Meta API · Stateless MCP · 분석 루프 (구현)

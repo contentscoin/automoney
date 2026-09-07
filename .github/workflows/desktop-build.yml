@@ -4,6 +4,11 @@ on:
   push:
     tags: ["desktop-v*"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "비워두면 빌드만. desktop-vX.Y.Z 를 넣으면 현재 커밋에 태그를 만들고 GitHub Release 까지 생성"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -59,8 +64,6 @@ jobs:
       - name: Package
         working-directory: apps/desktop
         run: npx electron-builder --${{ matrix.target }} --publish never
-        env:
-          AUTOMONEY_UPDATE_FEED_URL: ${{ vars.AUTOMONEY_UPDATE_FEED_URL || 'https://example.invalid/updates' }}
       - uses: actions/upload-artifact@v4
         with:
           name: automoney-desktop-${{ matrix.target }}
@@ -68,13 +71,13 @@ jobs:
             apps/desktop/release/*.exe
             apps/desktop/release/*.dmg
             apps/desktop/release/*.zip
-            apps/desktop/release/*.yml
+            apps/desktop/release/latest*.yml
             apps/desktop/release/*.blockmap
           if-no-files-found: warn
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    if: startsWith(github.ref, 'refs/tags/desktop-v') || startsWith(inputs.release_tag, 'desktop-v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -86,7 +89,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: automoney 데스크톱 에이전트 ${{ github.ref_name }}
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: automoney 데스크톱 에이전트 ${{ inputs.release_tag || github.ref_name }}
           body: |
             automoney 데스크톱 에이전트 설치 파일입니다.
             - Windows: `automoney-agent-*-win-x64.exe` (NSIS 설치 프로그램)
@@ -96,7 +101,7 @@ jobs:
             artifacts/*.exe
             artifacts/*.dmg
             artifacts/*.zip
-            artifacts/*.yml
+            artifacts/latest*.yml
             artifacts/*.blockmap
           fail_on_unmatched_files: false
 
