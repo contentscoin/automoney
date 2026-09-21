@@ -34,19 +34,19 @@ export default function StatementPage() {
         <dl className="mt-4 grid grid-cols-2 gap-y-1 text-sm">
           <dt className="text-stone-500">수령인</dt><dd>{st.payee?.legalName ?? st.beneficiary?.name ?? "-"} ({st.beneficiary?.email})</dd>
           <dt className="text-stone-500">입금 계좌</dt><dd>{st.payee ? `${st.payee.bankName} ${st.payee.accountNoMasked}` : "-"}</dd>
-          <dt className="text-stone-500">항목 수</dt><dd>{st.lines.length}건</dd>
+          <dt className="text-stone-500">항목</dt><dd>{st.lines.some((line) => "redacted" in line) ? "월 합계" : `${st.lines.length}건`}</dd>
         </dl>
         <table className="table mt-5">
           <thead><tr><th>주문번호</th><th>주문일시</th><th>실적월</th><th>구분</th><th>기준금액</th><th>요율</th><th>수당</th></tr></thead>
           <tbody>
             {st.lines.map((l) => (
               <tr key={l.entryId}>
-                <td className="font-mono text-xs">{l.attrangsOrderId}</td>
-                <td className="text-xs">{dateTime(l.orderedAt)}</td>
+                <td className="font-mono text-xs">{"redacted" in l ? "월 합계" : l.attrangsOrderId}</td>
+                <td className="text-xs">{"redacted" in l ? "-" : dateTime(l.orderedAt)}</td>
                 <td className="text-xs">{l.month}</td>
-                <td className="text-xs">{l.attribution === "DIRECT" ? "직접" : "간접"}</td>
-                <td className="tabular-nums">{won(l.baseAmount)}</td>
-                <td className="tabular-nums">{pct(l.rateBps)}</td>
+                <td className="text-xs">{"redacted" in l ? "통합" : l.attribution === "DIRECT" ? "직접" : "간접"}</td>
+                <td className="tabular-nums">{"redacted" in l ? "-" : won(l.baseAmount)}</td>
+                <td className="tabular-nums">{"redacted" in l ? "-" : pct(l.rateBps)}</td>
                 <td className={`tabular-nums ${l.amount < 0 ? "text-rose-700" : ""}`}>{won(l.amount)}</td>
               </tr>
             ))}

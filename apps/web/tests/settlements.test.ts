@@ -116,8 +116,9 @@ describe("commission engine", () => {
   });
 
   it("cancellation after settlement leaves a negative carry-over entry", async () => {
-    const { t, owner, user, link, month } = await scenario();
+    const { t, owner, admin, user, link, month } = await scenario();
     await approveKyc(t, owner, user.userId);
+    await approveKyc(t, owner, admin.userId);
     await t.mutation(internal.orders.ingest, { payload: webhook("C2", link.trackingCode, "direct") });
     await owner.as.mutation(api.settlements.closeMonth, { month });
     await t.mutation(internal.orders.ingest, { payload: webhook("C2", link.trackingCode, "direct", "refunded", "_r") });
@@ -137,13 +138,14 @@ describe("settlement lifecycle", () => {
 
     await expect(user.as.mutation(api.settlements.closeMonth, { month })).rejects.toThrow(/권한/);
     const first = await owner.as.mutation(api.settlements.closeMonth, { month });
-    expect(first.held).toBe(1); // 유저 KYC 미승인
-    expect(first.created).toBe(2); // 총판·운영사
+    expect(first.held).toBe(2); // 유저·총판 KYC 미승인
+    expect(first.created).toBe(1); // 운영사
     let mine = await user.as.query(api.settlements.listMine, {});
     expect(mine[0]?.status).toBe("HELD");
     expect(mine[0]?.heldReason).toBe("KYC_INCOMPLETE");
 
     await approveKyc(t, owner, user.userId);
+    await approveKyc(t, owner, admin.userId);
     const second = await owner.as.mutation(api.settlements.closeMonth, { month });
     expect(second.held).toBe(0);
     expect(second.created).toBe(3);
@@ -162,7 +164,9 @@ describe("settlement lifecycle", () => {
         { orderId: "L2", commissionableAmount: 35000, attribution: "INDIRECT", status: "CONFIRMED" },
       ],
     });
-    await owner.as.mutation(api.settlements.uploadBatchCsv, { csv });
+    const uploaded = await owner.as.mutation(api.settlements.uploadBatchCsv, { csv });
+    expect(uploaded.duplicate).toBe(false);
+    expect((await owner.as.mutation(api.settlements.uploadBatchCsv, { csv })).duplicate).toBe(true);
     const recon = await owner.as.mutation(api.settlements.reconcile, { month });
     expect(recon.diffs).toEqual([]);
     expect(recon.diffAmount).toBe(0);
@@ -191,21 +195,31 @@ describe("settlement lifecycle", () => {
     const am = await admin.as.query(api.settlements.adminMonth, { month });
     expect(am.adminMargin).toBe(2100);
     expect(am.rows[0]?.userCommission).toBe(1750);
+    expect(JSON.stringify(am)).not.toMatch(/adminMarginDirect|indirect|entryCount/i);
 
     // 명세서: 본인 OK, 총판 OK(하부), 운영사 명세서는 유저 금지
     const statement = await user.as.query(api.settlements.getStatement, { id: mine[0]!._id });
     expect(statement.lines).toHaveLength(1);
     expect(statement.lines[0]?.amount).toBe(1750);
     await admin.as.query(api.settlements.getStatement, { id: mine[0]!._id });
+    const adminSettlements = await admin.as.query(api.settlements.listMine, {});
+    expect(JSON.stringify(adminSettlements)).not.toMatch(/entryCount/i);
+    const adminStatement = await admin.as.query(api.settlements.getStatement, { id: adminSettlements[0]!._id });
+    expect(adminStatement.lines).toEqual([{ entryId: `aggregate:${adminSettlements[0]!._id}`, month, amount: 2100, redacted: true }]);
+    expect(JSON.stringify(adminStatement)).not.toMatch(/attribution|attrangsOrderId|baseAmount|rateBps|entryCount|indirect/i);
     const opSettlement = sm.settlements.find((s) => s.beneficiaryType === "OPERATOR")!;
     await expect(user.as.query(api.settlements.getStatement, { id: opSettlement._id })).rejects.toThrow(/권한/);
 
     // 승인 → 지급 파일 → 지급 완료
     await owner.as.mutation(api.settlements.approve, { month });
+    const approvedRows = await t.run((ctx) => ctx.db.query("settlements").withIndex("by_month", (q) => q.eq("month", month)).collect());
+    expect(approvedRows.every((row) => row.approvedSnapshotHash === row.snapshotHash)).toBe(true);
     const payout = await owner.as.action(api.settlements.exportPayout, { month });
-    expect(payout.count).toBe(1); // KYC 승인된 유저만 (총판은 KYC 없음)
-    expect(payout.total).toBe(1750);
+    expect(payout.count).toBe(2); // KYC 승인된 유저와 총판
+    expect(payout.total).toBe(3850);
     expect(typeof payout.url).toBe("string");
+    const payoutRows = await t.run((ctx) => ctx.db.query("settlements").withIndex("by_month", (q) => q.eq("month", month)).collect());
+    expect(payoutRows.filter((row) => row.beneficiaryUserId).every((row) => row.payoutSnapshotHash === row.approvedSnapshotHash && !!row.payoutFileHash)).toBe(true);
     await owner.as.mutation(api.settlements.markPaid, { month, paidRef: "ATT-2026-09" });
     mine = await user.as.query(api.settlements.listMine, {});
     expect(mine[0]?.status).toBe("PAID");

@@ -17,8 +17,26 @@ const BIRTH = /^\d{4}-\d{2}-\d{2}$/;
 export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
-    await requireUser(ctx);
-    return await ctx.storage.generateUploadUrl();
+    const user = await requireUser(ctx);
+    const now = Date.now();
+    const intentId = await ctx.db.insert("uploadIntents", { userId: user._id, purpose: "KYC_BANKBOOK", expiresAt: now + 15 * 60_000, state: "PENDING", createdAt: now });
+    return { intentId, uploadUrl: await ctx.storage.generateUploadUrl() };
+  },
+});
+
+export const bindUpload = mutation({
+  args: { intentId: v.id("uploadIntents"), storageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    const intent = await ctx.db.get(args.intentId);
+    if (!intent || intent.userId !== user._id) fail("NOT_FOUND", "업로드 요청을 찾을 수 없습니다.");
+    if (intent.state !== "PENDING" || intent.expiresAt < Date.now()) {
+      if (intent.expiresAt < Date.now()) await ctx.db.patch(intent._id, { state: "EXPIRED" });
+      fail("CONFLICT", "업로드 요청이 만료되었거나 이미 사용되었습니다.");
+    }
+    if (!(await ctx.db.system.get(args.storageId))) fail("INVALID_ARGUMENT", "통장사본 파일을 찾을 수 없습니다.");
+    await ctx.db.patch(intent._id, { storageId: args.storageId, state: "BOUND" });
+    return { ok: true as const };
   },
 });
 
@@ -32,7 +50,7 @@ const submitArgs = {
   bankName: v.string(),
   accountNo: v.string(),
   accountHolder: v.string(),
-  bankbookStorageId: v.id("_storage"),
+  uploadIntentId: v.id("uploadIntents"),
 };
 
 /** 액션: 민감 필드 암호화 후 내부 뮤테이션으로 저장. 평문은 DB 에 남지 않는다. */
@@ -77,7 +95,8 @@ export const submit = action({
       accountNoEnc,
       accountNoLast4: accountDigits.slice(-4),
       accountHolder: args.accountHolder.trim(),
-      bankbookStorageId: args.bankbookStorageId,
+      uploadIntentId: args.uploadIntentId,
+      encryptionKeyId: process.env.KYC_KEY_ID ?? "local-v1",
     });
     return { ok: true as const };
   },
@@ -97,10 +116,15 @@ export const saveSubmission = internalMutation({
     accountNoEnc: v.string(),
     accountNoLast4: v.string(),
     accountHolder: v.string(),
-    bankbookStorageId: v.id("_storage"),
+    uploadIntentId: v.id("uploadIntents"),
+    encryptionKeyId: v.string(),
   },
   handler: async (ctx, args) => {
-    const file = await ctx.db.system.get(args.bankbookStorageId);
+    const intent = await ctx.db.get(args.uploadIntentId);
+    if (!intent || intent.userId !== args.userId) fail("NOT_FOUND", "업로드 요청을 찾을 수 없습니다.");
+    if (intent.state !== "BOUND" || !intent.storageId || intent.expiresAt < Date.now()) fail("CONFLICT", "업로드 요청이 만료되었거나 사용할 수 없습니다.");
+    const bankbookStorageId = intent.storageId;
+    const file = await ctx.db.system.get(bankbookStorageId);
     if (!file) fail("INVALID_ARGUMENT", "통장사본 파일을 찾을 수 없습니다.");
     if (file.size > 10 * 1024 * 1024) fail("INVALID_ARGUMENT", "통장사본은 10MB 이하여야 합니다.");
     if (file.contentType && !/^(image\/(jpeg|png|webp|heic)|application\/pdf)$/.test(file.contentType)) {
@@ -112,9 +136,11 @@ export const saveSubmission = internalMutation({
       .unique();
     if (existing?.status === "APPROVED") fail("CONFLICT", "이미 승인된 KYC 는 수정할 수 없습니다. 운영팀에 문의하세요.");
     const now = Date.now();
-    const { userId, ...fields } = args;
+    const { userId, uploadIntentId: _uploadIntentId, ...encryptedFields } = args;
+    void _uploadIntentId;
+    const fields = { ...encryptedFields, bankbookStorageId };
     if (existing) {
-      if (existing.bankbookStorageId !== args.bankbookStorageId) {
+      if (existing.bankbookStorageId !== bankbookStorageId) {
         await ctx.storage.delete(existing.bankbookStorageId);
       }
       await ctx.db.patch(existing._id, {
@@ -128,6 +154,7 @@ export const saveSubmission = internalMutation({
     } else {
       await ctx.db.insert("kycProfiles", { userId, ...fields, status: "SUBMITTED", submittedAt: now });
     }
+    await ctx.db.patch(intent._id, { state: "CONSUMED" });
     await audit(ctx, { actorUserId: userId, targetUserId: userId, action: "kyc.submit" });
   },
 });

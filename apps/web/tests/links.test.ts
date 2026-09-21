@@ -45,4 +45,27 @@ describe("links & clicks", () => {
     const r = await t.mutation(api.clicks.record, { shortCode: "NOPE123", secret: "redirect-secret" });
     expect(r.found).toBe(false);
   });
+
+  it("previews and resumes link-pool imports; real mode never falls back to mock", async () => {
+    const t = makeT();
+    const owner = await signup(t, "owner@automoney.test");
+    const firstUser = await signup(t, "pool1@test.com");
+    const secondUser = await signup(t, "pool2@test.com");
+    const emptyUser = await signup(t, "pool3@test.com");
+    const productId = await seedProduct(t, 200001);
+    const csv = "external_product_id,tracking_code,target_url\n200001,pool-a,https://partner.test/a\n200001,pool-b,https://partner.test/b";
+    const preview = await owner.as.mutation(api.imports.previewLinkPool, { csv, sourceVersion: "sample-v1" });
+    expect(preview).toMatchObject({ duplicate: false, validRows: 2, errorRows: 0, status: "VALIDATED" });
+    expect(await owner.as.mutation(api.imports.applyLinkPool, { batchId: preview.batchId })).toMatchObject({ completed: true, applied: 2 });
+    expect(await owner.as.mutation(api.imports.applyLinkPool, { batchId: preview.batchId })).toMatchObject({ completed: true, applied: 0 });
+    expect((await owner.as.mutation(api.imports.previewLinkPool, { csv })).duplicate).toBe(true);
+    process.env.ATTRANGS_MODE = "pool";
+    try {
+      expect((await firstUser.as.action(api.links.issue, { productId })).trackingCode).toBe("pool-a");
+      expect((await secondUser.as.action(api.links.issue, { productId })).trackingCode).toBe("pool-b");
+      await expect(emptyUser.as.action(api.links.issue, { productId })).rejects.toThrow(/소진/);
+    } finally {
+      delete process.env.ATTRANGS_MODE;
+    }
+  });
 });

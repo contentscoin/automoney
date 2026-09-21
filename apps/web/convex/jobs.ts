@@ -7,6 +7,7 @@ import { fail } from "./lib/errors";
 import { requireUser, roleOf } from "./lib/rbac";
 import { consumePiece } from "./lib/pieces";
 import { internal } from "./_generated/api";
+import { sha256Hex } from "./lib/crypto";
 
 export const jobTypeValidator = v.union(
   v.literal("post.publish"),
@@ -32,13 +33,33 @@ export interface EnqueueInput {
   needsApproval?: boolean;
   runAfter?: number;
   idempotencyKey?: string;
+  requestKey?: string;
+  rootJobId?: Id<"agentJobs">;
+  expiresAt?: number;
 }
 
-/** 공통 enqueue. 멱등키 중복은 기존 잡 반환. */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(obj[key])}`).join(",")}}`;
+}
+
+/** 플랫폼·계정·본문·미디어·링크·콘텐츠 버전을 포함한 승인 결합 해시. */
+export async function hashJobPayload(jobType: JobType, payload: Record<string, unknown>): Promise<string> {
+  return await sha256Hex(canonicalJson({ jobType, payload }));
+}
+
+/** 공통 enqueue. 멱등키는 사용자 tenant 안에서만 유효하며 다른 payload 재사용은 충돌이다. */
 export async function enqueueJob(ctx: MutationCtx, input: EnqueueInput): Promise<Id<"agentJobs">> {
-  if (input.idempotencyKey) {
-    const dup = await ctx.db.query("agentJobs").withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", input.idempotencyKey!)).unique();
-    if (dup) return dup._id;
+  const requestKey = input.requestKey ?? input.idempotencyKey;
+  const payloadHash = await hashJobPayload(input.jobType, input.payload);
+  if (requestKey) {
+    const dup = await ctx.db.query("agentJobs").withIndex("by_user_requestKey", (q) => q.eq("userId", input.userId).eq("requestKey", requestKey)).unique();
+    if (dup) {
+      if (dup.payloadHash && dup.payloadHash !== payloadHash) fail("CONFLICT", "IDEMPOTENCY_CONFLICT");
+      return dup._id;
+    }
   }
   if (input.jobType === "post.publish") {
     const err = validatePublishPayload(input.payload as unknown as PublishPayload);
@@ -67,11 +88,17 @@ export async function enqueueJob(ctx: MutationCtx, input: EnqueueInput): Promise
     fallbackFromJobId: input.fallbackFromJobId,
     runAfter: input.runAfter ?? now,
     idempotencyKey: input.idempotencyKey,
+    requestKey,
+    payloadHash,
+    approvalRequired: input.jobType === "post.publish" ? input.needsApproval !== false : false,
+    protocolVersion: 2,
+    expiresAt: input.expiresAt,
     cancelRequested: false,
     source: input.source,
     createdAt: now,
     updatedAt: now,
   });
+  await ctx.db.patch(id, { rootJobId: input.rootJobId ?? id });
   if (executor === "CLOUD" && status === "QUEUED") await ctx.scheduler.runAfter(Math.max(0, (input.runAfter ?? now) - now), internal.meta.runCloudJob, { jobId: id });
   return id;
 }
@@ -109,7 +136,7 @@ export async function enqueuePublishFor(ctx: MutationCtx, user: Doc<"users">, ar
     linkUrl = `${process.env.SITE_URL ?? ""}/r/${link.shortCode}`;
   }
   const payload: PublishPayload & { pieceId?: string } = { spaceId: space._id, platform: space.platform, text, mediaUrls, linkUrl, dryRun: args.dryRun ?? false, ...(args.pieceId ? { pieceId: args.pieceId } : {}) };
-  const id = await enqueueJob(ctx, { userId: user._id, jobType: "post.publish", payload: payload as unknown as Record<string, unknown>, spaceId: space._id, source, needsApproval: args.requireApproval ?? false });
+  const id = await enqueueJob(ctx, { userId: user._id, jobType: "post.publish", payload: payload as unknown as Record<string, unknown>, spaceId: space._id, source, needsApproval: args.requireApproval ?? true });
   await audit(ctx, { actorUserId: user._id, action: "job.enqueuePublish", metadata: { jobId: id, spaceId: space._id, pieceId: args.pieceId ?? null } });
   return id;
 }
@@ -163,7 +190,10 @@ export const approve = mutation({
     const j = await ctx.db.get(args.jobId);
     if (!j || j.userId !== user._id) fail("NOT_FOUND", "작업을 찾을 수 없습니다.");
     if (j.status !== "NEEDS_APPROVAL") fail("CONFLICT", "승인 대기 상태가 아닙니다.");
-    await ctx.db.patch(j._id, { status: "QUEUED", runAfter: Date.now(), updatedAt: Date.now() });
+    const payloadHash = await hashJobPayload(j.jobType, j.payload as Record<string, unknown>);
+    if (j.payloadHash && j.payloadHash !== payloadHash) fail("CONFLICT", "승인할 내용이 변경되었습니다. 다시 등록하세요.");
+    const now = Date.now();
+    await ctx.db.patch(j._id, { status: "QUEUED", runAfter: now, payloadHash, approval: { actorUserId: user._id, approvedAt: now, payloadHash }, updatedAt: now });
     if (j.executor === "CLOUD") await ctx.scheduler.runAfter(0, internal.meta.runCloudJob, { jobId: j._id });
     await audit(ctx, { actorUserId: user._id, action: "job.approve", metadata: { jobId: j._id } });
   },
@@ -200,7 +230,9 @@ export const sweep = internalMutation({
     for (const j of running) {
       if ((j.leaseUntil ?? 0) >= now) continue;
       if (j.jobType === "post.publish") {
-        await ctx.db.patch(j._id, { status: "FAILED", errorCode: "AGENT_LOST_UNCERTAIN", errorMessage: "에이전트 응답이 끊겨 게시 여부를 확인할 수 없습니다.", finishedAt: now, updatedAt: now });
+        await ctx.db.patch(j._id, { status: "FAILED", publishPhase: "UNCERTAIN", errorCode: "AGENT_LOST_UNCERTAIN", errorMessage: "에이전트 응답이 끊겨 게시 여부를 확인할 수 없습니다.", finishedAt: now, updatedAt: now });
+        const reservation = await ctx.db.query("publishReservations").withIndex("by_root", (q) => q.eq("rootJobId", j.rootJobId ?? j._id)).unique();
+        if (reservation) await ctx.db.patch(reservation._id, { state: "UNCERTAIN" });
         lost++;
       } else {
         await ctx.db.patch(j._id, { status: "QUEUED", claimedByDeviceId: undefined, leaseUntil: undefined, stage: "requeued:lease_expired", updatedAt: now });
@@ -225,7 +257,7 @@ export const sweep = internalMutation({
 
 /** 텔레그램 등 내부 호출용 */
 export const enqueueInternal = internalMutation({
-  args: { userId: v.id("users"), jobType: jobTypeValidator, payload: v.any(), spaceId: v.optional(v.id("spaces")), source: sourceValidator, needsApproval: v.optional(v.boolean()), idempotencyKey: v.optional(v.string()) },
+  args: { userId: v.id("users"), jobType: jobTypeValidator, payload: v.any(), spaceId: v.optional(v.id("spaces")), source: sourceValidator, needsApproval: v.optional(v.boolean()), idempotencyKey: v.optional(v.string()), requestKey: v.optional(v.string()) },
   handler: async (ctx, args) => enqueueJob(ctx, { ...args, payload: args.payload as Record<string, unknown> }),
 });
 

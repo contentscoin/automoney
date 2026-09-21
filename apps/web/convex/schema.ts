@@ -72,9 +72,19 @@ export default defineSchema({
     reviewedBy: v.optional(v.id("users")),
     reviewedAt: v.optional(v.number()),
     rejectReason: v.optional(v.string()),
+    encryptionKeyId: v.optional(v.string()),
   })
     .index("by_user", ["userId"])
     .index("by_status", ["status", "submittedAt"]),
+
+  uploadIntents: defineTable({
+    userId: v.id("users"),
+    purpose: v.literal("KYC_BANKBOOK"),
+    expiresAt: v.number(),
+    storageId: v.optional(v.id("_storage")),
+    state: v.union(v.literal("PENDING"), v.literal("BOUND"), v.literal("CONSUMED"), v.literal("EXPIRED")),
+    createdAt: v.number(),
+  }).index("by_user", ["userId", "createdAt"]),
 
   products: defineTable({
     attrangsProductId: v.number(),
@@ -107,6 +117,42 @@ export default defineSchema({
     .index("by_trackingCode", ["trackingCode"])
     .index("by_user_product", ["userId", "productId"]),
 
+  importBatches: defineTable({
+    kind: v.union(v.literal("PRODUCT"), v.literal("LINK_POOL"), v.literal("ORDER"), v.literal("SETTLEMENT")),
+    contentHash: v.string(),
+    sourceVersion: v.optional(v.string()),
+    uploadedBy: v.id("users"),
+    status: v.union(v.literal("PREVIEW"), v.literal("VALIDATED"), v.literal("APPLYING"), v.literal("COMPLETED"), v.literal("FAILED")),
+    totalRows: v.number(),
+    validRows: v.number(),
+    appliedRows: v.number(),
+    errorRows: v.number(),
+    cursor: v.optional(v.number()),
+    createdAt: v.number(),
+    completedAt: v.optional(v.number()),
+  }).index("by_kind_hash", ["kind", "contentHash"]),
+
+  importRows: defineTable({
+    batchId: v.id("importBatches"),
+    rowNo: v.number(),
+    normalizedPayload: v.any(),
+    rowHash: v.string(),
+    status: v.union(v.literal("VALID"), v.literal("INVALID"), v.literal("APPLIED"), v.literal("SKIPPED")),
+    errors: v.array(v.string()),
+  }).index("by_batch_row", ["batchId", "rowNo"]),
+
+  partnerLinkPool: defineTable({
+    productId: v.id("products"),
+    trackingCode: v.string(),
+    targetUrl: v.string(),
+    assignedUserId: v.optional(v.id("users")),
+    assignedLinkId: v.optional(v.id("marketingLinks")),
+    status: v.union(v.literal("AVAILABLE"), v.literal("ASSIGNED"), v.literal("DISABLED")),
+    batchId: v.id("importBatches"),
+  })
+    .index("by_trackingCode", ["trackingCode"])
+    .index("by_product_status", ["productId", "status"]),
+
   clickEvents: defineTable({
     linkId: v.id("marketingLinks"),
     userId: v.id("users"),
@@ -134,6 +180,10 @@ export default defineSchema({
     status: orderStatusValidator,
     rawPayload: v.any(),
     lastEventId: v.string(),
+    lastOccurredAt: v.optional(v.number()),
+    lastSourceVersion: v.optional(v.string()),
+    source: v.optional(v.union(v.literal("CSV"), v.literal("WEBHOOK"), v.literal("RECON"))),
+    ingestionVersion: v.optional(v.number()),
     updatedAt: v.number(),
   })
     .index("by_attrangsOrderId", ["attrangsOrderId"])
@@ -147,9 +197,21 @@ export default defineSchema({
     eventType: v.string(),
     occurredAt: v.number(),
     payload: v.any(),
+    payloadHash: v.optional(v.string()),
+    applyStatus: v.optional(v.union(v.literal("APPLIED"), v.literal("STALE"), v.literal("QUARANTINED"))),
+    reason: v.optional(v.string()),
   })
     .index("by_order", ["orderId"])
     .index("by_eventId", ["eventId"]),
+
+  orderEventConflicts: defineTable({
+    eventId: v.string(),
+    existingPayloadHash: v.string(),
+    incomingPayloadHash: v.string(),
+    payload: v.any(),
+    reason: v.string(),
+    createdAt: v.number(),
+  }).index("by_eventId", ["eventId"]),
 
   /** 월별 유저 집계 (yyyy-mm, KST). 간접구매는 별도 필드로 분리해 유저 조회에서 제외한다. */
   userMonthlyStats: defineTable({
@@ -223,6 +285,11 @@ export default defineSchema({
     paidAt: v.optional(v.number()),
     paidRef: v.optional(v.string()),
     payoutFileGeneratedAt: v.optional(v.number()),
+    revision: v.optional(v.number()),
+    snapshotHash: v.optional(v.string()),
+    approvedSnapshotHash: v.optional(v.string()),
+    payoutSnapshotHash: v.optional(v.string()),
+    payoutFileHash: v.optional(v.string()),
     updatedAt: v.number(),
   })
     .index("by_month", ["month"])
@@ -245,6 +312,8 @@ export default defineSchema({
     ),
     uploadedBy: v.id("users"),
     uploadedAt: v.number(),
+    contentHash: v.optional(v.string()),
+    revision: v.optional(v.number()),
     reconciledAt: v.optional(v.number()),
     diffAmount: v.optional(v.number()),
     diffs: v.optional(v.array(v.object({ kind: v.string(), orderId: v.string(), detail: v.string() }))),
@@ -332,6 +401,18 @@ export default defineSchema({
     ),
     runAfter: v.number(),
     idempotencyKey: v.optional(v.string()),
+    requestKey: v.optional(v.string()),
+    rootJobId: v.optional(v.id("agentJobs")),
+    attemptNo: v.optional(v.number()),
+    leaseTokenHash: v.optional(v.string()),
+    expiresAt: v.optional(v.number()),
+    payloadHash: v.optional(v.string()),
+    approvalRequired: v.optional(v.boolean()),
+    approval: v.optional(v.object({ actorUserId: v.id("users"), approvedAt: v.number(), payloadHash: v.string() })),
+    protocolVersion: v.optional(v.number()),
+    publishPhase: v.optional(v.union(v.literal("PREPARING"), v.literal("INTENT_RECORDED"), v.literal("CONFIRMED"), v.literal("UNCERTAIN"))),
+    completionId: v.optional(v.string()),
+    completionHash: v.optional(v.string()),
     claimedByDeviceId: v.optional(v.id("devices")),
     leaseUntil: v.optional(v.number()),
     heartbeatAt: v.optional(v.number()),
@@ -350,7 +431,21 @@ export default defineSchema({
     .index("by_user", ["userId", "createdAt"])
     .index("by_status", ["status", "runAfter"])
     .index("by_idempotencyKey", ["idempotencyKey"])
+    .index("by_user_requestKey", ["userId", "requestKey"])
     .index("by_space", ["spaceId", "createdAt"]),
+
+  publishReservations: defineTable({
+    userId: v.id("users"),
+    spaceId: v.id("spaces"),
+    rootJobId: v.id("agentJobs"),
+    kstDay: v.string(),
+    state: v.union(v.literal("RESERVED"), v.literal("COMMITTED"), v.literal("RELEASED"), v.literal("UNCERTAIN")),
+    reservedAt: v.number(),
+    expiresAt: v.number(),
+    committedAt: v.optional(v.number()),
+  })
+    .index("by_space_day", ["spaceId", "kstDay"])
+    .index("by_root", ["rootJobId"]),
 
   schedules: defineTable({
     userId: v.id("users"),
@@ -364,7 +459,10 @@ export default defineSchema({
     mediaUrls: v.array(v.string()),
     linkId: v.optional(v.id("marketingLinks")),
     pieceId: v.optional(v.id("contentPieces")),
-    autoApprove: v.boolean(),
+    autoApprove: v.optional(v.boolean()),
+    revision: v.optional(v.number()),
+    lastSkipReason: v.optional(v.string()),
+    lastSkippedAt: v.optional(v.number()),
     enabled: v.boolean(),
     nextRunAt: v.optional(v.number()),
     lastRunAt: v.optional(v.number()),
@@ -597,6 +695,7 @@ export default defineSchema({
     scopes: v.array(v.string()),
     status: v.union(v.literal("ACTIVE"), v.literal("EXPIRED"), v.literal("REVOKED")),
     spaceId: v.optional(v.id("spaces")),
+    fallbackSpaceId: v.optional(v.id("spaces")),
     mode: v.union(v.literal("mock"), v.literal("graph")),
     lastError: v.optional(v.string()),
     lastRefreshedAt: v.optional(v.number()),

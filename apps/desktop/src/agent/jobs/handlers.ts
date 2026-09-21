@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import net from "node:net";
+import { lookup } from "node:dns/promises";
 import { buildGenerationPrompt, okResult, parseGeneratedPieces, templateGenerate, type ContentGeneratePayload, type PublishPayload, type ReadbackPayload } from "@automoney/shared";
 import { codexGenerateText } from "../codexText";
 import { codexStatus, startCodexLogin } from "../codex";
@@ -35,15 +37,52 @@ function helpers(ctx: JobContext, opts: { dryRun: boolean }): RecipeHelpers {
   };
 }
 
-async function downloadMedia(urls: string[]): Promise<string[]> {
+function isPrivateAddress(address: string): boolean {
+  if (address === "::1" || address.startsWith("fc") || address.startsWith("fd") || address.startsWith("fe80:")) return true;
+  if (net.isIPv4(address)) {
+    const [a, b] = address.split(".").map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168);
+  }
+  return false;
+}
+
+async function assertPublicMediaUrl(raw: string): Promise<URL> {
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new JobError("MEDIA_URL_BLOCKED", "invalid media URL"); }
+  const allowPrivateFixtures = process.env.AUTOMONEY_ALLOW_PRIVATE_MEDIA === "1" && process.env.NODE_ENV !== "production";
+  if (url.protocol !== "https:" && !(allowPrivateFixtures && url.protocol === "http:")) throw new JobError("MEDIA_URL_BLOCKED", "media URL must use https");
+  if (allowPrivateFixtures) return url;
+  if (url.username || url.password || url.hostname === "localhost" || url.hostname.endsWith(".local")) throw new JobError("MEDIA_URL_BLOCKED", "local media URL is not allowed");
+  const addresses = net.isIP(url.hostname) ? [{ address: url.hostname }] : await lookup(url.hostname, { all: true }).catch(() => []);
+  if (addresses.length === 0 || addresses.some((entry) => isPrivateAddress(entry.address))) throw new JobError("MEDIA_URL_BLOCKED", "private or unresolved media host is not allowed");
+  return url;
+}
+
+export async function downloadMedia(urls: string[], fetchImpl: typeof fetch = fetch): Promise<string[]> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "automoney-media-"));
   const out: string[] = [];
-  for (const [i, url] of urls.entries()) {
-    const res = await fetch(url);
-    if (!res.ok) throw new JobError("RECIPE_FAILED", `media download failed: ${url} (${res.status})`);
-    const ext = (res.headers.get("content-type") ?? "").includes("png") ? "png" : "jpg";
+  for (const [i, raw] of urls.entries()) {
+    let url = await assertPublicMediaUrl(raw);
+    let res: Response | null = null;
+    for (let redirects = 0; redirects <= 3; redirects++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20_000);
+      try { res = await fetchImpl(url, { redirect: "manual", signal: controller.signal }); } finally { clearTimeout(timer); }
+      if (![301, 302, 303, 307, 308].includes(res.status)) break;
+      const location = res.headers.get("location");
+      if (!location || redirects === 3) throw new JobError("MEDIA_REDIRECT", "media redirect limit exceeded");
+      url = await assertPublicMediaUrl(new URL(location, url).toString());
+    }
+    if (!res?.ok) throw new JobError("MEDIA_DOWNLOAD_FAILED", `media download failed (${res?.status ?? 0})`);
+    const mime = (res.headers.get("content-type") ?? "").split(";")[0]!.toLowerCase();
+    if (!/^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm))$/.test(mime)) throw new JobError("MEDIA_TYPE_UNSUPPORTED", `unsupported media type: ${mime || "unknown"}`);
+    const declared = Number(res.headers.get("content-length") ?? 0);
+    if (declared > 20 * 1024 * 1024) throw new JobError("MEDIA_TOO_LARGE", "media exceeds 20MB");
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > 20 * 1024 * 1024) throw new JobError("MEDIA_TOO_LARGE", "media exceeds 20MB");
+    const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : mime === "video/mp4" ? "mp4" : mime === "video/webm" ? "webm" : "jpg";
     const p = path.join(dir, `media-${i}.${ext}`);
-    fs.writeFileSync(p, Buffer.from(await res.arrayBuffer()));
+    fs.writeFileSync(p, bytes);
     out.push(p);
   }
   return out;

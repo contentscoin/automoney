@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import { Badge } from "@/components/Badge";
 import { dateTime, errorMessage } from "@/lib/format";
 
@@ -19,8 +20,10 @@ export function MetaConnect() {
   const params = useSearchParams();
   const meta = useQuery(api.meta.listMine);
   const status = useQuery(api.meta.status);
+  const spaces = useQuery(api.spaces.listMine);
   const connectStart = useMutation(api.meta.connectStart);
   const disconnect = useMutation(api.meta.disconnect);
+  const setFallbackSpace = useMutation(api.meta.setFallbackSpace);
   const [msg, setMsg] = useState<string | null>(null);
   const result = params.get("meta");
   const resultMsg = result ? RESULT_MSG[result] ?? `연결 실패: ${result.replace(/^error_/, "")}` : null;
@@ -42,7 +45,7 @@ export function MetaConnect() {
           <button className="btn-ghost" onClick={() => connect("INSTAGRAM")}>인스타그램 연결</button>
         </span>
       </div>
-      <p className="mt-1 text-xs text-stone-500">연결된 계정은 브라우저 없이 API 로 게시하고 인사이트를 수집합니다. 토큰 만료·권한 오류 시 같은 내용으로 브라우저 스페이스에 자동 폴백합니다(데스크톱 에이전트가 있을 때).</p>
+      <p className="mt-1 text-xs text-stone-500">연결된 계정은 브라우저 없이 API 로 게시하고 인사이트를 수집합니다. 확인된 미게시 오류에만 아래에서 지정한 동일 계정 브라우저 스페이스로 전환합니다. 게시 여부가 불명확하면 자동 재게시하지 않습니다.</p>
       {(msg ?? resultMsg) && <p className="mt-2 text-sm text-stone-700">{msg ?? resultMsg}</p>}
       {meta && meta.accounts.length > 0 && (
         <ul className="mt-3 grid gap-2 text-sm">
@@ -52,6 +55,10 @@ export function MetaConnect() {
               <Badge value={a.status === "ACTIVE" ? "ACTIVE" : a.status === "EXPIRED" ? "PENDING" : "DISABLED"} label={a.status === "ACTIVE" ? "연결됨" : a.status === "EXPIRED" ? "토큰 만료" : "해제됨"} />
               <span className="text-xs text-stone-500">{a.mode === "mock" ? "mock" : "graph"} · 만료 {dateTime(a.tokenExpiresAt)}</span>
               {a.lastError && <span className="text-xs text-rose-700">{a.lastError}</span>}
+              <label className="text-xs text-stone-600">브라우저 폴백 <select className="input !w-auto !py-1" value={a.fallbackSpaceId ?? ""} onChange={async (event) => { try { await setFallbackSpace({ accountId: a._id, fallbackSpaceId: event.target.value ? event.target.value as Id<"spaces"> : undefined }); setMsg("폴백 스페이스를 변경했습니다."); } catch (e) { setMsg(errorMessage(e)); } }}>
+                <option value="">사용 안 함</option>
+                {spaces?.filter((space) => space.platform === a.platform && space.authMode !== "META_API" && space.sessionState === "HEALTHY" && !!space.handle && space.handle.toLowerCase() === a.username?.toLowerCase()).map((space) => <option key={space._id} value={space._id}>{space.name} @{space.handle}</option>)}
+              </select></label>
               {a.status !== "REVOKED" && <button className="btn-ghost ml-auto !px-2 !py-1 text-xs" onClick={async () => { if (confirm("연결을 해제할까요?")) { try { await disconnect({ accountId: a._id }); } catch (e) { setMsg(errorMessage(e)); } } }}>해제</button>}
             </li>
           ))}

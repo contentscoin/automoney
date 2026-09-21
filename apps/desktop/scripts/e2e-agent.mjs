@@ -40,6 +40,7 @@ const env = {
   ...process.env,
   AUTOMONEY_USER_DATA: userData,
   AUTOMONEY_CONVEX_SITE_URL: CONVEX_SITE_URL,
+  AUTOMONEY_ALLOW_PRIVATE_MEDIA: "1",
   AUTOMONEY_X_URL: fixture,
   AUTOMONEY_INSTAGRAM_URL: fx("fake-instagram.html"),
   AUTOMONEY_TIKTOK_URL: fx("fake-tiktok.html"),

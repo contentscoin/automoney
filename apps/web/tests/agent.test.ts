@@ -11,6 +11,40 @@ async function pairDevice(t: T, user: Awaited<ReturnType<typeof signup>>) {
 const authed = (token: string, init: RequestInit = {}) => ({ ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, "content-type": "application/json" } });
 
 describe("device pairing & agent contract", () => {
+  it("binds approval to payload, isolates request keys per tenant, and enforces v2 attempts/completion replay", async () => {
+    const t = makeT();
+    const user = await signup(t, "v2@test.com");
+    const other = await signup(t, "v2-other@test.com");
+    const { deviceToken } = await pairDevice(t, user);
+    const { spaceId, jobId: createJob } = await user.as.mutation(api.spaces.create, { platform: "THREADS", name: "v2" });
+    await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }));
+    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY" } }) }));
+
+    const publish = await user.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "승인 본문", mediaUrls: [] });
+    expect((await t.run((ctx) => ctx.db.get(publish)))?.status).toBe("NEEDS_APPROVAL");
+    await user.as.mutation(api.jobs.approve, { jobId: publish });
+    const approved = await t.run((ctx) => ctx.db.get(publish));
+    expect(approved?.approval?.payloadHash).toBe(approved?.payloadHash);
+
+    const claimedResponse = await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }));
+    const claimed = (await claimedResponse.json()).data as { id: string; attemptNo: number; leaseToken: string; protocolVersion: number };
+    expect(claimed).toMatchObject({ id: publish, attemptNo: 1, protocolVersion: 2 });
+    const stale = await (await t.fetch(`/agent/jobs/${publish}/heartbeat`, authed(deviceToken, { method: "POST", body: JSON.stringify({ attemptNo: 0, leaseToken: "wrong" }) }))).json();
+    expect(stale.data.staleAttempt).toBe(true);
+    const preflight = await t.fetch(`/agent/jobs/${publish}/preflight`, authed(deviceToken, { method: "POST", body: JSON.stringify({ attemptNo: claimed.attemptNo, leaseToken: claimed.leaseToken }) }));
+    expect(preflight.status).toBe(200);
+    const completion = { attemptNo: claimed.attemptNo, leaseToken: claimed.leaseToken, completionId: "completion-v2", status: "SUCCEEDED", result: { schema: "automoney.job-result/v1", kind: "ok" } };
+    expect((await t.fetch(`/agent/jobs/${publish}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify(completion) }))).status).toBe(200);
+    expect((await t.fetch(`/agent/jobs/${publish}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify(completion) }))).status).toBe(200);
+    expect((await t.fetch(`/agent/jobs/${publish}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ ...completion, status: "FAILED" }) }))).status).toBe(409);
+
+    const key = "same-request";
+    const a = await t.mutation(internal.jobs.enqueueInternal, { userId: user.userId, jobType: "content.generate", payload: { a: 1 }, source: "SYSTEM", requestKey: key });
+    expect(await t.mutation(internal.jobs.enqueueInternal, { userId: user.userId, jobType: "content.generate", payload: { a: 1 }, source: "SYSTEM", requestKey: key })).toBe(a);
+    await expect(t.mutation(internal.jobs.enqueueInternal, { userId: user.userId, jobType: "content.generate", payload: { a: 2 }, source: "SYSTEM", requestKey: key })).rejects.toThrow(/IDEMPOTENCY_CONFLICT/);
+    expect(await t.mutation(internal.jobs.enqueueInternal, { userId: other.userId, jobType: "content.generate", payload: { a: 2 }, source: "SYSTEM", requestKey: key })).not.toBe(a);
+  });
+
   it("pairs with a one-time code, replaces the previous device, and authenticates HTTP calls", async () => {
     const t = makeT();
     const user = await signup(t, "d1@test.com");
@@ -111,6 +145,7 @@ describe("device pairing & agent contract", () => {
     await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }));
     await t.fetch(`/agent/jobs/${createJob}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY" } }) }));
     const pub = await user.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "hello", mediaUrls: [] });
+    await user.as.mutation(api.jobs.approve, { jobId: pub });
     await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }));
     await t.run(async (ctx) => {
       await ctx.db.patch(pub, { leaseUntil: Date.now() - 1 });
@@ -126,6 +161,41 @@ describe("device pairing & agent contract", () => {
 });
 
 describe("schedules", () => {
+  it("rejects cross-user, deleted, and suspended-user schedule updates without changing the target", async () => {
+    const t = makeT();
+    const owner = await signup(t, "schedule-owner@test.com");
+    const attacker = await signup(t, "schedule-attacker@test.com");
+    await pairDevice(t, owner);
+    await pairDevice(t, attacker);
+    const ownerSpace = await owner.as.mutation(api.spaces.create, { platform: "THREADS", name: "owner" });
+    const attackerSpace = await attacker.as.mutation(api.spaces.create, { platform: "THREADS", name: "attacker" });
+    const original = {
+      spaceId: ownerSpace.spaceId,
+      kind: "DAILY" as const,
+      timeOfDay: "10:00",
+      daysOfWeek: [],
+      jitterMinutes: 0,
+      text: "소유자 예약",
+      mediaUrls: [],
+      autoApprove: false,
+    };
+    const { scheduleId } = await owner.as.mutation(api.schedules.upsert, original);
+
+    await expect(
+      attacker.as.mutation(api.schedules.upsert, { ...original, id: scheduleId, spaceId: attackerSpace.spaceId, text: "탈취 시도" }),
+    ).rejects.toThrow(/예약을 찾을 수 없습니다/);
+    expect((await owner.as.query(api.schedules.listMine, {}))[0]?.text).toBe("소유자 예약");
+
+    await owner.as.mutation(api.schedules.remove, { id: scheduleId });
+    await expect(owner.as.mutation(api.schedules.upsert, { ...original, id: scheduleId })).rejects.toThrow(/예약을 찾을 수 없습니다/);
+
+    const recreated = await owner.as.mutation(api.schedules.upsert, original);
+    await t.run((ctx) => ctx.db.patch(owner.userId, { status: "SUSPENDED" }));
+    await expect(owner.as.mutation(api.schedules.upsert, { ...original, id: recreated.scheduleId, text: "정지 후 수정" })).rejects.toThrow(/정지된 계정/);
+    const stored = await t.run((ctx) => ctx.db.get(recreated.scheduleId));
+    expect(stored?.text).toBe("소유자 예약");
+  });
+
   it("creates jobs when due, respects daily limit and approval, recomputes next run", async () => {
     const t = makeT();
     const user = await signup(t, "s1@test.com");
@@ -148,6 +218,8 @@ describe("schedules", () => {
     expect(skippedTick).toEqual({ created: 0, skipped: 1 });
     let list = await user.as.query(api.schedules.listMine, {});
     expect(list[0]?.nextRunAt).toBeGreaterThan(nextRunAt!);
+    expect(list[0]?.lastSkipReason).toBe("DAILY_POST_LIMIT");
+    expect(list[0]?.lastSkippedAt).toBe(nextRunAt! + 1000);
     // 한도를 올리고 다음 슬롯(내일) 실행 → 승인 대기 잡 생성
     await user.as.mutation(api.spaces.setDailyLimit, { spaceId, dailyPostLimit: 3 });
     const r = await t.mutation(internal.schedules.tick, { now: list[0]!.nextRunAt! + 1000 });
@@ -157,6 +229,8 @@ describe("schedules", () => {
     expect(scheduled.status).toBe("NEEDS_APPROVAL");
     list = await user.as.query(api.schedules.listMine, {});
     expect(list[0]?.lastRunAt).toBe(r.created ? list[0]!.lastRunAt : null);
+    expect(list[0]?.lastSkipReason).toBeUndefined();
+    expect(list[0]?.lastSkippedAt).toBeUndefined();
     await user.as.mutation(api.schedules.setEnabled, { id: scheduleId, enabled: false });
     expect((await user.as.query(api.schedules.listMine, {}))[0]?.nextRunAt).toBeNull();
   });

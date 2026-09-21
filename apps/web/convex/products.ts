@@ -103,7 +103,7 @@ export const upsertMany = internalMutation({
   },
 });
 
-async function upsertProducts(
+export async function upsertProducts(
   ctx: { db: import("./_generated/server").MutationCtx["db"] },
   rows: AttrangsProduct[],
   source: "CSV" | "MOCK" | "API",

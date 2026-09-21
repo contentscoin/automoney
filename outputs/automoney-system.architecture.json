@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "automoney 런타임 아키텍처",
+    "output": "automoney-system.architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/contentscoin/automoney",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "2a7ef7ef76bf07ff8b883976421c359f93484f23"
+    },
+    "viewBox": [1395, 820]
+  },
+  "components": [
+    { "id": "actors", "type": "external", "label": "사용자·운영자", "sublabel": "유저 / 총판 / 수퍼어드민", "pos": [40, 330], "size": [170, 72], "sources": [{ "path": "docs/00-overview-prd.md", "line": 23, "label": "역할 정의" }] },
+    { "id": "web", "type": "frontend", "label": "Next.js Web", "sublabel": "대시보드 · 인증 · 리다이렉트", "pos": [270, 330], "size": [180, 72], "sources": [{ "path": "apps/web/app/page.tsx", "line": 1 }, { "path": "apps/web/middleware.ts", "line": 1 }] },
+    { "id": "convex", "type": "backend", "label": "Convex Core", "sublabel": "도메인 함수 · HTTP Actions", "pos": [520, 330], "size": [190, 72], "tag": "Cloud", "sources": [{ "path": "apps/web/convex/http.ts", "line": 53, "end_line": 81 }, { "path": "apps/web/convex/schema.ts", "line": 18 }] },
+    { "id": "mcp", "type": "security", "label": "MCP + OAuth 2.1", "sublabel": "21 tools · PKCE · API key", "pos": [520, 120], "size": [190, 72], "sources": [{ "path": "packages/shared/src/mcpTools.ts", "line": 39, "end_line": 59 }, { "path": "apps/web/convex/oauth.ts", "line": 12 }] },
+    { "id": "queue", "type": "messagebus", "label": "잡큐 · 스케줄 · Cron", "sublabel": "lease / heartbeat / retry", "pos": [730, 180], "size": [180, 72], "sources": [{ "path": "apps/web/convex/agent.ts", "line": 112 }, { "path": "apps/web/convex/crons.ts", "line": 7, "end_line": 20 }] },
+    { "id": "data", "type": "database", "label": "Convex 데이터·파일", "sublabel": "39 tables · 실시간 상태", "pos": [730, 430], "size": [180, 72], "sources": [{ "path": "apps/web/convex/schema.ts", "line": 18, "end_line": 680 }] },
+    { "id": "desktop", "type": "backend", "label": "Electron Agent", "sublabel": "poll · execute · report", "pos": [950, 180], "size": [170, 72], "tag": "User PC", "sources": [{ "path": "apps/desktop/src/main.ts", "line": 1 }, { "path": "apps/desktop/src/agent/loop.ts", "line": 1 }] },
+    { "id": "spaces", "type": "frontend", "label": "Browser Spaces", "sublabel": "Playwright · 격리 프로필", "pos": [950, 380], "size": [170, 72], "sources": [{ "path": "apps/desktop/src/agent/spaces/manager.ts", "line": 128 }, { "path": "apps/desktop/src/agent/recipes/index.ts", "line": 1 }] },
+    { "id": "codex", "type": "security", "label": "Codex CLI", "sublabel": "로컬 로그인 · 생성 · 플래너", "pos": [1190, 180], "size": [170, 72], "sources": [{ "path": "apps/desktop/src/agent/codex.ts", "line": 1 }, { "path": "apps/desktop/src/agent/autopilot/codexPlanner.ts", "line": 1 }] },
+    { "id": "attrangs", "type": "external", "label": "아뜨랑스", "sublabel": "상품 · 링크 · 주문 · 정산", "pos": [40, 620], "size": [180, 72], "tag": "Mock/CSV 현재", "sources": [{ "path": "apps/web/convex/lib/attrangs/adapter.ts", "line": 1 }, { "path": "apps/web/convex/lib/attrangs/mock.ts", "line": 20 }] },
+    { "id": "meta", "type": "external", "label": "Meta · SNS", "sublabel": "API 발행 / 브라우저 폴백", "pos": [1190, 380], "size": [170, 72], "sources": [{ "path": "apps/web/convex/lib/meta/index.ts", "line": 5 }, { "path": "apps/desktop/src/agent/recipes/index.ts", "line": 1 }] },
+    { "id": "telegram", "type": "external", "label": "Telegram", "sublabel": "명령 · 승인 · 결과 알림", "pos": [730, 650], "size": [180, 72], "sources": [{ "path": "apps/web/convex/telegram.ts", "line": 1 }, { "path": "apps/web/convex/http.ts", "line": 81 }] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "automoney Cloud", "wraps": ["web", "convex", "mcp", "queue", "data"], "pad": 34 },
+    { "kind": "security-group", "label": "사용자 PC — 인증정보·브라우저 세션 경계", "wraps": ["desktop", "spaces", "codex"], "pad": 34 }
+  ],
+  "connections": [
+    { "id": "actor-web", "from": "actors", "to": "web", "label": "HTTPS UI", "variant": "emphasis" },
+    { "id": "web-core", "from": "web", "to": "convex", "label": "Convex query / mutation", "variant": "emphasis", "labelAt": [485, 300] },
+    { "id": "mcp-core", "from": "mcp", "to": "convex", "label": "권한 검증 후 tool dispatch", "variant": "security", "labelAt": [615, 206] },
+    { "id": "core-queue", "from": "convex", "to": "queue", "label": "잡 생성 · 주기 실행" },
+    { "id": "core-data", "from": "convex", "to": "data", "fromSide": "right", "toSide": "left" },
+    { "id": "queue-desktop", "from": "queue", "to": "desktop", "label": "claim / heartbeat / complete", "variant": "emphasis", "labelAt": [925, 266] },
+    { "id": "desktop-spaces", "from": "desktop", "to": "spaces", "label": "레시피 우선 · autopilot 복구", "labelAt": [1035, 316] },
+    { "id": "desktop-codex", "from": "desktop", "to": "codex", "label": "codex exec", "variant": "security", "labelAt": [1160, 280] },
+    { "id": "spaces-sns", "from": "spaces", "to": "meta", "label": "웹 자동 게시 · readback", "labelAt": [1160, 470] },
+    { "id": "core-meta", "from": "convex", "to": "meta", "label": "Graph API · Mock", "variant": "dashed", "fromSide": "bottom", "toSide": "bottom", "via": [[615, 570], [1275, 570]] },
+    { "id": "attrangs-core", "from": "attrangs", "to": "convex", "label": "웹훅 · CSV · 향후 Partner API", "variant": "dashed" },
+    { "id": "telegram-core", "from": "telegram", "to": "convex" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "구현됨", "items": ["Convex 도메인·웹 UI·정산 엔진·MCP/OAuth", "Electron 에이전트·5개 채널 레시피·콘텐츠/분석 루프"] },
+    { "dot": "amber", "title": "초안/Mock 검증", "items": ["아뜨랑스 연동은 Mock·CSV", "Meta는 Graph 구현이 있으나 Mock 중심 검증", "SNS는 픽스처 기반 자동화 검증"] },
+    { "dot": "rose", "title": "출시 전 필수", "items": ["실 API 계약·앱 리뷰·실계정 장기 검증", "보안·개인정보 운영 통제와 코드서명", "관측성·백업·부하·재해복구 검증"] }
+  ]
+}

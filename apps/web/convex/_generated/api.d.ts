@@ -21,6 +21,7 @@ import type * as dashboard from "../dashboard.js";
 import type * as devices from "../devices.js";
 import type * as http from "../http.js";
 import type * as invites from "../invites.js";
+import type * as imports from "../imports.js";
 import type * as jobs from "../jobs.js";
 import type * as kyc from "../kyc.js";
 import type * as lib_attrangs_adapter from "../lib/attrangs/adapter.js";
@@ -74,6 +75,7 @@ declare const fullApi: ApiFromModules<{
   devices: typeof devices;
   http: typeof http;
   invites: typeof invites;
+  imports: typeof imports;
   jobs: typeof jobs;
   kyc: typeof kyc;
   "lib/attrangs/adapter": typeof lib_attrangs_adapter;

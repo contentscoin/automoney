@@ -1,4 +1,5 @@
 import { HEARTBEAT_INTERVAL_MS, errorResult, type JobType } from "@automoney/shared";
+import { randomUUID } from "node:crypto";
 import { AgentApi, ApiError, type ClaimedJob } from "./api";
 import { codexStatus } from "./codex";
 import { isPaired, loadConfig, saveConfig, type AgentConfig } from "./config";
@@ -6,6 +7,7 @@ import { log } from "./logger";
 import { JobError, type JobContext, type JobOutcome } from "./jobs/context";
 import { handleCloudOnly, handleCodexLogin, handleContentGenerate, handlePublish, handleReadback, handleSpaceCreate, handleSpaceLogin, handleSpaceVerify } from "./jobs/handlers";
 import { listLocalSpaces } from "./spaces/manager";
+import { completionJournal, type CompletionEntry } from "./completion-journal";
 
 export type Handler = (ctx: JobContext) => Promise<JobOutcome>;
 export const HANDLERS: Record<JobType, Handler> = {
@@ -82,6 +84,7 @@ export class AgentLoop {
       return 0;
     }
     this.status.lastPollAt = Date.now();
+    await this.flushCompletions();
     let job: ClaimedJob | null;
     try {
       job = await this.api.claim(this.snapshot());
@@ -112,7 +115,7 @@ export class AgentLoop {
     this.emit();
     const hb = setInterval(async () => {
       try {
-        const r = await this.api.heartbeat(job.id, stage);
+        const r = await this.api.heartbeat(job, stage);
         active = r.active;
         cancelRequested = cancelRequested || r.cancelRequested;
       } catch (e) {
@@ -131,42 +134,56 @@ export class AgentLoop {
         if (!active) throw new JobError("AGENT_LOST", "lease lost");
         if (cancelRequested) throw new CancelledError("cancelled by user");
         try {
-          const r = await this.api.heartbeat(job.id, s, progress);
+          const r = await this.api.heartbeat(job, s, progress);
           active = r.active;
           if (r.cancelRequested) throw new CancelledError("cancelled by user");
         } catch (e) {
           if (e instanceof CancelledError) throw e;
+          active = false;
+          throw new JobError("LEASE_UNVERIFIED", `heartbeat failed before ${s}: ${e instanceof Error ? e.message : String(e)}`);
         }
       },
       onUserAttention: (m) => this.events.onUserAttention?.(m),
     };
 
+    let completion: CompletionEntry;
     try {
       const handler = this.handlers[job.jobType];
       if (!handler) throw new JobError("INTERNAL", `unknown job type ${job.jobType}`);
+      if (job.jobType === "post.publish") await this.api.preflight(job);
       const outcome = await handler(ctx);
-      await this.api.complete(job.id, { status: "SUCCEEDED", result: outcome.result, spaceUpdate: outcome.spaceUpdate });
-      log("info", "job succeeded", { id: job.id, jobType: job.jobType });
+      completion = { jobId: job.id, attemptNo: job.attemptNo, completionId: randomUUID(), status: "SUCCEEDED", result: outcome.result, spaceUpdate: outcome.spaceUpdate };
     } catch (e) {
-      const code = e instanceof CancelledError ? "JOB_CANCELLED" : e instanceof JobError ? e.code : (e as { code?: string })?.code === "SPACE_LOCKED" ? "SPACE_LOCKED" : (e as { code?: string })?.code === "SPACE_NOT_FOUND" ? "SPACE_NOT_FOUND" : (e as { code?: string })?.code === "BROWSER_NOT_FOUND" ? "BROWSER_NOT_FOUND" : "RECIPE_FAILED";
+      const code = e instanceof CancelledError ? "JOB_CANCELLED" : e instanceof JobError || e instanceof ApiError ? e.code : (e as { code?: string })?.code === "SPACE_LOCKED" ? "SPACE_LOCKED" : (e as { code?: string })?.code === "SPACE_NOT_FOUND" ? "SPACE_NOT_FOUND" : (e as { code?: string })?.code === "BROWSER_NOT_FOUND" ? "BROWSER_NOT_FOUND" : "RECIPE_FAILED";
       const message = e instanceof Error ? e.message : String(e);
       log("error", "job failed", { id: job.id, jobType: job.jobType, code, message });
-      try {
-        await this.api.complete(job.id, {
-          status: "FAILED",
-          errorCode: code,
-          errorMessage: message.slice(0, 900),
-          result: errorResult(job.jobType, code as never, message.slice(0, 200)),
-          spaceUpdate: e instanceof JobError ? e.spaceUpdate : undefined,
-        });
-      } catch (err) {
-        log("error", "complete(FAILED) failed", { error: String(err) });
-      }
+      completion = { jobId: job.id, attemptNo: job.attemptNo, completionId: randomUUID(), status: "FAILED", errorCode: code, errorMessage: message.slice(0, 900), result: errorResult(job.jobType, code as never, message.slice(0, 200)), spaceUpdate: e instanceof JobError ? e.spaceUpdate : undefined };
+    }
+    completionJournal.put(completion);
+    try {
+      await this.api.complete(job, completion);
+      completionJournal.remove(completion.completionId);
+      log("info", `job ${completion.status === "SUCCEEDED" ? "succeeded" : "failed"}`, { id: job.id, jobType: job.jobType });
+    } catch (err) {
+      // 실행 결과는 바꾸지 않는다. 다음 poll/start에서 같은 completionId로 재전송한다.
+      log("error", "completion delivery failed; journaled for retry", { id: job.id, error: String(err) });
     } finally {
       clearInterval(hb);
       this.status.activeJob = null;
       this.status.processed++;
       this.emit();
+    }
+  }
+
+  private async flushCompletions(): Promise<void> {
+    for (const entry of completionJournal.list()) {
+      try {
+        await this.api.complete({ id: entry.jobId, attemptNo: entry.attemptNo }, entry);
+        completionJournal.remove(entry.completionId);
+      } catch (e) {
+        log("warn", "completion journal flush failed", { id: entry.jobId, error: String(e) });
+        break;
+      }
     }
   }
 

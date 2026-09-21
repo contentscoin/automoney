@@ -123,7 +123,7 @@ export const listMine = query({
     const rows = await ctx.db.query("snsAccounts").withIndex("by_user", (q) => q.eq("userId", user._id)).collect();
     return {
       mode: metaMode(),
-      accounts: rows.map((a) => ({ _id: a._id, platform: a.platform, username: a.username ?? null, status: a.status, tokenExpiresAt: a.tokenExpiresAt, spaceId: a.spaceId ?? null, lastError: a.lastError ?? null, mode: a.mode, createdAt: a.createdAt })),
+      accounts: rows.map((a) => ({ _id: a._id, platform: a.platform, username: a.username ?? null, status: a.status, tokenExpiresAt: a.tokenExpiresAt, spaceId: a.spaceId ?? null, fallbackSpaceId: a.fallbackSpaceId ?? null, lastError: a.lastError ?? null, mode: a.mode, createdAt: a.createdAt })),
     };
   },
 });
@@ -140,6 +140,25 @@ export const disconnect = mutation({
       if (s) await ctx.db.patch(s._id, { authMode: s.deviceId ? "BROWSER" : undefined, snsAccountId: undefined, sessionState: s.deviceId ? "LOGIN_REQUIRED" : "PAUSED" });
     }
     await audit(ctx, { actorUserId: user._id, action: "meta.disconnect", metadata: { accountId: a._id } });
+  },
+});
+
+export const setFallbackSpace = mutation({
+  args: { accountId: v.id("snsAccounts"), fallbackSpaceId: v.optional(v.id("spaces")) },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    const account = await ctx.db.get(args.accountId);
+    if (!account || account.userId !== user._id) fail("NOT_FOUND", "계정을 찾을 수 없습니다.");
+    if (!args.fallbackSpaceId) {
+      await ctx.db.patch(account._id, { fallbackSpaceId: undefined });
+      return { ok: true as const };
+    }
+    const target = await ctx.db.get(args.fallbackSpaceId);
+    if (!target || target.userId !== user._id) fail("NOT_FOUND", "폴백 스페이스를 찾을 수 없습니다.");
+    if (target.platform !== account.platform || !target.deviceId || target.authMode === "META_API" || target.sessionState !== "HEALTHY") fail("INVALID_ARGUMENT", "같은 플랫폼의 정상 브라우저 스페이스만 폴백으로 지정할 수 있습니다.");
+    if (!account.username || !target.handle || account.username.toLowerCase() !== target.handle.toLowerCase()) fail("INVALID_ARGUMENT", "검증된 동일 계정의 스페이스만 폴백으로 지정할 수 있습니다.");
+    await ctx.db.patch(account._id, { fallbackSpaceId: target._id });
+    return { ok: true as const };
   },
 });
 
@@ -176,16 +195,26 @@ export const completeCloudJob = internalMutation({
     const j = await ctx.db.get(args.jobId);
     if (!j || j.status !== "RUNNING") return { ok: false as const };
     const now = Date.now();
-    await ctx.db.patch(j._id, { status: args.status, result: args.result, errorCode: args.status === "FAILED" ? args.errorCode ?? "INTERNAL" : undefined, errorMessage: args.status === "FAILED" ? args.errorMessage : undefined, finishedAt: now, updatedAt: now, stage: "done", progress: 100 });
+    const publishUncertain = args.status === "FAILED" && ["META_PUBLISH_TIMEOUT", "META_PUBLISH_FAILED"].includes(args.errorCode ?? "");
+    await ctx.db.patch(j._id, { status: args.status, result: args.result, errorCode: args.status === "FAILED" ? args.errorCode ?? "INTERNAL" : undefined, errorMessage: args.status === "FAILED" ? args.errorMessage : undefined, finishedAt: now, updatedAt: now, stage: "done", progress: 100, ...(j.jobType === "post.publish" ? { publishPhase: args.status === "SUCCEEDED" ? "CONFIRMED" as const : publishUncertain ? "UNCERTAIN" as const : "PREPARING" as const } : {}) });
+    if (j.jobType === "post.publish") {
+      const rootJobId = j.rootJobId ?? j._id;
+      const reservation = await ctx.db.query("publishReservations").withIndex("by_root", (q) => q.eq("rootJobId", rootJobId)).unique();
+      if (reservation) {
+        await ctx.db.patch(reservation._id, args.status === "SUCCEEDED" ? { state: "COMMITTED", committedAt: now } : publishUncertain ? { state: "UNCERTAIN" } : { state: "RELEASED" });
+      }
+    }
     const space = j.spaceId ? await ctx.db.get(j.spaceId) : null;
     if (space?.snsAccountId && args.accountStatus) {
       await ctx.db.patch(space.snsAccountId, { status: args.accountStatus, lastError: args.errorMessage });
       await ctx.db.patch(space._id, { lastError: args.errorMessage?.slice(0, 300), sessionState: space.deviceId ? "LOGIN_REQUIRED" : "EXPIRED" });
     }
     let fallbackJobId: Id<"agentJobs"> | null = null;
-    if (args.fallback && j.jobType === "post.publish" && space?.deviceId) {
-      // ADR-0004: 동일 페이로드로 브라우저 스페이스 경로 재큐
-      fallbackJobId = await enqueueJob(ctx, { userId: j.userId, jobType: "post.publish", payload: j.payload as PublishPayload as unknown as Record<string, unknown>, spaceId: space._id, scheduleId: j.scheduleId, source: j.source, executor: "DESKTOP", fallbackFromJobId: j._id, needsApproval: false });
+    const account = space?.snsAccountId ? await ctx.db.get(space.snsAccountId) : null;
+    const fallbackSpace = account?.fallbackSpaceId ? await ctx.db.get(account.fallbackSpaceId) : null;
+    if (args.fallback && j.jobType === "post.publish" && fallbackSpace?.deviceId && fallbackSpace.userId === j.userId && fallbackSpace.platform === space?.platform && fallbackSpace.sessionState === "HEALTHY") {
+      const fallbackPayload = { ...(j.payload as PublishPayload), spaceId: fallbackSpace._id, platform: fallbackSpace.platform };
+      fallbackJobId = await enqueueJob(ctx, { userId: j.userId, jobType: "post.publish", payload: fallbackPayload as unknown as Record<string, unknown>, spaceId: fallbackSpace._id, scheduleId: j.scheduleId, source: j.source, executor: "DESKTOP", fallbackFromJobId: j._id, rootJobId: j.rootJobId ?? j._id, needsApproval: false });
       await audit(ctx, { actorUserId: j.userId, action: "meta.fallback", metadata: { fromJobId: j._id, toJobId: fallbackJobId, reason: args.errorCode } });
     }
     if (args.status === "SUCCEEDED" && j.jobType === "post.publish") await recordPublishedPost(ctx, (await ctx.db.get(j._id))!);
@@ -205,6 +234,13 @@ export const runCloudJob = internalAction({
     const adapter = getMetaAdapter();
     type Finish = { status: "SUCCEEDED" | "FAILED"; result?: unknown; errorCode?: string; errorMessage?: string; accountStatus?: "EXPIRED" | "REVOKED"; fallback?: boolean };
     const finish = (input: Finish) => ctx.runMutation(internal.meta.completeCloudJob, { jobId: job._id, ...input });
+    if (job.jobType === "post.publish") {
+      const preflight = await ctx.runMutation(internal.agent.preflightJob, { jobId: job._id });
+      if (!preflight.ok) {
+        await finish({ status: "FAILED", errorCode: preflight.reason, errorMessage: preflight.message, result: errorResult(job.jobType, preflight.reason as never, preflight.message) });
+        return;
+      }
+    }
     if (!account || !space || !key) {
       await finish({ status: "FAILED", errorCode: "META_NOT_CONNECTED", errorMessage: "Meta 계정이 연결되어 있지 않습니다.", result: errorResult(job.jobType, "META_NOT_CONNECTED", "not connected"), fallback: hasDevice });
       return;
@@ -240,7 +276,7 @@ export const runCloudJob = internalAction({
         errorMessage: err.message,
         result: errorResult(job.jobType, err.code, err.message),
         accountStatus: tokenProblem ? "EXPIRED" : undefined,
-        fallback: job.jobType === "post.publish" && hasDevice && (tokenProblem || !err.retryable),
+        fallback: job.jobType === "post.publish" && hasDevice && err.code === "META_TOKEN_EXPIRED",
       });
     }
   },

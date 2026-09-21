@@ -17,6 +17,7 @@ const BANKS = [
 export default function KycPage() {
   const mine = useQuery(api.kyc.getMine);
   const generateUploadUrl = useMutation(api.kyc.generateUploadUrl);
+  const bindUpload = useMutation(api.kyc.bindUpload);
   const submit = useAction(api.kyc.submit);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,10 +61,11 @@ export default function KycPage() {
             try {
               if (!file || file.size === 0) throw new Error("통장사본 파일을 선택해 주세요.");
               if (file.size > 10 * 1024 * 1024) throw new Error("통장사본은 10MB 이하여야 합니다.");
-              const uploadUrl = await generateUploadUrl();
-              const up = await fetch(uploadUrl, { method: "POST", headers: { "Content-Type": file.type }, body: file });
+              const upload = await generateUploadUrl();
+              const up = await fetch(upload.uploadUrl, { method: "POST", headers: { "Content-Type": file.type }, body: file });
               if (!up.ok) throw new Error("파일 업로드에 실패했습니다.");
               const { storageId } = (await up.json()) as { storageId: Id<"_storage"> };
+              await bindUpload({ intentId: upload.intentId, storageId });
               const [bankCode, bankName] = String(fd.get("bank")).split("|");
               await submit({
                 legalName: String(fd.get("legalName")),
@@ -75,7 +77,7 @@ export default function KycPage() {
                 bankName: bankName ?? "",
                 accountNo: String(fd.get("accountNo")),
                 accountHolder: String(fd.get("accountHolder")),
-                bankbookStorageId: storageId,
+                uploadIntentId: upload.intentId,
               });
               form.reset();
               setDone(true);

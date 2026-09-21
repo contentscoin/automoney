@@ -57,6 +57,9 @@ describe("Meta API (mock adapter) — connect, cloud publish, fallback, refresh"
     await t.finishAllScheduledFunctions(() => {});
     expect(((await t.run(async (ctx) => ctx.db.get(dry)))!.result as { data: { dryRun: boolean } }).data.dryRun).toBe(true);
     expect(await t.run(async (ctx) => (await ctx.db.query("postMetrics").collect()).length)).toBe(1);
+    await t.run(async (ctx) => {
+      for (const reservation of await ctx.db.query("publishReservations").collect()) await ctx.db.patch(reservation._id, { committedAt: Date.now() - 16 * 60_000 });
+    });
     // 승인 대기 → approve 시 클라우드 실행
     const gated = await user.as.mutation(api.jobs.enqueuePublish, { spaceId: spaces[0]!._id, text: "승인 후 게시", mediaUrls: [], requireApproval: true });
     await t.finishAllScheduledFunctions(() => {});
@@ -76,16 +79,17 @@ describe("Meta API (mock adapter) — connect, cloud publish, fallback, refresh"
     const { deviceToken } = await pairDevice(t, user);
     await connect(t, user, "INSTAGRAM", "mock:insta_shop");
     const space = (await user.as.query(api.spaces.listMine, {}))[0]!;
+    const browser = await user.as.mutation(api.spaces.create, { platform: "INSTAGRAM", name: "브라우저", handle: "insta_shop" });
+    await t.fetch("/agent/claim", { method: "POST", headers: { authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: "{}" });
+    await t.fetch(`/agent/jobs/${browser.jobId}/complete`, { method: "POST", headers: { authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY", handle: "insta_shop" } }) });
     // 미디어 없는 인스타 발행은 클라우드 검증에서 거부(기존 규칙)
     await expect(user.as.mutation(api.jobs.enqueuePublish, { spaceId: space._id, text: "no media", mediaUrls: [], requireApproval: false })).rejects.toThrow(/media/);
     // 토큰 만료 시뮬레이션: 암호화된 토큰을 expired- 로 교체
     const acct = await t.run(async (ctx) => (await ctx.db.query("snsAccounts").collect())[0]!);
+    await user.as.mutation(api.meta.setFallbackSpace, { accountId: acct._id, fallbackSpaceId: browser.spaceId });
     const { encryptField } = await import("../convex/lib/crypto");
     await t.run(async (ctx) => {
       await ctx.db.patch(acct._id, { tokenEnc: await encryptField(process.env.KYC_ENC_KEY!, "expired-INSTAGRAM-insta_shop") });
-      // 브라우저 폴백을 위해 스페이스에 디바이스 연결
-      const dev = (await ctx.db.query("devices").collect())[0]!;
-      await ctx.db.patch(space._id, { deviceId: dev._id });
     });
     const jobId = await user.as.mutation(api.jobs.enqueuePublish, { spaceId: space._id, text: "폴백 테스트", mediaUrls: ["https://cdn.example.com/a.jpg"], requireApproval: false });
     await t.finishAllScheduledFunctions(() => {});
@@ -104,6 +108,7 @@ describe("Meta API (mock adapter) — connect, cloud publish, fallback, refresh"
     // 강제 실패([meta-fail]) 는 토큰 문제가 아니므로 계정 상태 유지 + 폴백
     await t.run(async (ctx) => {
       await ctx.db.patch(acct._id, { status: "ACTIVE", tokenEnc: await encryptField(process.env.KYC_ENC_KEY!, "mock-INSTAGRAM-insta_shop") });
+      await ctx.db.patch(space._id, { sessionState: "HEALTHY", lockJobId: undefined });
     });
     const j2 = await user.as.mutation(api.jobs.enqueuePublish, { spaceId: space._id, text: "[meta-fail] 본문", mediaUrls: ["https://cdn.example.com/a.jpg"], requireApproval: false });
     await t.finishAllScheduledFunctions(() => {});

@@ -11,6 +11,8 @@ import { fail } from "./lib/errors";
 import { canViewUser, requireAdminOrSuper, requireSuperAdmin, requireUser, roleOf } from "./lib/rbac";
 import { kstMonth, previousMonth } from "./lib/time";
 import { transitionOrderStatus } from "./orders";
+import { sha256Hex } from "./lib/crypto";
+import { canonicalJson } from "./jobs";
 
 type Beneficiary = "USER" | "ADMIN" | "OPERATOR";
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -53,7 +55,7 @@ export async function closeMonthImpl(ctx: MutationCtx, month: string): Promise<{
   for (const g of groups.values()) {
     const gross = g.entries.reduce((s, e) => s + e.sign * e.amount, 0);
     let heldReason: string | undefined;
-    if (g.type === "USER" && g.userId) {
+    if ((g.type === "USER" || g.type === "ADMIN") && g.userId) {
       const kyc = await ctx.db.query("kycProfiles").withIndex("by_user", (q) => q.eq("userId", g.userId!)).unique();
       if (kyc?.status !== "APPROVED") heldReason = "KYC_INCOMPLETE";
     }
@@ -67,6 +69,8 @@ export async function closeMonthImpl(ctx: MutationCtx, month: string): Promise<{
       entryCount: g.entries.length,
       heldReason,
       updatedAt: now,
+      revision: 1,
+      snapshotHash: await sha256Hex(canonicalJson({ month, beneficiaryType: g.type, beneficiaryUserId: g.userId ?? null, grossAmount: gross, entries: g.entries.map((e) => ({ id: e._id, amount: e.amount, sign: e.sign, rateBps: e.rateBps })) })),
     });
     if (!heldReason) {
       for (const e of g.entries) await ctx.db.patch(e._id, { settlementId: id });
@@ -114,9 +118,15 @@ export const uploadBatchCsv = mutation({
     const parsed = parseAttrangsSettlementCsv(args.csv);
     if (!parsed.ok) fail("INVALID_ARGUMENT", `확정 배치 CSV 오류: ${parsed.error}`);
     const b = parsed.batch;
-    const id = await ctx.db.insert("attrangsSettlementBatches", { ...b, uploadedBy: actor._id, uploadedAt: Date.now() });
+    const contentHash = await sha256Hex(canonicalJson(b));
+    const prior = await ctx.db.query("attrangsSettlementBatches").withIndex("by_month", (q) => q.eq("month", b.month)).collect();
+    const duplicate = prior.find((row) => row.contentHash === contentHash);
+    if (duplicate) return { id: duplicate._id, month: b.month, orders: b.orders.length, duplicate: true };
+    const locked = (await ctx.db.query("settlements").withIndex("by_month", (q) => q.eq("month", b.month)).collect()).some((s) => ["APPROVED", "PAID"].includes(s.status));
+    if (locked) fail("CONFLICT", "이미 승인·지급된 월에는 새 확정 배치를 추가할 수 없습니다.");
+    const id = await ctx.db.insert("attrangsSettlementBatches", { ...b, contentHash, revision: prior.length + 1, uploadedBy: actor._id, uploadedAt: Date.now() });
     await audit(ctx, { actorUserId: actor._id, action: "settlement.uploadBatch", metadata: { month: b.month, orders: b.orders.length, payoutTotal: b.payoutTotal } });
-    return { id, month: b.month, orders: b.orders.length };
+    return { id, month: b.month, orders: b.orders.length, duplicate: false };
   },
 });
 
@@ -207,7 +217,10 @@ export const approve = mutation({
     const confirmed = rows.filter((s) => s.status === "CONFIRMED");
     if (confirmed.length === 0) fail("CONFLICT", "확정(CONFIRMED) 상태의 정산이 없습니다. 리컨실을 먼저 완료하세요.");
     const now = Date.now();
-    for (const s of confirmed) await ctx.db.patch(s._id, { status: "APPROVED", approvedAt: now, updatedAt: now });
+    for (const s of confirmed) {
+      if (!s.snapshotHash) fail("CONFLICT", "정산 snapshot hash가 없습니다. 다시 리컨실하세요.");
+      await ctx.db.patch(s._id, { status: "APPROVED", approvedAt: now, approvedSnapshotHash: s.snapshotHash, updatedAt: now });
+    }
     await audit(ctx, { actorUserId: actor._id, action: "settlement.approve", metadata: { month: args.month, count: confirmed.length } });
     return { approved: confirmed.length };
   },
@@ -242,10 +255,14 @@ export const payoutRows = internalQuery({
 });
 
 export const recordPayoutFile = internalMutation({
-  args: { month: v.string(), actorId: v.id("users"), storageId: v.id("_storage"), settlementIds: v.array(v.id("settlements")), total: v.number() },
+  args: { month: v.string(), actorId: v.id("users"), storageId: v.id("_storage"), settlementIds: v.array(v.id("settlements")), total: v.number(), fileHash: v.string() },
   handler: async (ctx, args) => {
     const now = Date.now();
-    for (const id of args.settlementIds) await ctx.db.patch(id, { payoutFileGeneratedAt: now, updatedAt: now });
+    for (const id of args.settlementIds) {
+      const settlement = await ctx.db.get(id);
+      if (!settlement || !settlement.approvedSnapshotHash || settlement.approvedSnapshotHash !== settlement.snapshotHash) fail("CONFLICT", "승인 snapshot이 현재 정산과 일치하지 않습니다.");
+      await ctx.db.patch(id, { payoutFileGeneratedAt: now, payoutSnapshotHash: settlement.approvedSnapshotHash, payoutFileHash: args.fileHash, updatedAt: now });
+    }
     await audit(ctx, { actorUserId: args.actorId, action: "settlement.exportPayout", metadata: { month: args.month, count: args.settlementIds.length, total: args.total, storageId: args.storageId } });
     return await ctx.storage.getUrl(args.storageId);
   },
@@ -267,7 +284,8 @@ export const exportPayout = action({
       lines.push([args.month, r.beneficiaryType, r.email, r.legalName, r.bankCode, r.bankName, accountNo, r.accountHolder, String(r.amount)].map(csvCell).join(","));
       total += r.amount;
     }
-    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
+    const csv = "﻿" + lines.join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
     const storageId = await ctx.storage.store(blob);
     const url = await ctx.runMutation(internal.settlements.recordPayoutFile, {
       month: args.month,
@@ -275,6 +293,7 @@ export const exportPayout = action({
       storageId,
       settlementIds: rows.map((r) => r.settlementId),
       total,
+      fileHash: await sha256Hex(csv),
     });
     return { url, count: rows.length, total };
   },
@@ -289,7 +308,7 @@ export const markPaid = mutation({
   handler: async (ctx, args) => {
     const actor = await requireSuperAdmin(ctx);
     const rows = await ctx.db.query("settlements").withIndex("by_month", (q) => q.eq("month", args.month)).collect();
-    const approved = rows.filter((s) => s.status === "APPROVED");
+    const approved = rows.filter((s) => s.status === "APPROVED" && s.payoutFileGeneratedAt !== undefined && s.approvedSnapshotHash === s.payoutSnapshotHash && !!s.payoutFileHash);
     if (approved.length === 0) fail("CONFLICT", "승인(APPROVED) 상태의 정산이 없습니다.");
     const now = Date.now();
     for (const s of approved) await ctx.db.patch(s._id, { status: "PAID", paidAt: now, paidRef: args.paidRef.trim(), updatedAt: now });
@@ -314,10 +333,21 @@ const settlementView = (s: Doc<"settlements">) => ({
   paidRef: s.paidRef ?? null,
 });
 
+/** 총판 본인의 차액 정산에서는 항목 수로 간접 주문 건수를 추정할 수 없게 한다. */
+const settlementViewFor = (actor: Doc<"users">, s: Doc<"settlements">) => {
+  const view = settlementView(s);
+  if (roleOf(actor) === "ADMIN" && s.beneficiaryType === "ADMIN" && s.beneficiaryUserId === actor._id) {
+    const { entryCount, ...safe } = view;
+    void entryCount;
+    return safe;
+  }
+  return view;
+};
+
 /** 유저: 본인 정산 히스토리 (USER 항목만; 총판 계정이면 ADMIN 차액 정산도 함께) */
 export async function listSettlementsFor(ctx: QueryCtx, user: Doc<"users">) {
   const rows = await ctx.db.query("settlements").withIndex("by_beneficiary", (q) => q.eq("beneficiaryUserId", user._id)).collect();
-  return rows.sort((a, b) => b.month.localeCompare(a.month)).map(settlementView);
+  return rows.sort((a, b) => b.month.localeCompare(a.month)).map((s) => settlementViewFor(user, s));
 }
 
 export const listMine = query({
@@ -345,7 +375,7 @@ async function loadStatement(ctx: QueryCtx, id: Id<"settlements">) {
       month: e.month,
     });
   }
-  return { settlement: settlementView(s), beneficiaryUserId: s.beneficiaryUserId ?? null, lines: lines.sort((a, b) => a.orderedAt - b.orderedAt) };
+  return { rawSettlement: s, settlement: settlementView(s), beneficiaryUserId: s.beneficiaryUserId ?? null, lines: lines.sort((a, b) => a.orderedAt - b.orderedAt) };
 }
 
 /** 명세서: 본인, 소속 총판(하부 유저 것), 수퍼어드민 열람 가능 */
@@ -353,7 +383,8 @@ export const getStatement = query({
   args: { id: v.id("settlements") },
   handler: async (ctx, args) => {
     const actor = await requireUser(ctx);
-    const st = await loadStatement(ctx, args.id);
+    const loaded = await loadStatement(ctx, args.id);
+    const { rawSettlement, ...st } = loaded;
     if (st.settlement.beneficiaryType === "OPERATOR") {
       if (roleOf(actor) !== "SUPER_ADMIN") fail("FORBIDDEN", "권한이 없습니다.");
     } else {
@@ -362,8 +393,13 @@ export const getStatement = query({
     }
     const beneficiary = st.beneficiaryUserId ? await ctx.db.get(st.beneficiaryUserId) : null;
     const kyc = st.beneficiaryUserId ? await ctx.db.query("kycProfiles").withIndex("by_user", (q) => q.eq("userId", st.beneficiaryUserId!)).unique() : null;
+    const redactAdminDetails = roleOf(actor) === "ADMIN" && st.settlement.beneficiaryType === "ADMIN" && st.beneficiaryUserId === actor._id;
     return {
       ...st,
+      settlement: settlementViewFor(actor, rawSettlement),
+      lines: redactAdminDetails
+        ? [{ entryId: `aggregate:${args.id}`, month: st.settlement.month, amount: st.lines.reduce((sum, line) => sum + line.amount, 0), redacted: true as const }]
+        : st.lines,
       beneficiary: beneficiary ? { name: beneficiary.name ?? "", email: beneficiary.email ?? "" } : null,
       payee: kyc ? { legalName: kyc.legalName, bankName: kyc.bankName, accountNoMasked: `****${kyc.accountNoLast4}` } : null,
     };
@@ -386,7 +422,7 @@ export const adminMonth = query({
     const settlement = (await ctx.db.query("settlements").withIndex("by_beneficiary", (q) => q.eq("beneficiaryUserId", actor._id).eq("month", month)).collect()).find(
       (s) => s.beneficiaryType === "ADMIN",
     );
-    return { month, adminMargin: mine.amount, adminMarginDirect: mine.direct, memberCount: team.length, rows, settlement: settlement ? settlementView(settlement) : null };
+    return { month, adminMargin: mine.amount, memberCount: team.length, rows, settlement: settlement ? settlementViewFor(actor, settlement) : null };
   },
 });
 

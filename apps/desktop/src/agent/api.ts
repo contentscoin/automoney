@@ -8,6 +8,10 @@ export interface ClaimedJob {
   spaceId: string | null;
   space: { _id: string; platform: string; name: string; handle: string | null; pinned: boolean } | null;
   leaseMs: number;
+  protocolVersion: number;
+  attemptNo: number;
+  leaseToken: string;
+  leaseExpiresAt: number;
 }
 
 export interface SpaceUpdate {
@@ -15,6 +19,8 @@ export interface SpaceUpdate {
   handle?: string;
   fingerprint?: unknown;
 }
+
+export interface CompletionJobRef { id: string; attemptNo?: number; leaseToken?: string }
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -69,11 +75,14 @@ export class AgentApi {
   claim(snapshot: unknown): Promise<ClaimedJob | null> {
     return this.call<ClaimedJob | null>("/agent/claim", { body: { appVersion: this.appVersion, status: snapshot } });
   }
-  heartbeat(jobId: string, stage?: string, progress?: number): Promise<{ active: boolean; cancelRequested: boolean }> {
-    return this.call(`/agent/jobs/${jobId}/heartbeat`, { body: { stage, progress }, timeoutMs: 15_000 });
+  heartbeat(job: CompletionJobRef, stage?: string, progress?: number): Promise<{ active: boolean; cancelRequested: boolean; staleAttempt?: boolean }> {
+    return this.call(`/agent/jobs/${job.id}/heartbeat`, { body: { attemptNo: job.attemptNo, leaseToken: job.leaseToken, stage, progress }, timeoutMs: 15_000 });
   }
-  complete(jobId: string, input: { status: "SUCCEEDED" | "FAILED"; result?: JobResultEnvelope; errorCode?: string; errorMessage?: string; spaceUpdate?: SpaceUpdate }): Promise<{ ok: boolean }> {
-    return this.call(`/agent/jobs/${jobId}/complete`, { body: input });
+  preflight(job: CompletionJobRef): Promise<{ ok: true; dryRun: boolean; publishIntentId: string | null }> {
+    return this.call(`/agent/jobs/${job.id}/preflight`, { body: { attemptNo: job.attemptNo, leaseToken: job.leaseToken }, timeoutMs: 15_000 });
+  }
+  complete(job: CompletionJobRef, input: { completionId: string; status: "SUCCEEDED" | "FAILED"; result?: JobResultEnvelope; errorCode?: string; errorMessage?: string; spaceUpdate?: SpaceUpdate }): Promise<{ ok: boolean; duplicate?: boolean }> {
+    return this.call(`/agent/jobs/${job.id}/complete`, { body: { ...input, attemptNo: job.attemptNo, leaseToken: job.leaseToken } });
   }
   syncSpaces(updates: { spaceId: string; sessionState?: string; handle?: string }[]): Promise<{ applied: number }> {
     return this.call("/agent/spaces/sync", { body: { spaces: updates } });

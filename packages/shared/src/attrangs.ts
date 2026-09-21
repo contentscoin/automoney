@@ -19,6 +19,7 @@ export interface AttrangsOrderWebhook {
   event_id: string;
   event_type: AttrangsOrderEventType;
   occurred_at: string;
+  source_version?: string;
   order: {
     order_id: string;
     ordered_at: string;
@@ -63,6 +64,7 @@ export function parseAttrangsOrderWebhook(raw: unknown): ParseResult<AttrangsOrd
     return { ok: false, error: "event_type invalid" };
   }
   if (!isoDate(raw.occurred_at)) return { ok: false, error: "occurred_at invalid" };
+  if (raw.source_version !== undefined && !str(raw.source_version)) return { ok: false, error: "source_version invalid" };
   const o = raw.order;
   if (!isRecord(o)) return { ok: false, error: "order missing" };
   if (!str(o.order_id) || o.order_id.length > 128) return { ok: false, error: "order.order_id invalid" };
@@ -104,6 +106,7 @@ export function parseAttrangsOrderWebhook(raw: unknown): ParseResult<AttrangsOrd
       event_id: raw.event_id,
       event_type: raw.event_type as AttrangsOrderEventType,
       occurred_at: raw.occurred_at,
+      ...(typeof raw.source_version === "string" ? { source_version: raw.source_version } : {}),
       order: {
         order_id: o.order_id,
         ordered_at: o.ordered_at,

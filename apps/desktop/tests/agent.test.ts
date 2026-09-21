@@ -14,6 +14,9 @@ import { acquireLock } from "../src/agent/spaces/lock";
 import { createSpace, listLocalSpaces, makeFingerprint, readMeta } from "../src/agent/spaces/manager";
 import { spaceLockPath } from "../src/agent/paths";
 import { okResult } from "@automoney/shared";
+import { downloadMedia } from "../src/agent/jobs/handlers";
+import { completionJournal } from "../src/agent/completion-journal";
+import { redact } from "../src/agent/logger";
 
 const TOKEN = "A".repeat(43);
 
@@ -51,13 +54,15 @@ describe("api client", () => {
     const { fetch, calls } = fakeFetch({
       "/agent/claim": () => null,
       "/heartbeat": () => ({ active: true, cancelRequested: false }),
+      "/preflight": () => ({ ok: true, dryRun: false, publishIntentId: "r1" }),
       "/complete": () => new Response(JSON.stringify({ success: false, error: { code: "CONFLICT", message: "JOB_NOT_ACTIVE" } }), { status: 409 }),
     });
     const api = new AgentApi({ ...loadConfig(), deviceToken: TOKEN, deviceId: "d" }, fetch);
     expect(await api.claim({})).toBeNull();
     expect((calls[0]!.url as string).endsWith("/agent/claim")).toBe(true);
-    expect(await api.heartbeat("j1", "x")).toEqual({ active: true, cancelRequested: false });
-    await expect(api.complete("j1", { status: "SUCCEEDED" })).rejects.toBeInstanceOf(ApiError);
+    const ref = { id: "j1", attemptNo: 1, leaseToken: "lease" };
+    expect(await api.heartbeat(ref, "x")).toEqual({ active: true, cancelRequested: false });
+    await expect(api.complete(ref, { completionId: "c1", status: "SUCCEEDED" })).rejects.toBeInstanceOf(ApiError);
     const unpaired = new AgentApi(loadConfig(), fetch);
     await expect(unpaired.claim({})).rejects.toMatchObject({ code: "UNPAIRED" });
   });
@@ -88,14 +93,15 @@ describe("agent loop", () => {
   it("claims, heartbeats, runs handler, completes; failures report error codes; cancel via heartbeat", async () => {
     saveConfig({ ...loadConfig(), deviceId: "d1", deviceToken: TOKEN });
     const queue: unknown[] = [
-      { id: "j1", jobType: "space.create", payload: { spaceId: "sp_a", platform: "X", name: "a" }, spaceId: "sp_a", space: null, leaseMs: 1000 },
-      { id: "j2", jobType: "post.publish", payload: { spaceId: "sp_a", platform: "X", text: "hi", mediaUrls: [] }, spaceId: "sp_a", space: null, leaseMs: 1000 },
-      { id: "j3", jobType: "space.verify", payload: { spaceId: "sp_a", platform: "X" }, spaceId: "sp_a", space: null, leaseMs: 1000 },
+      { id: "j1", jobType: "space.create", payload: { spaceId: "sp_a", platform: "X", name: "a" }, spaceId: "sp_a", space: null, leaseMs: 1000, protocolVersion: 2, attemptNo: 1, leaseToken: "l1", leaseExpiresAt: Date.now() + 1000 },
+      { id: "j2", jobType: "post.publish", payload: { spaceId: "sp_a", platform: "X", text: "hi", mediaUrls: [] }, spaceId: "sp_a", space: null, leaseMs: 1000, protocolVersion: 2, attemptNo: 1, leaseToken: "l2", leaseExpiresAt: Date.now() + 1000 },
+      { id: "j3", jobType: "space.verify", payload: { spaceId: "sp_a", platform: "X" }, spaceId: "sp_a", space: null, leaseMs: 1000, protocolVersion: 2, attemptNo: 1, leaseToken: "l3", leaseExpiresAt: Date.now() + 1000 },
     ];
     let cancelJ3 = false;
     const { fetch, calls } = fakeFetch({
       "/agent/claim": () => queue.shift() ?? null,
       "/heartbeat": (_i, url) => ({ active: true, cancelRequested: url.includes("/j3/") && cancelJ3 }),
+      "/preflight": () => ({ ok: true, dryRun: false, publishIntentId: "r1" }),
       "/complete": () => ({ ok: true }),
     });
     const handlers: Record<string, Handler> = {
@@ -132,5 +138,46 @@ describe("agent loop", () => {
     expect(await loop.pollOnce()).toBe(0);
     expect(isPaired(loadConfig())).toBe(false);
     expect(loop.status.online).toBe(false);
+  });
+});
+
+describe("media fetch policy", () => {
+  it("blocks local URLs by default and validates MIME in fixture mode", async () => {
+    delete process.env.AUTOMONEY_ALLOW_PRIVATE_MEDIA;
+    await expect(downloadMedia(["http://127.0.0.1/private.jpg"])).rejects.toMatchObject({ code: "MEDIA_URL_BLOCKED" });
+    process.env.AUTOMONEY_ALLOW_PRIVATE_MEDIA = "1";
+    try {
+      const fake = vi.fn(async () => new Response("html", { status: 200, headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+      await expect(downloadMedia(["http://127.0.0.1/file"], fake)).rejects.toMatchObject({ code: "MEDIA_TYPE_UNSUPPORTED" });
+    } finally {
+      delete process.env.AUTOMONEY_ALLOW_PRIVATE_MEDIA;
+    }
+  });
+
+  it("journals a successful result when delivery is lost and resends without executing twice", async () => {
+    saveConfig({ ...loadConfig(), deviceId: "d1", deviceToken: TOKEN });
+    const job = { id: "lost-success", jobType: "space.verify", payload: {}, spaceId: null, space: null, leaseMs: 1000, protocolVersion: 2, attemptNo: 1, leaseToken: "lease", leaseExpiresAt: Date.now() + 1000 };
+    let claimed = false;
+    let completionCalls = 0;
+    let executions = 0;
+    const { fetch } = fakeFetch({
+      "/agent/claim": () => claimed ? null : (claimed = true, job),
+      "/heartbeat": () => ({ active: true, cancelRequested: false }),
+      "/complete": () => ++completionCalls === 1 ? new Response(JSON.stringify({ success: false, error: { code: "TEMP", message: "lost" } }), { status: 503 }) : ({ ok: true, duplicate: true }),
+    });
+    const handler: Handler = async () => { executions++; return { result: okResult("space.verify", "verified") }; };
+    const loop = new AgentLoop({}, "0.1.1", fetch, { "space.verify": handler } as never);
+    expect(await loop.pollOnce()).toBe(1);
+    expect(completionJournal.list()).toHaveLength(1);
+    expect(await loop.pollOnce()).toBe(0);
+    expect(executions).toBe(1);
+    expect(completionCalls).toBe(2);
+    expect(completionJournal.list()).toHaveLength(0);
+  });
+  it("redacts tokens and KYC plaintext from logs", () => {
+    const text = redact(JSON.stringify({ deviceToken: "A".repeat(43), accessToken: "secret-access-token-value", residentNo: "950505-2123456", accountNo: "12345678901234" }));
+    expect(text).not.toContain("950505-2123456");
+    expect(text).not.toContain("secret-access-token-value");
+    expect(text).not.toContain("12345678901234");
   });
 });

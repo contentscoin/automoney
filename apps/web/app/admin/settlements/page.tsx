@@ -35,7 +35,7 @@ export default function AdminSettlementsPage() {
         <>
           <section className="grid gap-4 sm:grid-cols-3">
             <div className="stat"><span className="k">이번 달 총판 차액</span><span className="v" style={{ color: "var(--accent)" }}>{won(data.adminMargin)}</span></div>
-            <div className="stat"><span className="k">직접구매 기여분</span><span className="v">{won(data.adminMarginDirect)}</span></div>
+            <div className="stat"><span className="k">소속 유저</span><span className="v">{data.memberCount}명</span></div>
             <div className="stat"><span className="k">정산 상태</span><span className="v text-base">{data.settlement ? <Badge value={data.settlement.status === "PAID" ? "APPROVED" : "PENDING"} label={SETTLEMENT_LABEL[data.settlement.status]} /> : <span className="text-stone-400">미마감</span>}</span></div>
           </section>
           <section className="card overflow-x-auto">

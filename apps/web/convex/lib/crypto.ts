@@ -50,11 +50,12 @@ export async function encryptField(keyB64: string, plaintext: string): Promise<s
   const key = await importAesKey(keyB64);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(plaintext));
-  return `${bytesToBase64(iv)}.${bytesToBase64(new Uint8Array(ct))}`;
+  return `v1:local:${bytesToBase64(iv)}.${bytesToBase64(new Uint8Array(ct))}`;
 }
 
 export async function decryptField(keyB64: string, payload: string): Promise<string> {
-  const [ivB64, ctB64] = payload.split(".");
+  const encoded = payload.startsWith("v1:") ? payload.split(":").slice(2).join(":") : payload;
+  const [ivB64, ctB64] = encoded.split(".");
   if (!ivB64 || !ctB64) throw new Error("malformed ciphertext");
   const key = await importAesKey(keyB64);
   const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(ivB64) }, key, base64ToBytes(ctB64));

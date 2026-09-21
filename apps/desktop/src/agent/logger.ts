@@ -2,11 +2,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { logsDir } from "./paths";
 
-const SECRET_PATTERNS: RegExp[] = [/Bearer\s+[A-Za-z0-9_-]{20,}/g, /"deviceToken":"[^"]+"/g];
+const SECRET_PATTERNS: RegExp[] = [
+  /Bearer\s+[A-Za-z0-9._-]{16,}/gi,
+  /"(?:deviceToken|leaseToken|accessToken|refreshToken|clientSecret|residentNo|accountNo|tokenEnc|residentNoEnc|accountNoEnc)"\s*:\s*"[^"]+"/gi,
+  /\b(?:am_mcp_|amcs_)[A-Za-z0-9_-]{12,}/g,
+  /\b\d{6}-?\d{7}\b/g,
+];
 
 export function redact(text: string): string {
   let out = text;
-  for (const re of SECRET_PATTERNS) out = out.replace(re, (m) => m.slice(0, 12) + "…[redacted]");
+  for (const re of SECRET_PATTERNS) out = out.replace(re, (m) => `${m.includes(":") ? m.slice(0, m.indexOf(":") + 1) : m.slice(0, 8)}…[redacted]`);
   return out;
 }
 

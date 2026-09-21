@@ -4,7 +4,7 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "pnpm --filter @automoney/web dev",
-    "build": "pnpm --filter @automoney/shared build && pnpm -r --filter '!@automoney/shared' build",
+    "build": "pnpm --filter @automoney/shared build && pnpm --filter @automoney/web build && pnpm --filter @automoney/desktop build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",

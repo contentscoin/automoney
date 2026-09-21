@@ -22,6 +22,12 @@ describe("products", () => {
     expect(all.map((p) => p.attrangsProductId)).toEqual([200001]);
     const found = await user.as.query(api.products.search, { term: "플라워" });
     expect(found).toHaveLength(1);
+
+    const batchCsv = csv.replace("200001", "300001").replace("200002", "300002");
+    const preview = await owner.as.mutation(api.imports.previewProducts, { csv: batchCsv });
+    expect(preview).toMatchObject({ duplicate: false, validRows: 2, errorRows: 0, status: "VALIDATED" });
+    expect(await owner.as.mutation(api.imports.applyProducts, { batchId: preview.batchId })).toMatchObject({ completed: true, applied: 2 });
+    expect((await owner.as.mutation(api.imports.previewProducts, { csv: batchCsv })).duplicate).toBe(true);
   });
 
   it("syncs from the mock adapter", async () => {

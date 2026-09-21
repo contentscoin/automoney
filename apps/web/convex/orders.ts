@@ -13,6 +13,8 @@ import { COUNTED_STATUSES, syncOrderEntriesStandalone } from "./lib/commissionEn
 import { bumpMonthlyStats, type StatsDelta } from "./lib/stats";
 import { kstMonth } from "./lib/time";
 import { getDefaultUserRateBps } from "./settings";
+import { sha256Hex } from "./lib/crypto";
+import { canonicalJson } from "./jobs";
 
 function statsDelta(order: Pick<Doc<"orders">, "attribution" | "orderAmount" | "commissionableAmount">, sign: 1 | -1): StatsDelta | null {
   if (!order.attribution) return null;
@@ -25,35 +27,45 @@ function statsDelta(order: Pick<Doc<"orders">, "attribution" | "orderAmount" | "
 /** 웹훅 수신 → 주문 원장 반영. 멱등(event_id), 상태 전이에 따라 월 집계 증감. */
 export const ingest = internalMutation({
   args: { payload: v.any() },
-  handler: async (ctx, args) => {
-    const parsed = parseAttrangsOrderWebhook(args.payload);
+  handler: async (ctx, args) => await ingestOrderPayload(ctx, args.payload, "WEBHOOK"),
+});
+
+export async function ingestOrderPayload(ctx: MutationCtx, payload: unknown, source: "CSV" | "WEBHOOK" | "RECON") {
+    const parsed = parseAttrangsOrderWebhook(payload);
     if (!parsed.ok) return { accepted: false as const, reason: parsed.error };
     const evt = parsed.value;
+    const payloadHash = await sha256Hex(canonicalJson(payload));
 
     const dupEvent = await ctx.db
       .query("orderEvents")
       .withIndex("by_eventId", (q) => q.eq("eventId", evt.event_id))
       .unique();
-    if (dupEvent) return { accepted: true as const, duplicate: true as const };
+    if (dupEvent) {
+      if (dupEvent.payloadHash === payloadHash || (!dupEvent.payloadHash && canonicalJson(dupEvent.payload) === canonicalJson(payload))) return { accepted: true as const, duplicate: true as const };
+      await ctx.db.insert("orderEventConflicts", { eventId: evt.event_id, existingPayloadHash: dupEvent.payloadHash ?? await sha256Hex(canonicalJson(dupEvent.payload)), incomingPayloadHash: payloadHash, payload, reason: "EVENT_ID_PAYLOAD_CONFLICT", createdAt: Date.now() });
+      return { accepted: false as const, quarantined: true as const, reason: "EVENT_ID_PAYLOAD_CONFLICT" };
+    }
 
     const existing = await ctx.db
       .query("orders")
       .withIndex("by_attrangsOrderId", (q) => q.eq("attrangsOrderId", evt.order.order_id))
       .unique();
-    const orderId = existing ? await applyToExisting(ctx, existing, evt) : await createOrder(ctx, evt);
+    const applied = existing ? await applyToExisting(ctx, existing, evt, source) : { orderId: await createOrder(ctx, evt, source), applyStatus: "APPLIED" as const, reason: undefined };
 
     await ctx.db.insert("orderEvents", {
-      orderId,
+      orderId: applied.orderId,
       eventId: evt.event_id,
       eventType: evt.event_type,
       occurredAt: Date.parse(evt.occurred_at),
-      payload: args.payload,
+      payload,
+      payloadHash,
+      applyStatus: applied.applyStatus,
+      reason: applied.reason,
     });
-    return { accepted: true as const, duplicate: false as const, orderId };
-  },
-});
+    return { accepted: true as const, duplicate: false as const, orderId: applied.orderId, applyStatus: applied.applyStatus };
+}
 
-async function createOrder(ctx: MutationCtx, evt: AttrangsOrderWebhook): Promise<Id<"orders">> {
+async function createOrder(ctx: MutationCtx, evt: AttrangsOrderWebhook, source: "CSV" | "WEBHOOK" | "RECON"): Promise<Id<"orders">> {
   const o = evt.order;
   const attribution = resolveAttribution({ attribution: o.attribution, clickedAt: o.clicked_at, orderedAt: o.ordered_at });
   let link: Doc<"marketingLinks"> | null = null;
@@ -80,6 +92,10 @@ async function createOrder(ctx: MutationCtx, evt: AttrangsOrderWebhook): Promise
     status,
     rawPayload: evt,
     lastEventId: evt.event_id,
+    lastOccurredAt: Date.parse(evt.occurred_at),
+    lastSourceVersion: evt.source_version,
+    source,
+    ingestionVersion: 1,
     updatedAt: Date.now(),
   };
   const id = await ctx.db.insert("orders", doc);
@@ -92,9 +108,34 @@ async function createOrder(ctx: MutationCtx, evt: AttrangsOrderWebhook): Promise
   return id;
 }
 
-async function applyToExisting(ctx: MutationCtx, existing: Doc<"orders">, evt: AttrangsOrderWebhook): Promise<Id<"orders">> {
-  await transitionOrderStatus(ctx, existing, toOrderStatus(evt.order.status), evt.event_id);
-  return existing._id;
+async function applyToExisting(ctx: MutationCtx, existing: Doc<"orders">, evt: AttrangsOrderWebhook, source: "CSV" | "WEBHOOK" | "RECON"): Promise<{ orderId: Id<"orders">; applyStatus: "APPLIED" | "STALE" | "QUARANTINED"; reason?: string }> {
+  const occurredAt = Date.parse(evt.occurred_at);
+  if (evt.source_version && existing.lastSourceVersion && evt.source_version <= existing.lastSourceVersion) return { orderId: existing._id, applyStatus: "STALE", reason: "SOURCE_VERSION_NOT_NEWER" };
+  if (!evt.source_version && existing.lastOccurredAt !== undefined && occurredAt <= existing.lastOccurredAt) return { orderId: existing._id, applyStatus: "STALE", reason: "OCCURRED_AT_NOT_NEWER" };
+  const nextStatus = toOrderStatus(evt.order.status);
+  const terminal = existing.status === "CANCELLED" || existing.status === "REFUNDED";
+  if (terminal && nextStatus !== existing.status) return { orderId: existing._id, applyStatus: "QUARANTINED", reason: "TERMINAL_STATUS_REVERSAL" };
+  if (nextStatus === "REFUNDED" && (evt.order.order_amount !== existing.orderAmount || evt.order.commissionable_amount !== existing.commissionableAmount)) {
+    return { orderId: existing._id, applyStatus: "QUARANTINED", reason: "PARTIAL_REFUND_UNSUPPORTED" };
+  }
+  const amountChanged = evt.order.order_amount !== existing.orderAmount || evt.order.commissionable_amount !== existing.commissionableAmount;
+  if (amountChanged && existing.userId && COUNTED_STATUSES.has(existing.status)) {
+    const before = statsDelta(existing, -1);
+    if (before) await bumpMonthlyStats(ctx, existing.userId, kstMonth(existing.orderedAt), before);
+  }
+  await ctx.db.patch(existing._id, {
+    orderAmount: evt.order.order_amount,
+    commissionableAmount: evt.order.commissionable_amount,
+    quantity: evt.order.items.reduce((sum, item) => sum + item.qty, 0),
+    rawPayload: evt,
+    lastOccurredAt: occurredAt,
+    lastSourceVersion: evt.source_version ?? existing.lastSourceVersion,
+    source,
+    ingestionVersion: 1,
+  });
+  const refreshed = (await ctx.db.get(existing._id))!;
+  await transitionOrderStatus(ctx, refreshed, nextStatus, evt.event_id, amountChanged);
+  return { orderId: existing._id, applyStatus: "APPLIED" };
 }
 
 /** 상태 전이 공통 경로: 월 집계 증감 + 수수료 항목 동기화. 웹훅과 리컨실이 함께 사용. */
@@ -103,11 +144,12 @@ export async function transitionOrderStatus(
   existing: Doc<"orders">,
   nextStatus: Doc<"orders">["status"],
   eventId?: string,
+  amountAlreadyRemoved = false,
 ): Promise<void> {
   const wasCounted = COUNTED_STATUSES.has(existing.status);
   const willCount = COUNTED_STATUSES.has(nextStatus);
   await ctx.db.patch(existing._id, { status: nextStatus, lastEventId: eventId ?? existing.lastEventId, updatedAt: Date.now() });
-  if (existing.userId && wasCounted !== willCount) {
+  if (existing.userId && (amountAlreadyRemoved ? willCount : wasCounted !== willCount)) {
     const delta = statsDelta(existing, willCount ? 1 : -1);
     if (delta) await bumpMonthlyStats(ctx, existing.userId, kstMonth(existing.orderedAt), delta);
   }

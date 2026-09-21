@@ -27,6 +27,12 @@ const upsertArgs = {
   };
 
 export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof upsertArgs>) {
+  // 수정 요청은 새 대상(space/piece)을 소비하기 전에 기존 예약 자체의 소유권부터 확인한다.
+  // 존재하지 않는 id와 타인의 id를 같은 NOT_FOUND로 처리해 예약 존재 여부도 노출하지 않는다.
+  if (args.id) {
+    const existing = await ctx.db.get(args.id);
+    if (!existing || existing.userId !== user._id) fail("NOT_FOUND", "예약을 찾을 수 없습니다.");
+  }
   if (args.pieceId) {
     const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
     if (!args.text.trim()) args.text = piece.text;
@@ -47,7 +53,8 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
   const { id, ...fields } = args;
   const seed = id ?? `${space._id}:${Date.now()}`;
   const nextRunAt = computeNextRunAt({ kind: args.kind, timeOfDay: args.timeOfDay, daysOfWeek: args.daysOfWeek, jitterMinutes: args.jitterMinutes, runDate: args.runDate ?? null }, Date.now(), seed) ?? undefined;
-  const doc = { ...fields, userId: user._id, enabled: true, nextRunAt };
+  const existing = id ? await ctx.db.get(id) : null;
+  const doc = { ...fields, userId: user._id, enabled: true, nextRunAt, revision: (existing?.revision ?? 0) + 1 };
   const scheduleId = id ? (await ctx.db.patch(id, doc), id) : await ctx.db.insert("schedules", { ...doc, createdAt: Date.now() });
   await audit(ctx, { actorUserId: user._id, action: "schedule.upsert", metadata: { scheduleId, kind: args.kind, nextRunAt: nextRunAt ?? null } });
   return { scheduleId, nextRunAt: nextRunAt ?? null };
@@ -117,7 +124,12 @@ export const tick = internalMutation({
       const spec = { kind: s.kind, timeOfDay: s.timeOfDay, daysOfWeek: s.daysOfWeek, jitterMinutes: s.jitterMinutes, runDate: s.runDate ?? null };
       const next = computeNextRunAt(spec, now, s._id) ?? undefined;
       if (!space || ["PAUSED", "RESTRICTED"].includes(space.sessionState)) {
-        await ctx.db.patch(s._id, { nextRunAt: next, enabled: next !== undefined });
+        await ctx.db.patch(s._id, {
+          nextRunAt: next,
+          enabled: next !== undefined,
+          lastSkipReason: !space ? "SPACE_NOT_FOUND" : `SPACE_${space.sessionState}`,
+          lastSkippedAt: now,
+        });
         skipped++;
         continue;
       }
@@ -127,7 +139,12 @@ export const tick = internalMutation({
         (j) => j.jobType === "post.publish" && kstDayKey(j.createdAt) === dayKey && j.status !== "CANCELLED",
       );
       if (todays.length >= space.dailyPostLimit) {
-        await ctx.db.patch(s._id, { nextRunAt: next, enabled: next !== undefined });
+        await ctx.db.patch(s._id, {
+          nextRunAt: next,
+          enabled: next !== undefined,
+          lastSkipReason: "DAILY_POST_LIMIT",
+          lastSkippedAt: now,
+        });
         skipped++;
         continue;
       }
@@ -136,7 +153,14 @@ export const tick = internalMutation({
         const link = await ctx.db.get(s.linkId);
         if (link) linkUrl = `${process.env.SITE_URL ?? ""}/r/${link.shortCode}`;
       }
-      const payload: PublishPayload = { spaceId: space._id, platform: space.platform, text: s.text, mediaUrls: s.mediaUrls, linkUrl };
+      const payload: PublishPayload & { pieceId?: string } = {
+        spaceId: space._id,
+        platform: space.platform,
+        text: s.text,
+        mediaUrls: s.mediaUrls,
+        linkUrl,
+        ...(s.pieceId ? { pieceId: s.pieceId } : {}),
+      };
       const jobId = await enqueueJob(ctx, {
         userId: s.userId,
         jobType: "post.publish",
@@ -144,11 +168,19 @@ export const tick = internalMutation({
         spaceId: space._id,
         scheduleId: s._id,
         source: "SCHEDULE",
-        needsApproval: !s.autoApprove,
+        needsApproval: s.autoApprove !== true,
         idempotencyKey: `schedule:${s._id}:${s.nextRunAt}`,
+        expiresAt: s.nextRunAt + 2 * 60 * 60_000,
       });
-      await ctx.db.patch(s._id, { lastRunAt: now, lastJobId: jobId, nextRunAt: next, enabled: next !== undefined });
-      if (!s.autoApprove) await ctx.scheduler.runAfter(0, internal.telegram.notifyApproval, { jobId });
+      await ctx.db.patch(s._id, {
+        lastRunAt: now,
+        lastJobId: jobId,
+        nextRunAt: next,
+        enabled: next !== undefined,
+        lastSkipReason: undefined,
+        lastSkippedAt: undefined,
+      });
+      if (s.autoApprove !== true) await ctx.scheduler.runAfter(0, internal.telegram.notifyApproval, { jobId });
       created++;
     }
     return { created, skipped };
