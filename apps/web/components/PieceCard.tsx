@@ -3,6 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { useState } from "react";
+import { stripMatchingTrailingHashtagBlock } from "@automoney/shared";
 import { Badge } from "@/components/Badge";
 import { CHANNEL_LABEL, GENERATED_BY_LABEL, PIECE_STATUS_LABEL, PIECE_STATUS_TONE } from "@/lib/content-format";
 
@@ -26,12 +27,14 @@ export type PieceLike = {
 };
 
 export function pieceText(p: PieceLike): string {
-  return p.hashtags.length ? `${p.caption}\n\n${p.hashtags.map((h) => `#${h}`).join(" ")}` : p.caption;
+  const caption = stripMatchingTrailingHashtagBlock(p.caption, p.hashtags);
+  return p.hashtags.length ? `${caption}\n\n${p.hashtags.map((h) => `#${h}`).join(" ")}` : caption;
 }
 
 export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, publishHref }: { p: PieceLike; onApprove?: () => Promise<void>; onReject?: (reason: string) => Promise<void>; onEdit?: (v: { caption: string; hashtags: string[]; script?: string }) => Promise<void>; onShare?: (shared: boolean) => Promise<void>; onCopy?: () => Promise<void>; publishHref?: string }) {
+  const displayCaption = stripMatchingTrailingHashtagBlock(p.caption, p.hashtags);
   const [editing, setEditing] = useState(false);
-  const [caption, setCaption] = useState(p.caption);
+  const [caption, setCaption] = useState(displayCaption);
   const [tags, setTags] = useState(p.hashtags.join(" "));
   const [script, setScript] = useState(p.script ?? "");
   const [reason, setReason] = useState("");
@@ -71,7 +74,7 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, pub
               })}
             </div>
           )}
-          <p className="whitespace-pre-wrap text-sm">{p.caption}</p>
+          <p className="whitespace-pre-wrap text-sm">{displayCaption}</p>
           {p.hashtags.length > 0 && <p className="text-xs text-sky-700">{p.hashtags.map((h) => `#${h}`).join(" ")}</p>}
           {p.script && <details className="text-xs"><summary className="cursor-pointer text-stone-600">숏폼 대본</summary><pre className="mt-1 whitespace-pre-wrap rounded bg-stone-50 p-2">{p.script}</pre></details>}
         </>

@@ -314,6 +314,35 @@ export function buildGenerationPrompt(input: GenerationInput): string {
   ].join("\n\n");
 }
 
+/**
+ * Removes a final, hashtag-only caption block when it duplicates the structured
+ * hashtag list. Hashtags in prose and non-matching suffixes are intentionally
+ * preserved so this is safe to apply to both new and previously stored pieces.
+ */
+export function stripMatchingTrailingHashtagBlock(caption: string, hashtags: string[]): string {
+  if (!caption || hashtags.length === 0) return caption;
+  const lines = caption.split(/\r?\n/);
+  let blockEnd = lines.length;
+  while (blockEnd > 0 && lines[blockEnd - 1]!.trim() === "") blockEnd -= 1;
+  let blockStart = blockEnd;
+  while (blockStart > 0) {
+    const line = lines[blockStart - 1]!.trim();
+    const tokens = line.split(/\s+/);
+    if (!line || !tokens.every((token) => /^#[^#\s]+$/u.test(token))) break;
+    blockStart -= 1;
+  }
+  if (blockStart === blockEnd || blockStart === 0) return caption;
+
+  const suffixTags = lines
+    .slice(blockStart, blockEnd)
+    .flatMap((line) => line.trim().split(/\s+/))
+    .map((tag) => tag.slice(1));
+  const structuredTags = hashtags.map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean);
+  const canonical = (tags: string[]) => [...tags].sort().join("\u0000");
+  if (suffixTags.length !== structuredTags.length || canonical(suffixTags) !== canonical(structuredTags)) return caption;
+  return lines.slice(0, blockStart).join("\n").trimEnd();
+}
+
 export function parseGeneratedPieces(raw: string, allowed: Channel[]): GeneratedPiece[] {
   const m = raw.match(/\[[\s\S]*\]/);
   if (!m) return [];
@@ -322,12 +351,15 @@ export function parseGeneratedPieces(raw: string, allowed: Channel[]): Generated
     if (!Array.isArray(arr)) return [];
     return arr
       .filter((p): p is Record<string, unknown> => !!p && typeof p === "object")
-      .map((p) => ({
-        channel: String(p.channel) as Channel,
-        caption: String(p.caption ?? ""),
-        hashtags: Array.isArray(p.hashtags) ? p.hashtags.map(String) : [],
-        script: typeof p.script === "string" ? p.script : null,
-      }))
+      .map((p) => {
+        const hashtags = Array.isArray(p.hashtags) ? p.hashtags.map(String) : [];
+        return {
+          channel: String(p.channel) as Channel,
+          caption: stripMatchingTrailingHashtagBlock(String(p.caption ?? ""), hashtags),
+          hashtags,
+          script: typeof p.script === "string" ? p.script : null,
+        };
+      })
       .filter((p) => allowed.includes(p.channel) && p.caption.trim().length > 0);
   } catch {
     return [];

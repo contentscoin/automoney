@@ -1,5 +1,6 @@
 import type { Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
+import { stripMatchingTrailingHashtagBlock } from "@automoney/shared";
 import { fail } from "./errors";
 
 /** 라이브러리 조각을 발행/예약 본문으로 읽는다. 사용 횟수는 실제 게시 성공 때만 증가한다. */
@@ -18,8 +19,9 @@ export async function consumePiece(
     role !== "SUPER_ADMIN"
   )
     fail("FORBIDDEN", "접근할 수 없는 콘텐츠입니다.");
+  const caption = stripMatchingTrailingHashtagBlock(p.caption, p.hashtags);
   const text = p.hashtags.length
-    ? `${p.caption}\n\n${p.hashtags.map((h) => `#${h}`).join(" ")}`
-    : p.caption;
+    ? `${caption}\n\n${p.hashtags.map((h) => `#${h}`).join(" ")}`
+    : caption;
   return { text, mediaUrls: p.mediaUrls, channel: p.channel, productId: p.productId };
 }

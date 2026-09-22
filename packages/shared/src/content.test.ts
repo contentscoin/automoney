@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildGenerationPrompt, evaluatePiece, extractAtoms, extractMagazine, isAutoApprovable, parseGeneratedPieces, templateGenerate, CHANNELS, CHANNEL_SPEC } from "./index";
+import { buildGenerationPrompt, evaluatePiece, extractAtoms, extractMagazine, isAutoApprovable, parseGeneratedPieces, stripMatchingTrailingHashtagBlock, templateGenerate, CHANNELS, CHANNEL_SPEC } from "./index";
 
 const HTML = `<!doctype html><html><head><title>fallback</title>
 <meta property="og:title" content="가을 하객룩, 이렇게 입으면 실패 없어요" />
@@ -97,5 +97,21 @@ describe("templateGenerate + prompt/parse", () => {
     const parsed = parseGeneratedPieces('설명…\n[{"channel":"X","caption":"hi","hashtags":["a"],"script":null},{"channel":"TIKTOK","caption":"no"},{"channel":"THREADS","caption":""}]', ["X", "THREADS"]);
     expect(parsed).toEqual([{ channel: "X", caption: "hi", hashtags: ["a"], script: null }]);
     expect(parseGeneratedPieces("garbage", ["X"])).toEqual([]);
+  });
+  it("removes only a trailing hashtag block that matches the structured hashtags", () => {
+    const caption = "오늘은 #니트 코디를 소개해요.\n자세한 내용은 링크에서 확인하세요.\n\n#광고 #아뜨랑스\n#니트";
+    expect(stripMatchingTrailingHashtagBlock(caption, ["니트", "#광고", "아뜨랑스"]))
+      .toBe("오늘은 #니트 코디를 소개해요.\n자세한 내용은 링크에서 확인하세요.");
+    expect(stripMatchingTrailingHashtagBlock("본문\n\n#광고 #가을", ["광고", "니트"]))
+      .toBe("본문\n\n#광고 #가을");
+    expect(stripMatchingTrailingHashtagBlock("본문 #광고 #니트", ["광고", "니트"]))
+      .toBe("본문 #광고 #니트");
+  });
+  it("normalizes duplicate trailing hashtags while parsing generated pieces", () => {
+    const parsed = parseGeneratedPieces(
+      '[{"channel":"THREADS","caption":"니트 코디 추천\\n\\n#광고 #니트","hashtags":["광고","니트"]}]',
+      ["THREADS"],
+    );
+    expect(parsed).toEqual([{ channel: "THREADS", caption: "니트 코디 추천", hashtags: ["광고", "니트"], script: null }]);
   });
 });
