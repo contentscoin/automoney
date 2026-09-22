@@ -32,7 +32,7 @@ type FetchLike = typeof fetch;
 
 /** 클라우드 에이전트 API 클라이언트 (Convex HTTP actions). blogautomcp siteFetch 계승. */
 export class AgentApi {
-  constructor(private cfg: AgentConfig, private fetchImpl: FetchLike = fetch, private appVersion = "0.1.6") {}
+  constructor(private cfg: AgentConfig, private fetchImpl: FetchLike = fetch, private appVersion = "0.1.7") {}
 
   private async call<T>(path: string, init: { method?: string; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
     if (!this.cfg.deviceToken) throw new ApiError(401, "UNPAIRED", "device not paired");

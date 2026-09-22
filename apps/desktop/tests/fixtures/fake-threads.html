@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <style>
+      [hidden] { display: none !important; }
+      #fediverse-notice { position: fixed; inset: 0; z-index: 2; background: white; }
+    </style>
+  </head>
+  <body>
+    <a data-automoney="handle" href="/@e2e_threads">e2e_threads</a>
+    <div
+      id="compose"
+      role="button"
+      tabindex="0"
+      aria-label="텍스트 필드가 비어 있습니다. 입력하여 새 게시물을 작성해보세요."
+    >새로운 소식이 있나요?</div>
+    <section id="composer" hidden>
+      <div role="textbox" contenteditable="true" aria-label="텍스트 필드가 비어 있습니다. 입력하여 새 게시물을 작성해보세요."></div>
+      <div id="publish" role="button" tabindex="0">게시</div>
+    </section>
+    <div id="fediverse-notice" role="dialog" hidden>
+      <h2>페디버스로 계속 공유하시겠어요?</h2>
+      <div id="dismiss-notice" role="button" tabindex="0">취소</div>
+    </div>
+    <script>
+      document.querySelector("#compose").addEventListener("click", () => {
+        document.querySelector("#composer").hidden = false;
+        document.querySelector("#fediverse-notice").hidden = false;
+      });
+      document.querySelector("#dismiss-notice").addEventListener("click", () => {
+        document.querySelector("#fediverse-notice").hidden = true;
+      });
+      document.querySelector("#publish").addEventListener("click", () => {
+        const link = document.createElement("a");
+        link.dataset.automoney = "post-link";
+        link.href = "/@e2e_threads/post/THREAD123";
+        document.body.appendChild(link);
+      });
+    </script>
+  </body>
+</html>

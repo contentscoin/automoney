@@ -40,6 +40,7 @@ describe("platform recipes on fixture pages", () => {
   });
 
   const cases: { platform: string; env: string; file: string; media: string[]; expectUrl: RegExp; handle: string }[] = [
+    { platform: "THREADS", env: "AUTOMONEY_THREADS_URL", file: "fake-threads.html", media: [], expectUrl: /\/@e2e_threads\/post\/THREAD123/, handle: "e2e_threads" },
     { platform: "INSTAGRAM", env: "AUTOMONEY_INSTAGRAM_URL", file: "fake-instagram.html", media: [img], expectUrl: /\/p\/ABC123/, handle: "e2e_insta" },
     { platform: "TIKTOK", env: "AUTOMONEY_TIKTOK_URL", file: "fake-tiktok.html", media: [vid], expectUrl: /\/video\/7000000000000000001/, handle: "e2e_tok" },
     { platform: "NAVER_BLOG", env: "AUTOMONEY_NAVER_URL", file: "fake-naver.html", media: [], expectUrl: /\/e2e_blogger\/223000000001/, handle: "e2e_blogger" },
