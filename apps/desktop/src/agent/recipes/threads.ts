@@ -15,6 +15,10 @@ export const threadsRecipe: PlatformRecipe = {
     if (options.navigate !== false) await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
     const body = await page.locator("body").innerText().catch(() => "");
     if (RESTRICTION_HINTS.some((re) => re.test(body))) return { state: "RESTRICTED", detail: "restriction hint on page" };
+    const hasSession = (await page.context().cookies()).some(
+      (cookie) => cookie.name === "sessionid" && /(^|\.)threads\.(com|net)$/.test(cookie.domain) && cookie.value.length > 0,
+    );
+    if (hasSession) return { state: "HEALTHY", detail: "threads session cookie present" };
     const compose = page.locator('[data-automoney="compose"], [role="button"][aria-label*="새 스레드"], [role="button"][aria-label*="New thread"], a[href="/compose"], [aria-label="Create"]').first();
     if (await compose.isVisible({ timeout: 8_000 }).catch(() => false)) {
       const handle = await page.locator('[data-automoney="handle"], a[href^="/@"]').first().getAttribute("href").catch(() => null);

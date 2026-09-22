@@ -82,6 +82,12 @@ describe("platform recipes on fixture pages", () => {
     expect(login.state).toBe("LOGIN_REQUIRED");
     expect(page.url()).toBe(beforeUrl);
 
+    await page.context().addCookies([
+      { name: "sessionid", value: "test-session", domain: ".threads.com", path: "/", expires: Math.floor(Date.now() / 1000) + 3600 },
+    ]);
+    const authenticated = await recipe.checkSession(page, { navigate: false });
+    expect(authenticated.state).toBe("HEALTHY");
+
     await page.setContent("<main>이 계정은 일시적으로 이용 제한되었습니다.</main>");
     const restricted = await recipe.checkSession(page, { navigate: false });
     expect(restricted.state).toBe("RESTRICTED");
