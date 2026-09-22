@@ -132,6 +132,29 @@ describe("content generation gate", () => {
     await owner.as.mutation(api.content.setVisibility, { pieceId: threads._id, visibility: "SHARED" });
     const otherLib = await other.as.query(api.content.listLibrary, {});
     expect(otherLib.map((p) => p._id)).toEqual([threads._id]);
+    const copied = await other.as.mutation(api.content.copyToMine, { pieceId: threads._id });
+    const copiedPiece = await other.as.query(api.content.getPiece, { pieceId: copied.pieceId });
+    expect(copiedPiece).toMatchObject({ mine: true, visibility: "PRIVATE", status: "APPROVED", generatedBy: "manual" });
+
+    const manual = await other.as.mutation(api.content.createManual, {
+      channel: "X",
+      caption: "최저가 100% 보장",
+      hashtags: ["광고"],
+      mediaUrls: [],
+    });
+    expect(manual.status).toBe("DRAFT");
+    await expect(other.as.mutation(api.content.createManual, {
+      channel: "THREADS",
+      caption: "   ",
+      hashtags: [],
+      mediaUrls: [],
+    })).rejects.toThrow(/본문/);
+    await expect(other.as.mutation(api.content.createManual, {
+      channel: "X",
+      caption: "안전한 링크에서 확인하세요",
+      hashtags: ["광고"],
+      mediaUrls: ["http://insecure.example/image.jpg"],
+    })).rejects.toThrow(/HTTPS/);
 
     // 거절 → RETIRED + 사유 기록
     await user.as.mutation(api.content.reject, { pieceId: x._id, reason: "톤이 안 맞음" });
@@ -141,14 +164,19 @@ describe("content generation gate", () => {
 
     // pieceId 로 발행 잡 채우기(SHARED 조각을 타 유저가 사용, usageCount 증가)
     const { deviceToken: otherToken } = await pairDevice(t, other);
-    void otherToken;
     const { spaceId, jobId: createJob } = await other.as.mutation(api.spaces.create, { platform: "THREADS", name: "메인" });
-    void createJob;
+    await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "준비 전 게시", mediaUrls: [] })).rejects.toThrow(/정상 상태/);
+    await t.fetch("/agent/claim", authed(otherToken, { method: "POST", body: "{}" }));
+    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(otherToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY" } }) }));
     const pubJob = await other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: threads._id });
     const job = await t.run(async (ctx) => ctx.db.get(pubJob));
     expect((job!.payload as { text: string }).text).toContain("#광고");
     expect((job!.payload as { pieceId: string }).pieceId).toBe(threads._id);
     expect((await user.as.query(api.content.getPiece, { pieceId: threads._id })).usageCount).toBe(1);
+    const instagram = await other.as.mutation(api.spaces.create, { platform: "INSTAGRAM", name: "인스타" });
+    await t.run((ctx) => ctx.db.patch(instagram.spaceId, { sessionState: "HEALTHY" }));
+    await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId: instagram.spaceId, text: "", mediaUrls: [], pieceId: threads._id })).rejects.toThrow(/플랫폼/);
+    await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: manual.pieceId })).rejects.toThrow();
     // 내 것도 SHARED 도 아닌 조각은 거부
     await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: x._id })).rejects.toThrow();
   });
@@ -167,6 +195,7 @@ describe("curation", () => {
     const r2 = await t.action(internal.curation.refreshTrends, { xml: RSS });
     expect(r2).toMatchObject({ inserted: 0, updated: 2 });
     const user = await signup(t, "c@test.com");
+    await t.run((ctx) => ctx.db.patch(p1, { imageUrls: ["https://cdn.example.com/product.jpg"] }));
     const trends = await user.as.query(api.curation.list, { kind: "TREND" });
     expect(trends.map((x) => x.title)).toEqual(["한강 불꽃축제", "가을 니트 코디"]);
 
@@ -193,5 +222,8 @@ describe("curation", () => {
     const payload = job!.payload as { atoms: { atomType: string }[]; products: { name: string }[] };
     expect(payload.products[0]!.name).toBe("테스트 상품 100001");
     expect(payload.atoms.length).toBeGreaterThan(0);
+    await t.run((ctx) => ctx.db.patch(jobId, { status: "SUCCEEDED", result: { data: { pieces: [{ channel: "BLOG", caption: "가을 상품을 링크에서 확인하세요", hashtags: ["광고"], script: null }], generatedBy: "template" } } }));
+    expect(await t.mutation(internal.content.ingestGenerated, { jobId })).toMatchObject({ saved: 1 });
+    expect((await user.as.query(api.content.listLibrary, {}))[0]?.mediaUrls).toEqual(["https://cdn.example.com/product.jpg"]);
   });
 });

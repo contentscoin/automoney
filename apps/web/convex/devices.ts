@@ -6,6 +6,7 @@ import { audit } from "./lib/audit";
 import { sha256Hex } from "./lib/crypto";
 import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
+import { enqueueJob } from "./jobs";
 
 const PAIR_CODE_LENGTH = 8;
 
@@ -97,6 +98,26 @@ export const revoke = mutation({
     const running = await ctx.db.query("agentJobs").withIndex("by_user_status", (q) => q.eq("userId", user._id).eq("status", "RUNNING")).collect();
     for (const j of running) if (j.claimedByDeviceId === d._id) await ctx.db.patch(j._id, { status: "QUEUED", claimedByDeviceId: undefined, leaseUntil: undefined, updatedAt: Date.now() });
     await audit(ctx, { actorUserId: user._id, action: "device.revoke", metadata: { deviceId: d._id } });
+  },
+});
+
+/** 웹에서 PC의 Codex 로그인 창을 시작한다. 자격증명은 PC에만 남는다. */
+export const requestCodexLogin = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const user = await requireUser(ctx);
+    const devices = await ctx.db.query("devices").withIndex("by_user", (q) => q.eq("userId", user._id).eq("status", "ACTIVE")).collect();
+    const device = devices.find((d) => !!d.lastSeenAt && Date.now() - d.lastSeenAt < 90_000);
+    if (!device) fail("CONFLICT", "온라인 상태의 데스크톱 에이전트가 필요합니다.");
+    const jobId = await enqueueJob(ctx, {
+      userId: user._id,
+      jobType: "codex.login",
+      payload: {},
+      source: "WEB",
+      requestKey: `codex.login:${user._id}:${Math.floor(Date.now() / 60_000)}`,
+    });
+    await audit(ctx, { actorUserId: user._id, action: "device.codexLogin", metadata: { deviceId: device._id, jobId } });
+    return { jobId };
   },
 });
 

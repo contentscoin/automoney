@@ -158,10 +158,25 @@ export async function handlePublish(ctx: JobContext): Promise<JobOutcome> {
     if (session.state !== "HEALTHY") throw new JobError("SPACE_SESSION_EXPIRED", "세션이 만료되었습니다. 스페이스에서 다시 로그인하세요.", { sessionState: "EXPIRED" });
     let outcome: { postUrl: string | null; detail?: string };
     let recoveredBy: string | null = null;
+    let publishStarted = false;
     try {
-      outcome = await recipe.publish(space.page, { text, mediaPaths }, helpers(ctx, { dryRun }));
+      const recipeHelpers = helpers(ctx, { dryRun });
+      outcome = await recipe.publish(space.page, { text, mediaPaths }, {
+        ...recipeHelpers,
+        beforePublish: async () => {
+          const allowed = await recipeHelpers.beforePublish();
+          publishStarted = allowed;
+          return allowed;
+        },
+      });
     } catch (recipeError) {
       if ((recipeError as { code?: string }).code === "JOB_CANCELLED" || (recipeError as Error).name === "CancelledError") throw recipeError;
+      if (publishStarted) {
+        throw new JobError(
+          "PUBLISH_RESULT_UNCERTAIN",
+          "게시 버튼 실행 후 결과를 확인하지 못했습니다. 자동 재게시하지 않으니 SNS에서 게시 여부를 직접 확인하세요.",
+        );
+      }
       const planner = pickPlanner(ctx);
       if (!planner) throw new JobError("RECIPE_FAILED", `레시피 실패: ${(recipeError as Error).message.split("\n")[0]}`);
       log("warn", "recipe failed — trying autopilot", { spaceId: p.spaceId, planner: planner.name, error: String(recipeError).slice(0, 200) });

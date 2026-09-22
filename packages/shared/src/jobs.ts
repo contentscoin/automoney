@@ -42,6 +42,7 @@ export const AGENT_ERROR_CODES = [
   "AGENT_OFFLINE",
   "AGENT_LOST",
   "AGENT_LOST_UNCERTAIN",
+  "PUBLISH_RESULT_UNCERTAIN",
   "APP_UPDATE_REQUIRED",
   "JOB_CANCELLED",
   "INTERNAL",
@@ -111,7 +112,7 @@ export function validatePublishPayload(p: PublishPayload): string | null {
   if (p.mediaUrls.length > lim.maxMedia) return `too many media (max ${lim.maxMedia})`;
   if (lim.mediaRequired && p.mediaUrls.length === 0) return `${p.platform} requires media`;
   for (const u of p.mediaUrls) {
-    if (!/^https?:\/\//.test(u)) return "media url must be http(s)";
+    if (!/^https:\/\//.test(u)) return "media url must use https";
     const kind = guessMediaKind(u);
     if (kind !== "unknown" && !lim.mediaKinds.includes(kind)) return `${p.platform} does not accept ${kind}`;
   }

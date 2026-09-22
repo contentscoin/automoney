@@ -10,7 +10,7 @@ export async function consumePiece(
   role: string,
 ): Promise<{ text: string; mediaUrls: string[]; channel: string }> {
   const p = await ctx.db.get(pieceId);
-  if (!p || p.status === "RETIRED")
+  if (!p || p.status !== "APPROVED")
     fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
   if (
     p.ownerUserId !== userId &&

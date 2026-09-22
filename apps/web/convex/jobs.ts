@@ -1,5 +1,5 @@
 import { v, type ObjectType } from "convex/values";
-import { APPROVAL_TTL_MS, JOB_LEASE_MS, validatePublishPayload, type JobType, type PublishPayload } from "@automoney/shared";
+import { APPROVAL_TTL_MS, CHANNEL_PLATFORM, JOB_LEASE_MS, validatePublishPayload, type JobType, type PublishPayload } from "@automoney/shared";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
@@ -122,10 +122,12 @@ const enqueuePublishArgs = {
 
 export async function enqueuePublishFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof enqueuePublishArgs>, source: "WEB" | "MCP" = "WEB") {
   const space = await ownSpace(ctx, user._id, args.spaceId);
+  if (space.sessionState !== "HEALTHY" && source === "WEB") fail("CONFLICT", "정상 상태의 게시 계정만 사용할 수 있습니다. 연결 관리에서 로그인과 상태 확인을 완료하세요.");
   let text = args.text;
   let mediaUrls = args.mediaUrls;
   if (args.pieceId) {
     const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
+    if (CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) fail("INVALID_ARGUMENT", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
     if (!text.trim()) text = piece.text;
     if (mediaUrls.length === 0) mediaUrls = piece.mediaUrls;
   }
@@ -190,6 +192,10 @@ export const approve = mutation({
     const j = await ctx.db.get(args.jobId);
     if (!j || j.userId !== user._id) fail("NOT_FOUND", "작업을 찾을 수 없습니다.");
     if (j.status !== "NEEDS_APPROVAL") fail("CONFLICT", "승인 대기 상태가 아닙니다.");
+    if (j.jobType === "post.publish" && j.spaceId) {
+      const space = await ctx.db.get(j.spaceId);
+      if (!space || space.userId !== user._id || space.sessionState !== "HEALTHY") fail("CONFLICT", "정상 상태의 게시 계정만 승인할 수 있습니다. 연결 관리에서 로그인과 상태 확인을 완료하세요.");
+    }
     const payloadHash = await hashJobPayload(j.jobType, j.payload as Record<string, unknown>);
     if (j.payloadHash && j.payloadHash !== payloadHash) fail("CONFLICT", "승인할 내용이 변경되었습니다. 다시 등록하세요.");
     const now = Date.now();

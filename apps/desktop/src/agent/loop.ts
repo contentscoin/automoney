@@ -73,7 +73,15 @@ export class AgentLoop {
   }
 
   snapshot() {
-    return { appVersion: this.appVersion, platform: process.platform, spaces: listLocalSpaces().length, codexLoggedIn: this.status.codex?.loggedIn ?? null, headless: this.cfg.headless };
+    return {
+      appVersion: this.appVersion,
+      platform: process.platform,
+      spaces: listLocalSpaces().length,
+      codexInstalled: this.status.codex?.installed ?? null,
+      codexLoggedIn: this.status.codex?.loggedIn ?? null,
+      codexDetail: this.status.codex?.detail?.slice(0, 160) ?? null,
+      headless: this.cfg.headless,
+    };
   }
 
   /** 1회 폴링. 잡이 있으면 끝까지 처리. 처리한 잡 수 반환 */
@@ -84,6 +92,7 @@ export class AgentLoop {
       return 0;
     }
     this.status.lastPollAt = Date.now();
+    this.status.codex = safeCodexStatus();
     await this.flushCompletions();
     let job: ClaimedJob | null;
     try {

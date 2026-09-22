@@ -27,7 +27,7 @@ export function pieceText(p: PieceLike): string {
   return p.hashtags.length ? `${p.caption}\n\n${p.hashtags.map((h) => `#${h}`).join(" ")}` : p.caption;
 }
 
-export function PieceCard({ p, onApprove, onReject, onEdit, onShare }: { p: PieceLike; onApprove?: () => Promise<void>; onReject?: (reason: string) => Promise<void>; onEdit?: (v: { caption: string; hashtags: string[]; script?: string }) => Promise<void>; onShare?: (shared: boolean) => Promise<void> }) {
+export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy }: { p: PieceLike; onApprove?: () => Promise<void>; onReject?: (reason: string) => Promise<void>; onEdit?: (v: { caption: string; hashtags: string[]; script?: string }) => Promise<void>; onShare?: (shared: boolean) => Promise<void>; onCopy?: () => Promise<void> }) {
   const [editing, setEditing] = useState(false);
   const [caption, setCaption] = useState(p.caption);
   const [tags, setTags] = useState(p.hashtags.join(" "));
@@ -64,8 +64,9 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onShare }: { p: Piec
       {p.qualityReport?.fixed?.length > 0 && <p className="text-xs text-stone-500">자동 보정: {p.qualityReport.fixed.join(", ")}</p>}
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <button className="btn-ghost" onClick={async () => { try { await navigator.clipboard.writeText(pieceText(p)); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ } }}>{copied ? "복사됨" : "복사"}</button>
-        {p.status === "APPROVED" && <Link className="btn-ghost" href={`/dashboard/jobs?piece=${p._id}`}>이 콘텐츠로 게시</Link>}
+        {p.status === "APPROVED" && <Link className="btn-ghost" href={`/dashboard/publish?piece=${p._id}`}>이 콘텐츠로 게시</Link>}
         {p.status === "APPROVED" && <Link className="btn-ghost" href={`/dashboard/schedules?piece=${p._id}`}>예약</Link>}
+        {!p.mine && onCopy && <button className="btn-primary" onClick={onCopy}>내 콘텐츠로 가져오기</button>}
         {p.mine && p.status === "DRAFT" && onApprove && <button className="btn-primary" onClick={onApprove} disabled={blocks.length > 0} title={blocks.length ? "금칙 위반을 수정한 뒤 승인할 수 있습니다" : ""}>승인</button>}
         {p.mine && p.status !== "RETIRED" && onEdit && !editing && <button className="btn-ghost" onClick={() => setEditing(true)}>수정</button>}
         {onShare && p.status === "APPROVED" && <button className="btn-ghost" onClick={() => onShare(p.visibility !== "SHARED")}>{p.visibility === "SHARED" ? "공유 해제" : "전체 공유"}</button>}

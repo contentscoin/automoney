@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -23,26 +25,34 @@ export default function ContentPage() {
   const approve = useMutation(api.content.approve);
   const reject = useMutation(api.content.reject);
   const edit = useMutation(api.content.edit);
+  const copyToMine = useMutation(api.content.copyToMine);
   const buildFacts = useMutation(api.curation.buildProductFacts);
   const celebMatch = useAction(api.curation.celebMatch);
   const [f, setF] = useState<{ magazineId: string; productId: string; channels: Channel[] }>({ magazineId: "", productId: "", channels: ["THREADS", "INSTAGRAM_FEED"] });
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const hasDevice = (devices ?? []).some((d) => d.status === "ACTIVE");
+  const [scope, setScope] = useState<"SHARED" | "MINE">("SHARED");
+  const activeDevice = devices?.find((d) => d.status === "ACTIVE");
+  const hasDevice = !!activeDevice;
+  const deviceOnline = !!activeDevice?.online;
+  const codexReady = !!(activeDevice?.snapshot as { codexLoggedIn?: boolean } | null | undefined)?.codexLoggedIn;
+  const visibleLibrary = library?.filter((piece) => scope === "MINE" ? piece.mine : !piece.mine) ?? [];
   const selectedMagazine = useQuery(api.magazines.get, f.magazineId ? { magazineId: f.magazineId as Id<"magazines"> } : "skip");
 
   const toggle = (c: Channel) => setF({ ...f, channels: f.channels.includes(c) ? f.channels.filter((x) => x !== c) : [...f.channels, c] });
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-xl font-bold">콘텐츠</h1>
-        <p className="text-sm text-stone-500">매거진·상품 소재로 채널별 게시물을 만듭니다. 생성은 내 PC 의 에이전트(Codex 구독)가 수행하고, 품질 게이트(광고 표기·금칙 주장·길이)를 통과한 조각만 자동 승인됩니다.</p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div><h1 className="text-xl font-bold">콘텐츠 찾기</h1><p className="text-sm text-stone-500">운영 제공 콘텐츠를 가져오거나 매거진·상품 소재로 내 초안을 만듭니다.</p></div>
+        <div className="flex gap-2"><Link className="btn-ghost" href="/dashboard/content/mine">내 콘텐츠</Link><Link className="btn-primary" href="/dashboard/publish">게시하기</Link></div>
       </div>
 
       <section className="card">
         <h2 className="font-semibold">콘텐츠 생성 요청</h2>
-        {!hasDevice && <p className="mt-1 text-sm text-amber-700">데스크톱 에이전트가 연결되어 있지 않습니다. 대시보드 &gt; 데스크톱 에이전트에서 페어링하세요.</p>}
+        {!hasDevice && <p className="mt-1 text-sm text-amber-700">데스크톱 에이전트가 연결되어 있지 않습니다. <Link className="underline" href="/dashboard/connections">연결 관리에서 페어링하세요.</Link></p>}
+        {hasDevice && !deviceOnline && <p className="mt-1 text-sm text-amber-700">PC 앱이 오프라인입니다. 앱을 실행하면 생성 요청을 보낼 수 있습니다.</p>}
+        {deviceOnline && !codexReady && <p className="mt-1 text-sm text-stone-600">Codex가 준비되지 않아 AI 생성 실패 시 템플릿으로 대체됩니다. <Link className="underline" href="/dashboard/connections#ai">AI 연결 확인</Link></p>}
         <form className="mt-2 grid gap-3 sm:grid-cols-2" onSubmit={async (e) => {
           e.preventDefault();
           setBusy(true);
@@ -57,7 +67,7 @@ export default function ContentPage() {
             {CHANNEL_ORDER.map((c) => <label key={c} className="flex items-center gap-1"><input type="checkbox" checked={f.channels.includes(c)} onChange={() => toggle(c)} />{CHANNEL_LABEL[c]}</label>)}
           </div>
           <div className="sm:col-span-2 flex items-center gap-3">
-            <button className="btn-primary" disabled={busy || !hasDevice || f.channels.length === 0 || (!f.magazineId && !f.productId)}>생성 요청</button>
+            <button className="btn-primary" disabled={busy || !deviceOnline || f.channels.length === 0 || (!f.magazineId && !f.productId)}>AI 초안 생성 요청</button>
             {f.productId && <button type="button" className="btn-ghost" onClick={async () => { try { const r = await buildFacts({ productId: f.productId as Id<"products"> }); setMsg(`제품 정보 ${r.inserted + r.updated}건 갱신`); } catch (err) { setMsg(errorMessage(err)); } }}>제품 정보 팩 만들기</button>}
             {f.productId && <button type="button" className="btn-ghost" onClick={async () => { try { const r = await celebMatch({ productId: f.productId as Id<"products"> }); setMsg(r.found ? `연예인 착용 후보 ${r.found}건 (출처 링크만 저장)` : `검색 프로바이더(${r.provider}) 미설정 — 운영자가 키를 등록하면 활성화됩니다.`); } catch (err) { setMsg(errorMessage(err)); } }}>연예인 착용 검색</button>}
           </div>
@@ -76,7 +86,7 @@ export default function ContentPage() {
         <ul className="mt-2 grid gap-2 sm:grid-cols-2">
           {magazines?.slice(0, 6).map((m) => (
             <li key={m._id} className="flex gap-3 rounded-lg border border-stone-200 p-2">
-              {m.heroImage && <img src={m.heroImage} alt="" className="h-16 w-16 rounded object-cover" />}
+              {m.heroImage && <Image src={m.heroImage} alt="" width={64} height={64} className="h-16 w-16 rounded object-cover" />}
               <div className="min-w-0 text-sm">
                 <div className="truncate font-medium">{m.title}</div>
                 <div className="truncate text-xs text-stone-500">{m.description ?? ""}</div>
@@ -97,12 +107,14 @@ export default function ContentPage() {
         </div>
         {tab === "PIECES" ? (
           <div className="grid gap-3 lg:grid-cols-2">
-            {library?.length === 0 && <p className="text-sm text-stone-500">아직 콘텐츠가 없습니다. 위에서 생성을 요청하세요.</p>}
-            {library?.map((p) => (
+            <div className="flex gap-2 lg:col-span-2"><button className={scope === "SHARED" ? "btn-primary" : "btn-ghost"} onClick={() => setScope("SHARED")}>운영 제공 콘텐츠</button><button className={scope === "MINE" ? "btn-primary" : "btn-ghost"} onClick={() => setScope("MINE")}>내 콘텐츠</button></div>
+            {visibleLibrary.length === 0 && <div className="card lg:col-span-2"><p className="text-sm text-stone-500">{scope === "SHARED" ? "현재 운영자가 공개한 콘텐츠가 없습니다. 직접 작성하거나 위에서 AI 초안을 생성할 수 있습니다." : "아직 내 콘텐츠가 없습니다."}</p>{scope === "MINE" && <Link className="btn-ghost mt-3" href="/dashboard/content/mine">직접 작성</Link>}</div>}
+            {visibleLibrary.map((p) => (
               <PieceCard key={p._id} p={p}
                 onApprove={async () => { try { await approve({ pieceId: p._id }); } catch (err) { setMsg(errorMessage(err)); } }}
                 onReject={async (reason) => { try { await reject({ pieceId: p._id, reason }); } catch (err) { setMsg(errorMessage(err)); } }}
-                onEdit={async (v) => { try { await edit({ pieceId: p._id, ...v }); } catch (err) { setMsg(errorMessage(err)); } }} />
+                onEdit={async (v) => { try { await edit({ pieceId: p._id, ...v }); } catch (err) { setMsg(errorMessage(err)); } }}
+                onCopy={!p.mine ? async () => { try { await copyToMine({ pieceId: p._id }); setMsg("내 콘텐츠로 가져왔습니다. 내 콘텐츠에서 수정하거나 게시할 수 있습니다."); setScope("MINE"); } catch (err) { setMsg(errorMessage(err)); } } : undefined} />
             ))}
           </div>
         ) : (
@@ -113,7 +125,7 @@ export default function ContentPage() {
                 {curation?.length === 0 && <tr><td colSpan={6} className="text-center text-stone-500">항목이 없습니다.{tab === "TREND" ? " 트렌드는 6시간마다 구글 트렌드(KR)에서 갱신됩니다." : tab === "PRODUCT_FACT" ? " 위에서 상품을 고르고 '제품 정보 팩 만들기'를 누르세요." : tab === "OUTFIT" ? " 매거진이 등록되면 테마별 코디 세트가 자동으로 만들어집니다." : ""}</td></tr>}
                 {curation?.map((c) => (
                   <tr key={c._id}>
-                    <td className="text-sm font-medium">{c.mediaUrl && <img src={c.mediaUrl} alt="" className="mr-2 inline h-8 w-8 rounded object-cover" />}{c.title}</td>
+                    <td className="text-sm font-medium">{c.mediaUrl && <Image src={c.mediaUrl} alt="" width={32} height={32} className="mr-2 inline h-8 w-8 rounded object-cover" />}{c.title}</td>
                     <td className="max-w-md whitespace-pre-wrap text-xs">{c.body ?? ""}</td>
                     <td className="text-xs">{c.sourceUrl ? <a className="underline" href={c.sourceUrl} target="_blank" rel="noreferrer">{c.source}</a> : c.source}</td>
                     <td className="max-w-xs text-xs text-stone-500">{c.licenseNote ?? "-"}</td>

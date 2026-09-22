@@ -11,6 +11,17 @@ async function pairDevice(t: T, user: Awaited<ReturnType<typeof signup>>) {
 const authed = (token: string, init: RequestInit = {}) => ({ ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, "content-type": "application/json" } });
 
 describe("device pairing & agent contract", () => {
+  it("queues Codex login only for an online paired device", async () => {
+    const t = makeT();
+    const user = await signup(t, "codex-connect@test.com");
+    await expect(user.as.mutation(api.devices.requestCodexLogin, {})).rejects.toThrow(/온라인/);
+    const paired = await pairDevice(t, user);
+    const first = await user.as.mutation(api.devices.requestCodexLogin, {});
+    expect((await t.run((ctx) => ctx.db.get(first.jobId)))?.jobType).toBe("codex.login");
+    await t.run((ctx) => ctx.db.patch(paired.deviceId, { lastSeenAt: Date.now() - 120_000 }));
+    await expect(user.as.mutation(api.devices.requestCodexLogin, {})).rejects.toThrow(/온라인/);
+  });
+
   it("binds approval to payload, isolates request keys per tenant, and enforces v2 attempts/completion replay", async () => {
     const t = makeT();
     const user = await signup(t, "v2@test.com");
@@ -129,6 +140,24 @@ describe("device pairing & agent contract", () => {
     await t.fetch(`/agent/jobs/${jobId}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "FAILED", errorCode: "JOB_CANCELLED" }) }));
     jobs = await user.as.query(api.jobs.listMine, {});
     expect(jobs.find((j) => j._id === jobId)?.status).toBe("CANCELLED");
+  });
+
+  it("keeps a publish reservation uncertain when the click result cannot be verified", async () => {
+    const t = makeT();
+    const user = await signup(t, "publish-uncertain@test.com");
+    const { deviceToken } = await pairDevice(t, user);
+    const { spaceId, jobId: createJob } = await user.as.mutation(api.spaces.create, { platform: "THREADS", name: "확인 필요" });
+    await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }));
+    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY" } }) }));
+
+    const jobId = await user.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "게시 여부 확인", mediaUrls: [] });
+    await user.as.mutation(api.jobs.approve, { jobId });
+    const claimed = (await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json()).data as { attemptNo: number; leaseToken: string };
+    await t.fetch(`/agent/jobs/${jobId}/preflight`, authed(deviceToken, { method: "POST", body: JSON.stringify(claimed) }));
+    const done = await t.fetch(`/agent/jobs/${jobId}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ ...claimed, status: "FAILED", errorCode: "PUBLISH_RESULT_UNCERTAIN", errorMessage: "게시 결과 확인 실패" }) }));
+    expect(done.status).toBe(200);
+    expect(await t.run(async (ctx) => (await ctx.db.get(jobId))?.publishPhase)).toBe("UNCERTAIN");
+    expect(await t.run(async (ctx) => (await ctx.db.query("publishReservations").withIndex("by_root", (q) => q.eq("rootJobId", jobId)).unique())?.state)).toBe("UNCERTAIN");
   });
 
   it("sweeps expired leases: publish jobs fail as uncertain, others requeue", async () => {

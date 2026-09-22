@@ -64,6 +64,8 @@ export async function requestGenerateFor(ctx: MutationCtx, user: Doc<"users">, a
       "CONFLICT",
       "콘텐츠 생성은 내 PC 의 에이전트(Codex)가 수행합니다. 먼저 데스크톱 에이전트를 페어링하세요.",
     );
+  if (!device.lastSeenAt || Date.now() - device.lastSeenAt >= 90_000)
+    fail("CONFLICT", "데스크톱 에이전트가 오프라인입니다. PC 앱을 실행한 뒤 다시 요청하세요.");
 
   const atoms: ContentGeneratePayload["atoms"] = [];
   const products: ProductBrief[] = [];
@@ -208,7 +210,7 @@ export async function ingestGeneratedJob(
       caption: report.caption,
       hashtags: report.hashtags,
       script: raw.script ?? undefined,
-      mediaUrls: magazine?.imageUrls.slice(0, 4) ?? [],
+      mediaUrls: magazine?.imageUrls.length ? magazine.imageUrls.slice(0, 4) : firstProduct?.imageUrls.slice(0, 4) ?? [],
       qualityScore: report.score,
       qualityReport: { violations: report.violations, fixed: report.fixed },
       status: ok ? "APPROVED" : "DRAFT",
@@ -326,6 +328,73 @@ export const getPiece = query({
   args: getPieceArgs,
   handler: async (ctx, args) => {
     return await getPieceFor(ctx, await requireUser(ctx), args);
+  },
+});
+
+/** 유저가 직접 작성한 콘텐츠도 생성 결과와 같은 품질 게이트를 거쳐 저장한다. */
+export const createManual = mutation({
+  args: {
+    channel: channelValidator,
+    caption: v.string(),
+    hashtags: v.array(v.string()),
+    script: v.optional(v.string()),
+    mediaUrls: v.array(v.string()),
+    productId: v.optional(v.id("products")),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    if (args.productId && !(await ctx.db.get(args.productId))) fail("NOT_FOUND", "상품을 찾을 수 없습니다.");
+    if (!args.caption.trim()) fail("INVALID_ARGUMENT", "본문을 입력하세요.");
+    if (args.mediaUrls.length > 10) fail("INVALID_ARGUMENT", "미디어는 최대 10개까지 추가할 수 있습니다.");
+    if (args.mediaUrls.some((url) => !/^https:\/\//i.test(url))) fail("INVALID_ARGUMENT", "미디어 URL은 HTTPS 주소만 사용할 수 있습니다.");
+    const report = evaluatePiece({ channel: args.channel, caption: args.caption, hashtags: args.hashtags, script: args.script }, { linkExpected: true });
+    const pieceId = await ctx.db.insert("contentPieces", {
+      ownerUserId: user._id,
+      visibility: "PRIVATE",
+      productId: args.productId,
+      channel: args.channel,
+      caption: report.caption,
+      hashtags: report.hashtags,
+      script: args.script,
+      mediaUrls: args.mediaUrls,
+      qualityScore: report.score,
+      qualityReport: { violations: report.violations, fixed: report.fixed },
+      status: isAutoApprovable(report) ? "APPROVED" : "DRAFT",
+      generatedBy: "manual",
+      usageCount: 0,
+      createdAt: Date.now(),
+    });
+    await audit(ctx, { actorUserId: user._id, action: "content.createManual", metadata: { pieceId, channel: args.channel } });
+    return { pieceId, status: isAutoApprovable(report) ? "APPROVED" as const : "DRAFT" as const, score: report.score };
+  },
+});
+
+/** 운영 제공 콘텐츠를 개인 사본으로 가져와 원본과 독립적으로 수정한다. */
+export const copyToMine = mutation({
+  args: { pieceId: v.id("contentPieces") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    const source = await ctx.db.get(args.pieceId);
+    if (!source || source.visibility !== "SHARED" || source.status !== "APPROVED") fail("NOT_FOUND", "공유 콘텐츠를 찾을 수 없습니다.");
+    const pieceId = await ctx.db.insert("contentPieces", {
+      ownerUserId: user._id,
+      visibility: "PRIVATE",
+      magazineId: source.magazineId,
+      productId: source.productId,
+      channel: source.channel,
+      caption: source.caption,
+      hashtags: source.hashtags,
+      script: source.script,
+      mediaUrls: source.mediaUrls,
+      qualityScore: source.qualityScore,
+      qualityReport: source.qualityReport,
+      status: "APPROVED",
+      generatedBy: "manual",
+      usageCount: 0,
+      createdAt: Date.now(),
+    });
+    await audit(ctx, { actorUserId: user._id, action: "content.copyToMine", metadata: { sourcePieceId: source._id, pieceId } });
+    return { pieceId };
   },
 });
 

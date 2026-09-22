@@ -250,7 +250,7 @@ export const completeJob = internalMutation({
     if (!j || j.status !== "RUNNING" || j.claimedByDeviceId !== args.deviceId) return { ok: false as const, reason: "JOB_NOT_ACTIVE" };
     if (args.attemptNo !== undefined && (args.attemptNo !== j.attemptNo || args.leaseTokenHash !== j.leaseTokenHash)) return { ok: false as const, reason: "STALE_ATTEMPT" };
     const cancelled = j.cancelRequested && args.errorCode === "JOB_CANCELLED";
-    const publishUncertain = args.status === "FAILED" && ["AGENT_LOST_UNCERTAIN", "META_PUBLISH_TIMEOUT"].includes(args.errorCode ?? "");
+    const publishUncertain = args.status === "FAILED" && ["AGENT_LOST_UNCERTAIN", "META_PUBLISH_TIMEOUT", "PUBLISH_RESULT_UNCERTAIN"].includes(args.errorCode ?? "");
     await ctx.db.patch(j._id, {
       status: cancelled ? "CANCELLED" : args.status,
       result: args.result,
