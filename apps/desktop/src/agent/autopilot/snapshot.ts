@@ -11,7 +11,9 @@ export interface SnapshotElement {
   href?: string;
   disabled?: boolean;
   editable?: boolean;
+  multiline?: boolean;
   fileInput?: boolean;
+  submitControl?: boolean;
 }
 
 export interface Snapshot {
@@ -56,6 +58,10 @@ export async function takeSnapshot(page: Page, opts: { maxElements?: number; max
         el.setAttribute(attr, ref);
         const tag = el.tagName.toLowerCase();
         const isInput = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+        const inputType = el instanceof HTMLInputElement ? el.type.toLowerCase() : "";
+        const textEntryInput = el instanceof HTMLTextAreaElement
+          || (el instanceof HTMLInputElement && ["text", "search", "email", "url", "tel"].includes(inputType));
+        const submitControl = (el instanceof HTMLButtonElement && el.type === "submit" && !!el.form) || (el instanceof HTMLInputElement && ["submit", "image"].includes(inputType));
         out.push({
           ref,
           tag,
@@ -65,8 +71,10 @@ export async function takeSnapshot(page: Page, opts: { maxElements?: number; max
           placeholder: el.getAttribute("placeholder") ?? el.getAttribute("aria-placeholder") ?? undefined,
           href: tag === "a" ? (el as HTMLAnchorElement).getAttribute("href") ?? undefined : undefined,
           disabled: (el as HTMLButtonElement).disabled || el.getAttribute("aria-disabled") === "true" || undefined,
-          editable: isInput || el.isContentEditable || undefined,
+          editable: textEntryInput || el.isContentEditable || undefined,
+          multiline: el instanceof HTMLTextAreaElement || el.isContentEditable || el.getAttribute("aria-multiline") === "true" || undefined,
           fileInput: el instanceof HTMLInputElement && el.type === "file" ? true : undefined,
+          submitControl: submitControl || undefined,
         });
       }
       const text = (document.body?.innerText ?? "").replace(/\s+/g, " ").slice(0, maxTextChars);
@@ -87,7 +95,9 @@ export function renderSnapshot(s: Snapshot): string {
     if (e.href) bits.push(`href=${e.href.slice(0, 60)}`);
     if (e.disabled) bits.push("disabled");
     if (e.fileInput) bits.push("file-input");
+    if (e.submitControl) bits.push("submit-control");
     if (e.editable && !e.fileInput) bits.push("editable");
+    if (e.multiline) bits.push("multiline");
     return bits.join(" ");
   });
   return `URL: ${s.url}\nTITLE: ${s.title}\nELEMENTS:\n${lines.join("\n")}\nTEXT: ${s.text}`;

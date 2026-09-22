@@ -22,9 +22,9 @@ import {
   type QualityReport,
   type ReadbackPayload,
 } from "@automoney/shared";
-import { codexGenerateText } from "../codexText";
+import { codexGenerateText, type CodexRunMetadata } from "../codexText";
 import { codexStatus, startCodexLogin } from "../codex";
-import { createCodexPlanner, runAutopilot, scriptedPlanner, type Planner } from "../autopilot";
+import { capturePublishReceiptBaseline, createCodexPlanner, normalizePublishHandle, runAutopilot, scriptedPlanner, verifyPublishReceipt, type Planner, type PublishReceiptBaseline } from "../autopilot";
 import { log } from "../logger";
 import { getRecipe, type RecipeHelpers, type SessionCheck } from "../recipes";
 import { readPostMetrics } from "../recipes/readback";
@@ -33,6 +33,35 @@ import { JobError, type JobContext, type JobOutcome } from "./context";
 
 const rand = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export async function beforePublishGate(ctx: JobContext, dryRun: boolean): Promise<boolean> {
+  await ctx.checkpoint("before_publish", 80);
+  if (dryRun) return false;
+  const preflight = await ctx.api.preflight(ctx.job);
+  if (preflight.dryRun || !preflight.livePublishEnabled || !preflight.publishIntentId) {
+    throw new JobError("INTERNAL", "실게시 직전 서버 사전검증 결과가 유효하지 않습니다.");
+  }
+  return true;
+}
+
+export function resolvePublishDryRun(payloadDryRun: boolean | undefined, localOverride = process.env.AUTOMONEY_DRY_RUN): boolean {
+  if (localOverride === "1" && payloadDryRun !== true) {
+    throw new JobError(
+      "LOCAL_DRY_RUN_OVERRIDE",
+      "로컬 dry-run 안전 모드가 실게시 작업을 차단했습니다. 서버에서 테스트 실행으로 다시 등록하세요.",
+    );
+  }
+  return payloadDryRun === true;
+}
+
+export function requireMatchingPublishHandle(storedHandle: string | null | undefined, sessionHandle: string | null | undefined): string {
+  const expected = normalizePublishHandle(storedHandle);
+  const observed = normalizePublishHandle(sessionHandle);
+  if (!expected || !observed || expected !== observed) {
+    throw new JobError("SPACE_ACCOUNT_MISMATCH", "선택한 게시 계정과 현재 브라우저에 로그인된 계정을 일치시킬 수 없습니다. 연결 관리에서 계정을 다시 확인하세요.");
+  }
+  return expected;
+}
 
 function helpers(ctx: JobContext, opts: { dryRun: boolean }): RecipeHelpers {
   return {
@@ -45,9 +74,9 @@ function helpers(ctx: JobContext, opts: { dryRun: boolean }): RecipeHelpers {
       }
     },
     checkpoint: (stage, progress) => ctx.checkpoint(stage, progress),
-    async beforePublish() {
-      await ctx.checkpoint("before_publish", 80);
-      return !opts.dryRun;
+    beforePublish: () => beforePublishGate(ctx, opts.dryRun),
+    async revalidatePublishContinuation() {
+      await ctx.api.revalidatePublishContinuation(ctx.job);
     },
     async waitHuman(min = 400, max = 1400) {
       await sleep(rand(min, max));
@@ -163,10 +192,10 @@ export async function handleSpaceVerify(ctx: JobContext): Promise<JobOutcome> {
 
 export async function handlePublish(ctx: JobContext): Promise<JobOutcome> {
   const p = ctx.job.payload as unknown as PublishPayload;
+  const dryRun = resolvePublishDryRun(p.dryRun);
   const recipe = getRecipe(p.platform);
   if (!recipe) throw new JobError("RECIPE_UNSUPPORTED", `${p.platform} 은 아직 브라우저 레시피가 없습니다.`);
   const text = p.linkUrl ? `${p.text.trim()}\n${p.linkUrl}` : p.text.trim();
-  const dryRun = Boolean(p.dryRun) || process.env.AUTOMONEY_DRY_RUN === "1";
   await ctx.checkpoint("preparing", 5);
   const mediaPaths = p.mediaUrls.length ? await downloadMedia(p.mediaUrls) : [];
   const space = await openSpace(ctx.cfg, p.spaceId, { visible: false, purpose: "publish", waitLockMs: 30_000 });
@@ -174,25 +203,47 @@ export async function handlePublish(ctx: JobContext): Promise<JobOutcome> {
     const session = await recipe.checkSession(space.page);
     if (session.state === "RESTRICTED") throw new JobError("SPACE_ACCOUNT_RESTRICTED", "계정 제한 안내가 감지되었습니다.", { sessionState: "RESTRICTED" });
     if (session.state !== "HEALTHY") throw new JobError("SPACE_SESSION_EXPIRED", "세션이 만료되었습니다. 스페이스에서 다시 로그인하세요.", { sessionState: "EXPIRED" });
+    const expectedHandle = requireMatchingPublishHandle(ctx.job.space?.handle, session.handle);
     let outcome: { postUrl: string | null; detail?: string };
     let recoveredBy: string | null = null;
     let publishStarted = false;
+    let recipeReceiptBaseline: PublishReceiptBaseline | null = null;
+    const recipeHelpers = helpers(ctx, { dryRun });
     try {
-      const recipeHelpers = helpers(ctx, { dryRun });
       outcome = await recipe.publish(space.page, { text, mediaPaths }, {
         ...recipeHelpers,
         beforePublish: async () => {
+          if (!dryRun) {
+            recipeReceiptBaseline = await capturePublishReceiptBaseline(space.page, p.platform, expectedHandle);
+          }
           const allowed = await recipeHelpers.beforePublish();
+          if (allowed) {
+            await ctx.api.markPublishAttempted(ctx.job);
+          }
           publishStarted = allowed;
           return allowed;
         },
       });
+      if (!dryRun) {
+        if (!recipeReceiptBaseline) throw new JobError("PUBLISH_RESULT_UNCERTAIN", "게시 직전 기준 화면을 확인하지 못했습니다. SNS에서 게시 여부를 직접 확인하세요.");
+        const receipt = await verifyPublishReceipt(space.page, p.platform, recipeReceiptBaseline);
+        if (!receipt.verified || !receipt.postUrl) {
+          throw new JobError("PUBLISH_RESULT_UNCERTAIN", "게시 버튼 실행 후 새 게시물 URL을 확인하지 못했습니다. SNS에서 게시 여부를 직접 확인하세요.");
+        }
+        outcome = { ...outcome, postUrl: receipt.postUrl, detail: `${outcome.detail ? `${outcome.detail}; ` : ""}verified ${receipt.source}` };
+      }
     } catch (recipeError) {
-      if ((recipeError as { code?: string }).code === "JOB_CANCELLED" || (recipeError as Error).name === "CancelledError") throw recipeError;
       if (publishStarted) {
         throw new JobError(
           "PUBLISH_RESULT_UNCERTAIN",
           "게시 버튼 실행 후 결과를 확인하지 못했습니다. 자동 재게시하지 않으니 SNS에서 게시 여부를 직접 확인하세요.",
+        );
+      }
+      if ((recipeError as { code?: string }).code === "JOB_CANCELLED" || (recipeError as Error).name === "CancelledError") throw recipeError;
+      if (dryRun) {
+        throw new JobError(
+          "RECIPE_FAILED",
+          `테스트 실행 레시피 실패: ${(recipeError as Error).message.split("\n")[0]}. dry-run에서는 오토파일럿 복구를 실행하지 않았습니다.`,
         );
       }
       const planner = pickPlanner(ctx);
@@ -200,22 +251,45 @@ export async function handlePublish(ctx: JobContext): Promise<JobOutcome> {
       log("warn", "recipe failed — trying autopilot", { spaceId: p.spaceId, planner: planner.name, error: String(recipeError).slice(0, 200) });
       await ctx.checkpoint("autopilot", 40);
       await space.page.goto(recipe.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => {});
-      const ap = await runAutopilot(space.page, planner, {
-        goal: `Publish a new post on ${p.platform} with the given text${mediaPaths.length ? " and attached media" : ""}, then report the post URL.`,
-        platform: p.platform,
-        text,
-        mediaPaths,
-        maxSteps: Number(process.env.AUTOMONEY_AUTOPILOT_MAX_STEPS ?? 15),
-        beforePublish: async () => {
-          await ctx.checkpoint("before_publish", 80);
-          return !dryRun;
-        },
-        onStep: async (step, action, out) => {
-          appendHistory(p.spaceId, { action: "autopilot.step", step, type: action.type, outcome: out });
-          await ctx.checkpoint(`autopilot:${step}`, Math.min(40 + step * 3, 85));
-        },
-      });
-      if (!ap.ok) throw new JobError("RECIPE_FAILED", `레시피 실패 후 오토파일럿도 실패: ${ap.summary}`);
+      let autopilotPublishAttempted = false;
+      let ap: Awaited<ReturnType<typeof runAutopilot>>;
+      try {
+        ap = await runAutopilot(space.page, planner, {
+          goal: `Publish a new post on ${p.platform} with the given text${mediaPaths.length ? " and attached media" : ""}, then report the post URL.`,
+          platform: p.platform,
+          text,
+          mediaPaths,
+          dryRun,
+          expectedHandle,
+          maxSteps: Number(process.env.AUTOMONEY_AUTOPILOT_MAX_STEPS ?? 15),
+          beforePublish: () => recipeHelpers.beforePublish(),
+          onPublishAttempted: async () => {
+            await ctx.api.markPublishAttempted(ctx.job);
+            autopilotPublishAttempted = true;
+          },
+          onStep: async (step, action, out) => {
+            appendHistory(p.spaceId, { action: "autopilot.step", step, type: action.type, outcome: out });
+            await ctx.checkpoint(`autopilot:${step}`, Math.min(40 + step * 3, 85));
+          },
+        });
+      } catch (autopilotError) {
+        if (autopilotPublishAttempted) {
+          throw new JobError(
+            "PUBLISH_RESULT_UNCERTAIN",
+            "게시 버튼 실행 후 결과를 확인하지 못했습니다. 자동 재게시하지 않으니 SNS에서 게시 여부를 직접 확인하세요.",
+          );
+        }
+        throw autopilotError;
+      }
+      if (!ap.ok) {
+        if (ap.publishAttempted) {
+          throw new JobError(
+            "PUBLISH_RESULT_UNCERTAIN",
+            "게시 버튼 실행 후 결과를 확인하지 못했습니다. 자동 재게시하지 않으니 SNS에서 게시 여부를 직접 확인하세요.",
+          );
+        }
+        throw new JobError("RECIPE_FAILED", `레시피 실패 후 오토파일럿도 실패: ${ap.summary}`);
+      }
       outcome = { postUrl: ap.postUrl, detail: `autopilot(${planner.name}) ${ap.summary} in ${ap.steps} steps` };
       recoveredBy = planner.name;
     }
@@ -270,7 +344,7 @@ type EvaluatedCandidate = { piece: GeneratedPiece; report: QualityReport };
  * V2 계약 잡은 실패한 채널만 최대 3회 교정하고, 끝까지 미달인 결과와
  * 템플릿 폴백은 provenance를 보존한 검토용 초안으로 서버에 전달한다.
  */
-export async function handleContentGenerate(ctx: JobContext, deps: { generate?: (prompt: string) => Promise<{ ok: true; text: string } | { ok: false; reason: string }> } = {}): Promise<JobOutcome> {
+export async function handleContentGenerate(ctx: JobContext, deps: { generate?: (prompt: string) => Promise<{ ok: true; text: string; metadata?: CodexRunMetadata } | { ok: false; reason: string }> } = {}): Promise<JobOutcome> {
   const p = ctx.job.payload as unknown as ContentGeneratePayload;
   const preferred = ((process.env.AUTOMONEY_CONTENT_PROVIDER ?? "codex").toLowerCase() === "template" ? "template" : "codex") as ContentProvider;
   const channels = [...new Set(p.channels)];
@@ -297,6 +371,7 @@ export async function handleContentGenerate(ctx: JobContext, deps: { generate?: 
   const bestCandidate = new Map<Channel, EvaluatedCandidate>();
   let repairFailures: ContentRepairFailure[] = [];
   let attempts = 0;
+  let codexMetadata: CodexRunMetadata | null = null;
 
   if (preferred === "codex") {
     const maxAttempts = p.standard
@@ -323,6 +398,7 @@ export async function handleContentGenerate(ctx: JobContext, deps: { generate?: 
         warnings.push(`Codex 생성 중단: ${result.reason}`);
         break;
       }
+      if (result.metadata) codexMetadata = result.metadata;
 
       const parsed = parseGeneratedPieces(result.text, pendingChannels);
       if (parsed.length === 0) {
@@ -435,6 +511,8 @@ export async function handleContentGenerate(ctx: JobContext, deps: { generate?: 
       pieces,
       generatedBy,
       engine: generatedBy === "template" ? "template" : "codex-cli",
+      model: generatedBy === "template" ? null : codexMetadata?.model ?? null,
+      cliVersion: generatedBy === "template" ? null : codexMetadata?.cliVersion ?? null,
       fallbackReason,
       warnings,
       attempts,

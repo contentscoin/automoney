@@ -10,6 +10,7 @@ export const configPath = () => path.join(userDataRoot(), "config.json");
 export const spacesRoot = () => path.join(userDataRoot(), "spaces");
 export const logsDir = () => path.join(userDataRoot(), "logs");
 export const completionJournalPath = () => path.join(userDataRoot(), "completion-journal.json");
+export const completionQuarantinePath = () => path.join(userDataRoot(), "completion-quarantine.json");
 export const spaceDir = (spaceId: string) => path.join(spacesRoot(), spaceId.replace(/[^A-Za-z0-9_-]/g, "_"));
 export const spaceProfileDir = (spaceId: string) => path.join(spaceDir(spaceId), "profile");
 export const spaceLockPath = (spaceId: string) => path.join(spaceDir(spaceId), "space.lock");

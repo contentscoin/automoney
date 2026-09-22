@@ -66,9 +66,16 @@ const apiSpace = spaces.find((s) => s.authMode === "META_API");
 assert(apiSpace && apiSpace.sessionState === "HEALTHY", `space_list: META_API 스페이스 (${apiSpace?.name})`);
 
 // 5) 발행: preview → confirmed → 클라우드 실행 → 폴링
-const preview = await call("post_publish", { spaceId: apiSpace.spaceId ?? apiSpace._id, text: "MCP 에서 보낸 스레드 글, 뭐 입을까요?\n\n링크에서 확인", linkId: link.linkId });
+const publishArgs = {
+  spaceId: apiSpace.spaceId ?? apiSpace._id,
+  text: "MCP 에서 보낸 스레드 글, 뭐 입을까요?\n\n링크에서 확인",
+  linkId: link.linkId,
+  requireApproval: false,
+  clientRequestId: `e2e_publish_${stamp}`,
+};
+const preview = await call("post_publish", publishArgs);
 assert(preview.requiresConfirmation === true, "post_publish 미확인 → preview");
-const pub = await call("post_publish", { spaceId: apiSpace._id, text: "MCP 에서 보낸 스레드 글, 뭐 입을까요?\n\n링크에서 확인", linkId: link.linkId, requireApproval: false, confirmed: true });
+const pub = await call("post_publish", { ...publishArgs, confirmed: true, confirmationHash: preview.confirmationHash });
 let job;
 for (let i = 0; i < 30; i++) {
   job = await call("job_get", { jobId: pub.jobId });
@@ -80,7 +87,18 @@ const verify = await call("post_verify_published", { jobId: pub.jobId });
 assert(verify.published === true && verify.metrics && verify.metrics.nextWindow === "24h", "post_verify_published + readback 24h 대기");
 
 // 6) 예약 + 실적
-const sched = await call("post_schedule", { spaceId: apiSpace._id, kind: "DAILY", timeOfDay: "10:30", jitterMinutes: 10, text: "예약 본문", linkId: link.linkId });
+const scheduleArgs = {
+  spaceId: apiSpace._id,
+  kind: "DAILY",
+  timeOfDay: "10:30",
+  jitterMinutes: 10,
+  text: "예약 본문",
+  linkId: link.linkId,
+  clientRequestId: `e2e_schedule_${stamp}`,
+};
+const schedulePreview = await call("post_schedule", scheduleArgs);
+assert(schedulePreview.requiresConfirmation === true, "post_schedule 미확인 → preview");
+const sched = await call("post_schedule", { ...scheduleArgs, confirmed: true });
 assert(sched.scheduleId && sched.nextRunAt, `post_schedule 다음 실행 ${new Date(sched.nextRunAt).toISOString()}`);
 const earnings = await call("earnings_get");
 assert(earnings.current && !JSON.stringify(earnings).toLowerCase().includes("indirect"), "earnings_get (간접 필드 없음)");

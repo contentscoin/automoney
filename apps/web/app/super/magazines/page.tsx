@@ -117,7 +117,7 @@ export default function SuperMagazinesPage() {
           {pieces?.length === 0 && <p className="text-sm text-stone-500">생성된 조각이 없습니다.</p>}
           {pieces?.map((p) => (
             <PieceCard key={p._id} p={{ ...p, mine: true }}
-              onApprove={async () => { try { await approve({ pieceId: p._id }); } catch (err) { setMsg(errorMessage(err)); } }}
+              onApprove={async (reviewChecklist) => { try { await approve({ pieceId: p._id, ...(p.productionMeta?.outputHash ? { expectedOutputHash: p.productionMeta.outputHash } : {}), reviewChecklist }); } catch (err) { setMsg(errorMessage(err)); } }}
               onReject={async (reason) => { try { await reject({ pieceId: p._id, reason }); } catch (err) { setMsg(errorMessage(err)); } }}
               onEdit={async (v) => { try { await edit({ pieceId: p._id, ...v }); return true; } catch (err) { setMsg(errorMessage(err)); return false; } }}
               onShare={async (shared) => { try { await setVisibility({ pieceId: p._id, visibility: shared ? "SHARED" : "PRIVATE" }); } catch (err) { setMsg(errorMessage(err)); } }} />

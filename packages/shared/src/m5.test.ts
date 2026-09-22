@@ -16,6 +16,7 @@ describe("mcp tool catalog", () => {
     }
     expect(MCP_TOOL_MAP.post_publish!.dangerous).toBe(true);
     expect(MCP_TOOL_MAP.space_create!.dangerous).toBe(true);
+    expect(MCP_TOOL_MAP.post_schedule!.dangerous).toBe(true);
   });
 
   it("filters tools by scope and role", () => {

@@ -1,3 +1,5 @@
+import type { Channel } from "@automoney/shared";
+
 /**
  * Meta(Threads · Instagram Graph API) 어댑터 인터페이스 (docs/04 §2, ADR-0004).
  * 실 구현(graph.ts)과 Mock(mock.ts)이 동일 계약을 지킨다. 토큰은 호출자가 복호화해 넘긴다.
@@ -18,6 +20,7 @@ export interface MetaProfile {
 
 export interface MetaPublishInput {
   platform: MetaPlatform;
+  contentChannel?: Channel;
   text: string;
   mediaUrls: string[];
   linkUrl?: string | null;
@@ -25,7 +28,8 @@ export interface MetaPublishInput {
 
 export interface MetaPublishResult {
   externalPostId: string;
-  postUrl: string;
+  /** Null means the provider accepted the publish but no canonical permalink could be verified. */
+  postUrl: string | null;
 }
 
 export interface MetaInsights {
@@ -53,7 +57,12 @@ export interface MetaAdapter {
   exchangeCode(platform: MetaPlatform, code: string, redirectUri: string): Promise<MetaTokens>;
   refreshLongLived(platform: MetaPlatform, accessToken: string): Promise<MetaTokens>;
   me(platform: MetaPlatform, accessToken: string): Promise<MetaProfile>;
-  publish(accessToken: string, profile: MetaProfile, input: MetaPublishInput): Promise<MetaPublishResult>;
+  publish(
+    accessToken: string,
+    profile: MetaProfile,
+    input: MetaPublishInput,
+    beforeCommit?: () => Promise<void>,
+  ): Promise<MetaPublishResult>;
   insights(platform: MetaPlatform, accessToken: string, externalPostId: string): Promise<MetaInsights>;
 }
 

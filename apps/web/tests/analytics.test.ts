@@ -8,15 +8,19 @@ const authed = (token: string, init: RequestInit = {}) => ({ ...init, headers: {
 
 async function pairDevice(t: T, user: Awaited<ReturnType<typeof signup>>) {
   const { code } = await user.as.mutation(api.devices.createPairCode, {});
-  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.11" });
+  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.13" });
 }
 
 /** 브라우저 스페이스로 게시 성공까지(에이전트 HTTP 계약 사용) */
 async function publishViaAgent(t: T, user: Awaited<ReturnType<typeof signup>>, token: string, spaceId: Id<"spaces">, text: string, linkId?: Id<"marketingLinks">, postUrl = "https://x.com/e2e/status/1") {
   const jobId = await user.as.mutation(api.jobs.enqueuePublish, { spaceId, text, mediaUrls: [], linkId, requireApproval: false });
+  await user.as.mutation(api.jobs.approve, { jobId });
   const claimed = await (await t.fetch("/agent/claim", authed(token, { method: "POST", body: "{}" }))).json();
   expect(claimed.data?.id).toBe(jobId);
-  await t.fetch(`/agent/jobs/${jobId}/complete`, authed(token, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", result: { schema: "automoney.job-result/v1", kind: "ok", data: { postUrl } } }) }));
+  const proof = { attemptNo: claimed.data.attemptNo, leaseToken: claimed.data.leaseToken };
+  expect((await t.fetch(`/agent/jobs/${jobId}/preflight`, authed(token, { method: "POST", body: JSON.stringify(proof) }))).status).toBe(200);
+  expect((await t.fetch(`/agent/jobs/${jobId}/publish-attempt`, authed(token, { method: "POST", body: JSON.stringify(proof) }))).status).toBe(200);
+  await t.fetch(`/agent/jobs/${jobId}/complete`, authed(token, { method: "POST", body: JSON.stringify({ ...proof, status: "SUCCEEDED", result: { schema: "automoney.job-result/v1", kind: "ok", data: { postUrl } } }) }));
   return jobId;
 }
 
@@ -31,7 +35,7 @@ describe("analytics loop — readback windows, ledger join, experiments, playboo
     const { spaceId, jobId: createJob } = await user.as.mutation(api.spaces.create, { platform: "X", name: "x-main" });
     // space.create 처리
     await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json();
-    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY" } }) }));
+    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY", handle: "e2e" } }) }));
 
     const jobId = await publishViaAgent(t, user, deviceToken, spaceId, "올가을 니트, 뭐 입을까요?\n\n링크에서 확인", linkId);
     const m0 = await t.run(async (ctx) => (await ctx.db.query("postMetrics").withIndex("by_job", (q) => q.eq("jobId", jobId)).unique())!);

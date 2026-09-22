@@ -113,9 +113,9 @@ describe("content.generate handler", () => {
       generate: async (prompt) => {
         prompts.push(prompt);
         if (prompts.length === 1) {
-          return { ok: true, text: '[{"channel":"THREADS","caption":"루즈핏 니트 추천","hashtags":["광고"],"script":null}]' };
+          return { ok: true, text: '[{"channel":"THREADS","caption":"루즈핏 니트 추천","hashtags":["광고"],"script":null}]', metadata: { model: "gpt-content", cliVersion: "codex-cli 1.2.3" } };
         }
-        return { ok: true, text: '[{"channel":"THREADS","caption":"루즈핏 니트로 완성하는 가을 출근룩, 어떤 코디가 궁금한지 댓글로 자세히 알려 주세요. 다음 스타일링에도 반영할게요.","hashtags":["광고"],"script":null}]' };
+        return { ok: true, text: '[{"channel":"THREADS","caption":"루즈핏 니트로 완성하는 가을 출근룩, 어떤 코디가 궁금한지 댓글로 자세히 알려 주세요. 다음 스타일링에도 반영할게요.","hashtags":["광고"],"script":null}]', metadata: { model: "gpt-content", cliVersion: "codex-cli 1.2.3" } };
       },
     });
     const data = out.result.data as {
@@ -124,6 +124,8 @@ describe("content.generate handler", () => {
       pieces: { channel: string; generatedBy?: string; attemptNo?: number }[];
       quality: { channel: string; passed: boolean; score: number }[];
       versions: { standardId: string; qualityVersion: string };
+      model: string | null;
+      cliVersion: string | null;
     };
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toContain("CTA_MISSING");
@@ -132,6 +134,7 @@ describe("content.generate handler", () => {
     expect(data.pieces[0]).toMatchObject({ channel: "THREADS", generatedBy: "codex", attemptNo: 2 });
     expect(data.quality[0]).toMatchObject({ channel: "THREADS", passed: true });
     expect(data.versions.standardId).toBe("ATTRANGS_STANDARD_KO_V2");
+    expect(data).toMatchObject({ model: "gpt-content", cliVersion: "codex-cli 1.2.3" });
   });
 
   it("stops after the V2 attempt limit and leaves a failing Codex draft for review", async () => {

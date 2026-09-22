@@ -32,6 +32,8 @@ export interface RecipeHelpers {
   checkpoint(stage: string, progress?: number): Promise<void>;
   /** 실제 게시 직전 승인/드라이런 게이트. false 면 게시하지 않음 */
   beforePublish(): Promise<boolean>;
+  /** 이미 기록된 동일 게시 시도의 다단계 최종 확인 직전 정책 재검증 */
+  revalidatePublishContinuation(): Promise<void>;
   waitHuman(minMs?: number, maxMs?: number): Promise<void>;
 }
 

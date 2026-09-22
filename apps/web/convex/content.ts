@@ -6,6 +6,7 @@ import {
   isAutoApprovable,
   normalizeContentBrief,
   passesContentStandard,
+  validateContentMedia,
   type Channel,
   type ContentGeneratePayload,
   type ContentProductionBrief,
@@ -27,6 +28,7 @@ import { sha256Hex } from "./lib/crypto";
 import { requireSuperAdmin, requireUser, roleOf } from "./lib/rbac";
 import { canonicalJson, enqueueJob } from "./jobs";
 import { playbookHintsFor } from "./analytics";
+import { contentPieceEvidenceRunId, workflowReviewEvidence } from "./lib/pieces";
 
 /** 내 거절 사유 상위 3개(생성 프롬프트 "피해야 할 것") */
 async function topRejectionReasons(ctx: MutationCtx, userId: Id<"users">): Promise<string[]> {
@@ -47,6 +49,12 @@ const channelValidator = v.union(
 
 const briefInputValidator = v.optional(v.any());
 const standardInputValidator = v.optional(v.any());
+const reviewChecklistValidator = v.object({
+  productFacts: v.boolean(),
+  adDisclosure: v.boolean(),
+  mediaRightsAndFit: v.boolean(),
+  finalCopy: v.boolean(),
+});
 export const MIN_CONTENT_DESKTOP_VERSION = "0.1.11";
 
 export function versionAtLeast(actual: string, required: string): boolean {
@@ -63,7 +71,8 @@ export function versionAtLeast(actual: string, required: string): boolean {
   return true;
 }
 
-function productionStandard(input: unknown): ContentProductionStandard {
+/** Normalizes a new request against the server-owned current contract. */
+function requestedProductionStandard(input: unknown): ContentProductionStandard {
   const raw = input && typeof input === "object" && !Array.isArray(input)
     ? input as Partial<ContentProductionStandard>
     : {};
@@ -94,6 +103,57 @@ function productionStandard(input: unknown): ContentProductionStandard {
   };
 }
 
+/**
+ * Reads a persisted production snapshot without merging in today's defaults.
+ * Unknown contract versions are blocked instead of being silently reinterpreted
+ * by a newer evaluator.
+ */
+export function frozenProductionStandard(input: unknown): ContentProductionStandard {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    fail("CONFLICT", "저장된 콘텐츠 제작 기준을 확인할 수 없습니다. 새 제작 실행을 시작하세요.");
+  const raw = input as Partial<ContentProductionStandard>;
+  const supported = raw.id === DEFAULT_CONTENT_STANDARD.id
+    && raw.version === DEFAULT_CONTENT_STANDARD.version
+    && raw.workflowVersion === DEFAULT_CONTENT_STANDARD.workflowVersion
+    && raw.promptVersion === DEFAULT_CONTENT_STANDARD.promptVersion
+    && raw.qualityVersion === DEFAULT_CONTENT_STANDARD.qualityVersion;
+  if (!supported)
+    fail("CONFLICT", "지원하지 않는 콘텐츠 제작 기준 버전입니다. 기존 결과는 게시하지 말고 새로 생성하세요.");
+  if (
+    typeof raw.name !== "string"
+    || typeof raw.brand !== "string"
+    || typeof raw.minScore !== "number"
+    || !Number.isFinite(raw.minScore)
+    || raw.minScore < 0
+    || raw.minScore > 100
+    || typeof raw.requireCodex !== "boolean"
+    || typeof raw.maxAttempts !== "number"
+    || !Number.isInteger(raw.maxAttempts)
+    || raw.maxAttempts < 1
+    || raw.maxAttempts > 10
+    || typeof raw.maxEmoji !== "number"
+    || !Number.isInteger(raw.maxEmoji)
+    || raw.maxEmoji < 0
+    || raw.maxEmoji > 10
+    || !Array.isArray(raw.forbiddenPhrases)
+    || raw.forbiddenPhrases.some((phrase) => typeof phrase !== "string")
+  ) fail("CONFLICT", "저장된 콘텐츠 제작 기준이 손상되었습니다. 새 제작 실행을 시작하세요.");
+  return {
+    id: raw.id!,
+    version: raw.version!,
+    name: raw.name,
+    brand: raw.brand,
+    minScore: raw.minScore,
+    requireCodex: raw.requireCodex,
+    maxAttempts: raw.maxAttempts,
+    maxEmoji: raw.maxEmoji,
+    forbiddenPhrases: [...raw.forbiddenPhrases],
+    workflowVersion: raw.workflowVersion!,
+    promptVersion: raw.promptVersion!,
+    qualityVersion: raw.qualityVersion!,
+  };
+}
+
 async function createContentRun(
   ctx: MutationCtx,
   input: {
@@ -103,6 +163,7 @@ async function createContentRun(
     brief: ContentProductionBrief;
     standard: ContentProductionStandard;
     expectedOutputs: number;
+    batchKey?: string;
   },
 ): Promise<Id<"contentRuns">> {
   const productIds = input.productIds.filter((id, index) => input.productIds.indexOf(id) === index);
@@ -134,7 +195,7 @@ async function createContentRun(
   const now = Date.now();
   return await ctx.db.insert("contentRuns", {
     userId: input.userId,
-    batchKey: `content:${inputHash.slice(0, 16)}:${now}`,
+    batchKey: input.batchKey ?? `content:${inputHash.slice(0, 16)}:${now}`,
     productIds,
     productSnapshots,
     channels,
@@ -193,7 +254,7 @@ export async function requestGenerateFor(ctx: MutationCtx, user: Doc<"users">, a
 
   let channels = args.channels.filter((channel, index) => args.channels.indexOf(channel) === index);
   let brief = normalizeContentBrief(args.brief as Partial<ContentProductionBrief> | null | undefined);
-  let standard = productionStandard(args.standard);
+  let standard = requestedProductionStandard(args.standard);
   const atoms: ContentGeneratePayload["atoms"] = [];
   const products: ProductBrief[] = [];
   const runProductIds: Id<"products">[] = [];
@@ -251,7 +312,7 @@ export async function requestGenerateFor(ctx: MutationCtx, user: Doc<"users">, a
     // Once a run exists, its frozen snapshots—not later caller input—are authoritative.
     channels = [...run.channels];
     brief = normalizeContentBrief(run.briefSnapshot as Partial<ContentProductionBrief>);
-    standard = productionStandard(run.standardSnapshot);
+    standard = frozenProductionStandard(run.standardSnapshot);
   } else {
     runId = await createContentRun(ctx, {
       userId: user._id,
@@ -316,6 +377,7 @@ export const requestGenerateBatch = mutation({
     channels: v.array(channelValidator),
     brief: briefInputValidator,
     standard: standardInputValidator,
+    clientRequestId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
@@ -324,8 +386,29 @@ export const requestGenerateBatch = mutation({
     const productIds = args.productIds.filter((id, index) => args.productIds.indexOf(id) === index);
     const channels = args.channels.filter((channel, index) => args.channels.indexOf(channel) === index);
     if (channels.length === 0) fail("INVALID_ARGUMENT", "채널을 하나 이상 선택하세요.");
+    const clientRequestId = args.clientRequestId?.trim();
+    if (clientRequestId && !/^[A-Za-z0-9_-]{8,100}$/.test(clientRequestId))
+      fail("INVALID_ARGUMENT", "콘텐츠 요청 식별자가 올바르지 않습니다.");
     const brief = normalizeContentBrief(args.brief as Partial<ContentProductionBrief> | null | undefined);
-    const standard = productionStandard(args.standard);
+    const standard = requestedProductionStandard(args.standard);
+    const requestHash = await sha256Hex(canonicalJson({ productIds, channels, brief, standard }));
+    const batchKey = clientRequestId ? `content-request:${user._id}:${clientRequestId}` : undefined;
+    if (batchKey) {
+      const existing = await ctx.db
+        .query("contentRuns")
+        .withIndex("by_batchKey", (q) => q.eq("batchKey", batchKey))
+        .unique();
+      if (existing) {
+        const existingRequestHash = await sha256Hex(canonicalJson({
+          productIds: existing.productIds,
+          channels: existing.channels,
+          brief: existing.briefSnapshot,
+          standard: existing.standardSnapshot,
+        }));
+        if (existingRequestHash !== requestHash) fail("CONFLICT", "IDEMPOTENCY_CONFLICT");
+        return { total: existing.jobIds.length, runId: existing._id, jobIds: existing.jobIds };
+      }
+    }
     const runId = await createContentRun(ctx, {
       userId: user._id,
       productIds,
@@ -333,6 +416,7 @@ export const requestGenerateBatch = mutation({
       brief,
       standard,
       expectedOutputs: productIds.length * channels.length,
+      batchKey,
     });
     const jobIds = [];
     for (const productId of productIds) {
@@ -486,6 +570,19 @@ async function refreshContentRun(ctx: MutationCtx, runId: Id<"contentRuns">): Pr
   });
 }
 
+/** Queue recovery hook: settle the parent run after a generation job is terminally failed. */
+export const refreshRunForJob = internalMutation({
+  args: { jobId: v.id("agentJobs") },
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    if (!job || job.jobType !== "content.generate") return;
+    const runId = (job.payload as { runId?: unknown }).runId;
+    if (typeof runId !== "string") return;
+    const run = await ctx.db.get(runId as Id<"contentRuns">);
+    if (run?.userId === job.userId) await refreshContentRun(ctx, run._id);
+  },
+});
+
 /** 에이전트 결과 수신(agent.completeJob 훅): 품질 게이트 → 라이브러리 저장 */
 export const ingestGenerated = internalMutation({
   args: { jobId: v.id("agentJobs") },
@@ -514,7 +611,7 @@ export async function ingestGeneratedJob(
   if (dup) return { saved: 0, approved: 0, duplicate: true };
   const data = (
     job.result as
-      | { data?: { pieces?: unknown[]; generatedBy?: string; engine?: string; model?: string } }
+      | { data?: { pieces?: unknown[]; generatedBy?: string; engine?: string; model?: string | null; cliVersion?: string | null } }
       | undefined
   )?.data;
   const pieces = Array.isArray(data?.pieces) ? data.pieces : [];
@@ -527,7 +624,7 @@ export async function ingestGeneratedJob(
     (payload.brief ?? ownedRun?.briefSnapshot) as Partial<ContentProductionBrief> | null | undefined,
   );
   const strictRun = !!ownedRun || payload.standard !== undefined;
-  const standard = strictRun ? productionStandard(payload.standard ?? ownedRun?.standardSnapshot) : undefined;
+  const standard = strictRun ? frozenProductionStandard(ownedRun?.standardSnapshot) : undefined;
   const manifestHash = ownedRun?.inputHash ?? await sha256Hex(canonicalJson({
     channels: payload.channels,
     products: payload.products,
@@ -604,14 +701,18 @@ export async function ingestGeneratedJob(
     if (!schemaValid) appendBlock("INVALID_OUTPUT_SCHEMA", "생성 결과의 본문·해시태그·대본 형식이 올바르지 않습니다.");
     if (strictRun && !provenanceComplete)
       appendBlock("PROVENANCE_MISSING", "V2 결과에는 조각별 생성 출처가 필요합니다. 데스크톱 앱을 업데이트해 다시 생성하세요.");
-    const standardPassed = standard
+    const mediaUrls = frozenProduct?.imageUrls.slice(0, 4)
+      ?? (legacyMagazine?.imageUrls.length ? legacyMagazine.imageUrls.slice(0, 4) : legacyProduct?.imageUrls.slice(0, 4) ?? []);
+    const mediaContractPassed = validateContentMedia(channel, mediaUrls) === null;
+    const standardPassed = (standard
       ? isAutoApprovable(report) && passesContentStandard(report, provider, standard)
-      : isAutoApprovable(report);
+      : isAutoApprovable(report)) && mediaContractPassed;
     const outputHash = await sha256Hex(canonicalJson({
       channel,
       caption: report.caption,
       hashtags: report.hashtags,
       script: candidate.script ?? null,
+      mediaUrls,
       provider,
       attemptNo,
     }));
@@ -625,8 +726,7 @@ export async function ingestGeneratedJob(
       caption: report.caption,
       hashtags: report.hashtags,
       script: candidate.script ?? undefined,
-      mediaUrls: frozenProduct?.imageUrls.slice(0, 4)
-        ?? (legacyMagazine?.imageUrls.length ? legacyMagazine.imageUrls.slice(0, 4) : legacyProduct?.imageUrls.slice(0, 4) ?? []),
+      mediaUrls,
       qualityScore: report.score,
       qualityReport: { violations: report.violations, fixed: report.fixed },
       status,
@@ -647,6 +747,7 @@ export async function ingestGeneratedJob(
         desktopVersion: claimedDevice?.appVersion ?? null,
         engine: typeof data?.engine === "string" ? data.engine.slice(0, 80) : provider === "codex" ? "codex-cli" : "template",
         model: typeof data?.model === "string" ? data.model.slice(0, 80) : null,
+        cliVersion: typeof data?.cliVersion === "string" ? data.cliVersion.slice(0, 120) : null,
         provenanceComplete,
         standardPassed,
         evaluatedAt: Date.now(),
@@ -664,7 +765,19 @@ export async function ingestGeneratedJob(
 
 const pieceView = (
   p: Doc<"contentPieces">,
-  extra: { magazineTitle?: string | null; productName?: string | null },
+  extra: {
+    magazineTitle?: string | null;
+    productName?: string | null;
+    productEvidence?: {
+      name: string;
+      price: number;
+      salePrice: number | null;
+      detailUrl: string;
+      syncedAt: number;
+      source: string;
+      frozen: boolean;
+    } | null;
+  },
 ) => ({
   _id: p._id,
   channel: p.channel,
@@ -680,14 +793,16 @@ const pieceView = (
   status: p.status,
   visibility: p.visibility,
   generatedBy: p.generatedBy,
-  runId: p.runId ?? null,
+  runId: contentPieceEvidenceRunId(p) ?? null,
   productionMeta: p.productionMeta ?? null,
+  legacyBlocked: !contentPieceEvidenceRunId(p) && p.generatedBy !== "manual",
   usageCount: p.usageCount,
   createdAt: p.createdAt,
   mine: false,
   magazineTitle: extra.magazineTitle ?? null,
   productName: extra.productName ?? null,
   productId: p.productId ?? null,
+  productEvidence: extra.productEvidence ?? null,
 });
 
 async function decorate(
@@ -699,10 +814,37 @@ async function decorate(
   for (const p of rows) {
     const m = p.magazineId ? await ctx.db.get(p.magazineId) : null;
     const pr = p.productId ? await ctx.db.get(p.productId) : null;
+    const evidenceRunId = contentPieceEvidenceRunId(p);
+    const run = evidenceRunId ? await ctx.db.get(evidenceRunId) : null;
+    const frozenProduct = p.productId
+      ? run?.productSnapshots.find((snapshot) => snapshot.productId === p.productId)
+      : null;
+    const productEvidence = frozenProduct
+      ? {
+          name: frozenProduct.name,
+          price: frozenProduct.price,
+          salePrice: frozenProduct.salePrice,
+          detailUrl: frozenProduct.detailUrl,
+          syncedAt: frozenProduct.syncedAt,
+          source: frozenProduct.source,
+          frozen: true,
+        }
+      : pr
+        ? {
+            name: pr.name,
+            price: pr.price,
+            salePrice: pr.salePrice ?? null,
+            detailUrl: pr.detailUrl,
+            syncedAt: pr.syncedAt,
+            source: pr.source,
+            frozen: false,
+          }
+        : null;
     out.push({
       ...pieceView(p, {
         magazineTitle: m?.title ?? null,
         productName: pr?.name ?? null,
+        productEvidence,
       }),
       mine: p.ownerUserId === viewerId,
     });
@@ -787,6 +929,7 @@ export const createManual = mutation({
     if (args.mediaUrls.length > 10) fail("INVALID_ARGUMENT", "미디어는 최대 10개까지 추가할 수 있습니다.");
     if (args.mediaUrls.some((url) => !/^https:\/\//i.test(url))) fail("INVALID_ARGUMENT", "미디어 URL은 HTTPS 주소만 사용할 수 있습니다.");
     const report = evaluatePiece({ channel: args.channel, caption: args.caption, hashtags: args.hashtags, script: args.script }, { linkExpected: true });
+    const autoApproved = isAutoApprovable(report) && validateContentMedia(args.channel, args.mediaUrls) === null;
     const pieceId = await ctx.db.insert("contentPieces", {
       ownerUserId: user._id,
       visibility: "PRIVATE",
@@ -798,13 +941,13 @@ export const createManual = mutation({
       mediaUrls: args.mediaUrls,
       qualityScore: report.score,
       qualityReport: { violations: report.violations, fixed: report.fixed },
-      status: isAutoApprovable(report) ? "APPROVED" : "DRAFT",
+      status: autoApproved ? "APPROVED" : "DRAFT",
       generatedBy: "manual",
       usageCount: 0,
       createdAt: Date.now(),
     });
     await audit(ctx, { actorUserId: user._id, action: "content.createManual", metadata: { pieceId, channel: args.channel } });
-    return { pieceId, status: isAutoApprovable(report) ? "APPROVED" as const : "DRAFT" as const, score: report.score };
+    return { pieceId, status: autoApproved ? "APPROVED" as const : "DRAFT" as const, score: report.score };
   },
 });
 
@@ -815,11 +958,16 @@ export const copyToMine = mutation({
     const user = await requireUser(ctx);
     const source = await ctx.db.get(args.pieceId);
     if (!source || source.visibility !== "SHARED" || source.status !== "APPROVED") fail("NOT_FOUND", "공유 콘텐츠를 찾을 수 없습니다.");
-    if (source.runId) {
-      const run = await ctx.db.get(source.runId);
+    const sourceEvidenceRunId = contentPieceEvidenceRunId(source);
+    if (!sourceEvidenceRunId && source.generatedBy !== "manual")
+      fail("CONFLICT", "이전 품질 계약으로 생성된 콘텐츠는 가져올 수 없습니다. 운영자가 새 워크플로로 다시 생성해야 합니다.");
+    if (sourceEvidenceRunId) {
+      const run = await ctx.db.get(sourceEvidenceRunId);
       const standardPassed = (source.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
       if (!standardPassed || run?.status !== "COMPLETED")
         fail("CONFLICT", "전체 제작 실행의 검수·승인이 완료되지 않은 콘텐츠는 가져올 수 없습니다.");
+      const review = await workflowReviewEvidence(ctx, source);
+      if (!review.ok) fail("CONFLICT", `${review.reason} 새 워크플로로 다시 검토하세요.`);
     }
     const pieceId = await ctx.db.insert("contentPieces", {
       ownerUserId: user._id,
@@ -833,8 +981,20 @@ export const copyToMine = mutation({
       mediaUrls: source.mediaUrls,
       qualityScore: source.qualityScore,
       qualityReport: source.qualityReport,
-      status: "APPROVED",
-      generatedBy: "manual",
+      status: "DRAFT",
+      generatedBy: source.generatedBy,
+      ...(sourceEvidenceRunId ? { evidenceRunId: sourceEvidenceRunId } : {}),
+      copiedFromPieceId: source._id,
+      ...(source.productionMeta ? {
+        productionMeta: {
+          ...(source.productionMeta as Record<string, unknown>),
+          humanApprovedAt: null,
+          approvedByUserId: null,
+          reviewChecklist: null,
+          copiedFromPieceId: source._id,
+          copiedAt: Date.now(),
+        },
+      } : {}),
       usageCount: 0,
       createdAt: Date.now(),
     });
@@ -844,8 +1004,9 @@ export const copyToMine = mutation({
 });
 
 async function productionContextForPiece(ctx: MutationCtx, piece: Doc<"contentPieces">) {
-  if (!piece.runId) return null;
-  const run = await ctx.db.get(piece.runId);
+  const evidenceRunId = contentPieceEvidenceRunId(piece);
+  if (!evidenceRunId) return null;
+  const run = await ctx.db.get(evidenceRunId);
   if (!run) return null;
   const product = piece.productId ? await ctx.db.get(piece.productId) : null;
   const frozenProduct = piece.productId
@@ -855,7 +1016,7 @@ async function productionContextForPiece(ctx: MutationCtx, piece: Doc<"contentPi
   return {
     run,
     brief: normalizeContentBrief(run.briefSnapshot as Partial<ContentProductionBrief>),
-    standard: productionStandard(run.standardSnapshot),
+    standard: frozenProductionStandard(run.standardSnapshot),
     products: frozenProduct
       ? [{
           attrangsProductId: frozenProduct.attrangsProductId,
@@ -871,12 +1032,23 @@ async function productionContextForPiece(ctx: MutationCtx, piece: Doc<"contentPi
 
 /** 발행/예약에서 조각을 사용할 때 호출: 접근 검사 + 사용 횟수 증가 후 본문·미디어 반환 */
 export const approve = mutation({
-  args: { pieceId: v.id("contentPieces") },
+  args: {
+    pieceId: v.id("contentPieces"),
+    expectedOutputHash: v.optional(v.string()),
+    reviewChecklist: v.optional(reviewChecklistValidator),
+  },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     const p = await ctx.db.get(args.pieceId);
     if (!p || (p.ownerUserId !== user._id && roleOf(user) !== "SUPER_ADMIN"))
       fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+    if (p.status !== "DRAFT")
+      fail("CONFLICT", "검토 대기 초안만 승인할 수 있습니다. 폐기된 콘텐츠는 수정해 새 revision으로 만든 뒤 다시 검토하세요.");
+    if (!contentPieceEvidenceRunId(p) && p.generatedBy !== "manual")
+      fail("CONFLICT", "이전 품질 계약으로 생성된 콘텐츠는 승인할 수 없습니다. 새 제작 워크플로로 다시 생성하세요.");
+    const mediaContractError = validateContentMedia(p.channel as Channel, p.mediaUrls);
+    if (mediaContractError)
+      fail("CONFLICT", "채널 미디어 요건을 충족하지 못했습니다. Reels·TikTok은 검증 가능한 HTTPS 동영상 URL 1개가 필요합니다.");
     const production = await productionContextForPiece(ctx, p);
     if (production) {
       const report = evaluatePiece({
@@ -899,9 +1071,15 @@ export const approve = mutation({
         caption: report.caption,
         hashtags: report.hashtags,
         script: p.script ?? null,
+        mediaUrls: p.mediaUrls,
         provider: production.provider,
         attemptNo: (p.productionMeta as { attemptNo?: number } | undefined)?.attemptNo ?? 1,
       }));
+      if (!args.expectedOutputHash || args.expectedOutputHash !== outputHash)
+        fail("CONFLICT", "검토 후 콘텐츠가 변경되었습니다. 최신 내용을 다시 확인한 뒤 승인하세요.");
+      if (!args.reviewChecklist || Object.values(args.reviewChecklist).some((checked) => !checked))
+        fail("CONFLICT", "상품 사실·광고 표기·미디어 사용권·최종 문구를 모두 확인한 뒤 승인하세요.");
+      const humanApprovedAt = Date.now();
       await ctx.db.patch(p._id, {
         caption: report.caption,
         hashtags: report.hashtags,
@@ -913,9 +1091,40 @@ export const approve = mutation({
           provider: production.provider,
           standardPassed: true,
           outputHash,
-          humanApprovedAt: Date.now(),
+          humanApprovedAt,
           approvedByUserId: user._id,
+          reviewChecklist: args.reviewChecklist,
           evaluatedAt: Date.now(),
+        },
+      });
+      await ctx.db.insert("contentReviewEvents", {
+        pieceId: p._id,
+        runId: production.run._id,
+        actorUserId: user._id,
+        action: "APPROVED",
+        outputHash,
+        snapshot: {
+          channel: p.channel,
+          caption: report.caption,
+          hashtags: report.hashtags,
+          script: p.script ?? null,
+          mediaUrls: p.mediaUrls,
+          qualityScore: report.score,
+          standardId: production.standard.id,
+          standardVersion: production.standard.version,
+        },
+        reviewChecklist: args.reviewChecklist,
+        createdAt: humanApprovedAt,
+      });
+      await audit(ctx, {
+        actorUserId: user._id,
+        action: "content.approve",
+        metadata: {
+          pieceId: p._id,
+          runId: production.run._id,
+          outputHash,
+          reviewChecklist: args.reviewChecklist,
+          reviewedAt: humanApprovedAt,
         },
       });
       await refreshContentRun(ctx, production.run._id);
@@ -925,9 +1134,33 @@ export const approve = mutation({
       (p.qualityReport as { violations?: { severity: string }[] })
         ?.violations ?? []
     ).filter((v) => v.severity === "block");
-    if (blocks.length > 0 && roleOf(user) !== "SUPER_ADMIN")
+    if (blocks.length > 0)
       fail("CONFLICT", "금칙 위반이 있는 콘텐츠는 수정 후 승인할 수 있습니다.");
+    const outputHash = await sha256Hex(canonicalJson({
+      channel: p.channel,
+      caption: p.caption,
+      hashtags: p.hashtags,
+      script: p.script ?? null,
+      mediaUrls: p.mediaUrls,
+    }));
+    const approvedAt = Date.now();
     await ctx.db.patch(p._id, { status: "APPROVED" });
+    await ctx.db.insert("contentReviewEvents", {
+      pieceId: p._id,
+      actorUserId: user._id,
+      action: "APPROVED",
+      outputHash,
+      snapshot: {
+        channel: p.channel,
+        caption: p.caption,
+        hashtags: p.hashtags,
+        script: p.script ?? null,
+        mediaUrls: p.mediaUrls,
+        qualityScore: p.qualityScore,
+      },
+      createdAt: approvedAt,
+    });
+    await audit(ctx, { actorUserId: user._id, action: "content.approve", metadata: { pieceId: p._id, outputHash } });
   },
 });
 
@@ -937,12 +1170,18 @@ export const edit = mutation({
     caption: v.string(),
     hashtags: v.array(v.string()),
     script: v.optional(v.string()),
+    mediaUrls: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     const p = await ctx.db.get(args.pieceId);
     if (!p || (p.ownerUserId !== user._id && roleOf(user) !== "SUPER_ADMIN"))
       fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+    if (!contentPieceEvidenceRunId(p) && p.generatedBy !== "manual")
+      fail("CONFLICT", "이전 품질 계약으로 생성된 콘텐츠는 편집해 게시할 수 없습니다. 새 제작 워크플로로 다시 생성하세요.");
+    const mediaUrls = args.mediaUrls ?? p.mediaUrls;
+    if (mediaUrls.length > 10) fail("INVALID_ARGUMENT", "미디어는 최대 10개까지 추가할 수 있습니다.");
+    if (mediaUrls.some((url) => !/^https:\/\//i.test(url))) fail("INVALID_ARGUMENT", "미디어 URL은 HTTPS 주소만 사용할 수 있습니다.");
     const production = await productionContextForPiece(ctx, p);
     const report = evaluatePiece(
       {
@@ -960,24 +1199,28 @@ export const edit = mutation({
           }
         : { linkExpected: true },
     );
-    const standardPassed = production
+    const mediaContractPassed = validateContentMedia(p.channel as Channel, mediaUrls) === null;
+    const standardPassed = (production
       ? isAutoApprovable(report) && passesContentStandard(report, production.provider, production.standard)
-      : isAutoApprovable(report);
+      : isAutoApprovable(report)) && mediaContractPassed;
     const outputHash = production
       ? await sha256Hex(canonicalJson({
           channel: p.channel,
           caption: report.caption,
           hashtags: report.hashtags,
           script: args.script ?? null,
+          mediaUrls,
           provider: production.provider,
           attemptNo: (p.productionMeta as { attemptNo?: number } | undefined)?.attemptNo ?? 1,
         }))
       : undefined;
     const nextStatus = production ? "DRAFT" as const : standardPassed ? "APPROVED" as const : "DRAFT" as const;
     await ctx.db.patch(p._id, {
+      visibility: "PRIVATE",
       caption: report.caption,
       hashtags: report.hashtags,
       script: args.script,
+      mediaUrls,
       qualityScore: report.score,
       qualityReport: { violations: report.violations, fixed: report.fixed },
       status: nextStatus,
@@ -996,6 +1239,16 @@ export const edit = mutation({
         },
       } : {}),
     });
+    await audit(ctx, {
+      actorUserId: user._id,
+      action: "content.edit",
+      metadata: {
+        pieceId: p._id,
+        runId: production?.run._id ?? null,
+        beforeOutputHash: (p.productionMeta as { outputHash?: string } | undefined)?.outputHash ?? null,
+        afterOutputHash: outputHash ?? null,
+      },
+    });
     if (production) await refreshContentRun(ctx, production.run._id);
     return { score: report.score, violations: report.violations, status: nextStatus };
   },
@@ -1008,15 +1261,47 @@ export const reject = mutation({
     const p = await ctx.db.get(args.pieceId);
     if (!p || (p.ownerUserId !== user._id && roleOf(user) !== "SUPER_ADMIN"))
       fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+    if (p.status === "RETIRED") fail("CONFLICT", "이미 폐기된 콘텐츠입니다.");
+    const reason = args.reason.trim();
+    if (!reason) fail("INVALID_ARGUMENT", "폐기 사유를 입력하세요.");
     await ctx.db.patch(p._id, { status: "RETIRED" });
     await ctx.db.insert("contentRejections", {
       userId: user._id,
       pieceId: p._id,
       channel: p.channel,
-      reason: args.reason.trim().slice(0, 300),
+      reason: reason.slice(0, 300),
       snippet: p.caption.slice(0, 200),
       createdAt: Date.now(),
     });
+    const rejectedAt = Date.now();
+    const evidenceRunId = contentPieceEvidenceRunId(p);
+    const outputHash = (p.productionMeta as { outputHash?: string } | undefined)?.outputHash
+      ?? await sha256Hex(canonicalJson({
+        channel: p.channel,
+        caption: p.caption,
+        hashtags: p.hashtags,
+        script: p.script ?? null,
+        mediaUrls: p.mediaUrls,
+      }));
+    await ctx.db.insert("contentReviewEvents", {
+      pieceId: p._id,
+      ...(evidenceRunId ? { runId: evidenceRunId } : {}),
+      actorUserId: user._id,
+      action: "REJECTED",
+      outputHash,
+      snapshot: {
+        channel: p.channel,
+        caption: p.caption,
+        hashtags: p.hashtags,
+        script: p.script ?? null,
+        mediaUrls: p.mediaUrls,
+        qualityScore: p.qualityScore,
+      },
+      reason: reason.slice(0, 300),
+      createdAt: rejectedAt,
+    });
+    if (p.runId) await refreshContentRun(ctx, p.runId);
+    await audit(ctx, { actorUserId: user._id, action: "content.reject", metadata: { pieceId: p._id, runId: evidenceRunId ?? null } });
   },
 });
 
@@ -1032,11 +1317,16 @@ export const setVisibility = mutation({
     if (!p) fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
     if (args.visibility === "SHARED" && p.status !== "APPROVED")
       fail("CONFLICT", "승인된 콘텐츠만 공유할 수 있습니다.");
-    if (args.visibility === "SHARED" && p.runId) {
-      const run = await ctx.db.get(p.runId);
+    const evidenceRunId = contentPieceEvidenceRunId(p);
+    if (args.visibility === "SHARED" && !evidenceRunId && p.generatedBy !== "manual")
+      fail("CONFLICT", "이전 품질 계약으로 생성된 자동 콘텐츠는 공유할 수 없습니다. 새 제작 워크플로로 다시 생성하세요.");
+    if (args.visibility === "SHARED" && evidenceRunId) {
+      const run = await ctx.db.get(evidenceRunId);
       const standardPassed = (p.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
       if (!standardPassed || run?.status !== "COMPLETED")
         fail("CONFLICT", "전체 실행의 검수·승인이 완료된 콘텐츠만 공유할 수 있습니다.");
+      const review = await workflowReviewEvidence(ctx, p);
+      if (!review.ok) fail("CONFLICT", `${review.reason} 콘텐츠를 다시 검토·승인하세요.`);
     }
     await ctx.db.patch(p._id, { visibility: args.visibility });
     await audit(ctx, {

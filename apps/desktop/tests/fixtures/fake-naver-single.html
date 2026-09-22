@@ -1,0 +1,19 @@
+<!doctype html><html><body>
+<div data-automoney="title" contenteditable="true"></div>
+<div data-automoney="editor" contenteditable="true"></div>
+<button data-automoney="post" data-testid="seOnePublishBtn" id="publish">발행</button>
+<span id="count">0</span><div id="result"></div>
+<script>
+  document.getElementById("publish").onclick = () => {
+    const count = document.getElementById("count");
+    count.textContent = String(Number(count.textContent) + 1);
+    if (!document.querySelector('[data-automoney="post-link"]')) {
+      const link = document.createElement("a");
+      link.setAttribute("data-automoney", "post-link");
+      link.href = "/single_writer/223000000002";
+      link.textContent = "발행 완료";
+      document.getElementById("result").appendChild(link);
+    }
+  };
+</script>
+</body></html>

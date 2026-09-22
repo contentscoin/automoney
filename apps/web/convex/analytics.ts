@@ -62,6 +62,16 @@ export async function recordPublishedPost(ctx: MutationCtx, job: Doc<"agentJobs"
   return metricsId;
 }
 
+/** Idempotently attach metrics/readback after a user reconciles an uncertain publish as posted. */
+export const recordResolvedPublish = internalMutation({
+  args: { jobId: v.id("agentJobs") },
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    if (!job || job.jobType !== "post.publish" || job.manualPublishResolution?.outcome !== "PUBLISHED") return null;
+    return await recordPublishedPost(ctx, job);
+  },
+});
+
 export async function latestMetricsForJob(ctx: QueryCtx | MutationCtx, jobId: Id<"agentJobs">) {
   const m = await ctx.db.query("postMetrics").withIndex("by_job", (q) => q.eq("jobId", jobId)).first();
   if (!m) return null;

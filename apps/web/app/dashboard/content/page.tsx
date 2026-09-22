@@ -116,7 +116,7 @@ export default function ContentPage() {
             {visibleLibrary.length === 0 && <div className="card lg:col-span-2"><p className="text-sm text-stone-500">{scope === "SHARED" ? "현재 운영자가 공개한 콘텐츠가 없습니다. 직접 작성하거나 위에서 AI 초안을 생성할 수 있습니다." : "아직 내 콘텐츠가 없습니다."}</p>{scope === "MINE" && <Link className="btn-ghost mt-3" href="/dashboard/content/mine">직접 작성</Link>}</div>}
             {visibleLibrary.map((p) => (
               <PieceCard key={p._id} p={p}
-                onApprove={async () => { try { await approve({ pieceId: p._id }); } catch (err) { setMsg(errorMessage(err)); } }}
+                onApprove={async (reviewChecklist) => { try { await approve({ pieceId: p._id, ...(p.productionMeta?.outputHash ? { expectedOutputHash: p.productionMeta.outputHash } : {}), reviewChecklist }); } catch (err) { setMsg(errorMessage(err)); } }}
                 onReject={async (reason) => { try { await reject({ pieceId: p._id, reason }); } catch (err) { setMsg(errorMessage(err)); } }}
                 onEdit={async (v) => { try { await edit({ pieceId: p._id, ...v }); return true; } catch (err) { setMsg(errorMessage(err)); return false; } }}
                 onCopy={!p.mine ? async () => { try { await copyToMine({ pieceId: p._id }); setMsg("내 콘텐츠로 가져왔습니다. 내 콘텐츠에서 수정하거나 게시할 수 있습니다."); setScope("MINE"); } catch (err) { setMsg(errorMessage(err)); } } : undefined} />

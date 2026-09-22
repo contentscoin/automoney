@@ -2,9 +2,16 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { codexStatus, findCodexExecutable } from "./codex";
+import { codexStatus, codexVersion, findCodexExecutable } from "./codex";
 
-export type CodexTextResult = { ok: true; text: string } | { ok: false; reason: string };
+export type CodexRunMetadata = {
+  model: string | null;
+  cliVersion: string | null;
+};
+
+export type CodexTextResult =
+  | { ok: true; text: string; metadata: CodexRunMetadata }
+  | { ok: false; reason: string };
 
 /**
  * `codex exec` 로 텍스트(콘텐츠 초안)를 생성한다. 유저의 구독 OAuth 토큰은 ~/.codex 에만 있으며(ADR-0005)
@@ -20,6 +27,10 @@ export async function codexGenerateText(prompt: string, opts: { model?: string; 
   const args = ["exec", "--skip-git-repo-check", "-s", "read-only", "-C", dir, "-o", outFile];
   const model = opts.model ?? process.env.AUTOMONEY_CODEX_MODEL;
   if (model) args.push("-m", model);
+  const metadata: CodexRunMetadata = {
+    model: model?.trim() || null,
+    cliVersion: codexVersion(),
+  };
   args.push(prompt);
   const run = opts.exec ?? execFile;
   try {
@@ -37,7 +48,7 @@ export async function codexGenerateText(prompt: string, opts: { model?: string; 
       child.stdin?.end();
       child.on("error", reject);
     });
-    return { ok: true, text };
+    return { ok: true, text, metadata };
   } catch (e) {
     return { ok: false, reason: (e as Error).message };
   } finally {

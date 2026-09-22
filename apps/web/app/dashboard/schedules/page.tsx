@@ -12,6 +12,7 @@ import { CHANNEL_LABEL } from "@/lib/content-format";
 import { pieceText } from "@/components/PieceCard";
 
 type Kind = "ONE_SHOT" | "DAILY" | "WEEKLY";
+const newRequestId = () => `schedule_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
 
 export default function SchedulesPage() {
   return (
@@ -32,9 +33,12 @@ function SchedulesPageInner() {
   const upsert = useMutation(api.schedules.upsert);
   const setEnabled = useMutation(api.schedules.setEnabled);
   const remove = useMutation(api.schedules.remove);
-  const [f, setF] = useState({ spaceId: "", kind: "DAILY" as Kind, timeOfDay: "10:00", days: [1, 3, 5] as number[], runDate: "", jitter: 15, text: "", media: "", linkId: "", autoApprove: false });
+  const [f, setF] = useState({ spaceId: "", kind: "DAILY" as Kind, timeOfDay: "10:00", days: [1, 3, 5] as number[], runDate: "", jitter: 15, text: "", media: "", contentChannel: "INSTAGRAM_FEED" as "INSTAGRAM_FEED" | "INSTAGRAM_REEL", linkId: "" });
   const [msg, setMsg] = useState<string | null>(null);
-  const usable = spaces?.filter((s) => !["PAUSED", "RESTRICTED"].includes(s.sessionState)) ?? [];
+  const [submitting, setSubmitting] = useState(false);
+  const [clientRequestId, setClientRequestId] = useState(newRequestId);
+  const usable = spaces?.filter((s) => s.sessionState === "HEALTHY") ?? [];
+  const selectedSpace = usable.find((space) => space._id === f.spaceId);
   const applyPiece = (id: string) => {
     setPieceId(id);
     const p = library?.find((x) => x._id === id);
@@ -57,12 +61,16 @@ function SchedulesPageInner() {
         <h2 className="font-semibold">새 예약</h2>
         <form className="mt-2 grid gap-3 sm:grid-cols-2" onSubmit={async (e) => {
           e.preventDefault();
+          if (submitting) return;
+          setSubmitting(true);
           try {
-            const r = await upsert({ spaceId: f.spaceId as Id<"spaces">, kind: f.kind, timeOfDay: f.timeOfDay, daysOfWeek: f.kind === "WEEKLY" ? f.days : [], runDate: f.kind === "ONE_SHOT" ? f.runDate : undefined, jitterMinutes: Number(f.jitter), text: f.text, mediaUrls: f.media.split(/\s+/).filter(Boolean), linkId: (f.linkId || undefined) as Id<"marketingLinks"> | undefined, pieceId: (pieceId || undefined) as Id<"contentPieces"> | undefined, autoApprove: f.autoApprove });
+            const r = await upsert({ spaceId: f.spaceId as Id<"spaces">, kind: f.kind, timeOfDay: f.timeOfDay, daysOfWeek: f.kind === "WEEKLY" ? f.days : [], runDate: f.kind === "ONE_SHOT" ? f.runDate : undefined, jitterMinutes: Number(f.jitter), text: f.text, mediaUrls: f.media.split(/\s+/).filter(Boolean), contentChannel: (!pieceId && selectedSpace?.platform === "INSTAGRAM" ? f.contentChannel : undefined), linkId: (f.linkId || undefined) as Id<"marketingLinks"> | undefined, pieceId: (pieceId || undefined) as Id<"contentPieces"> | undefined, autoApprove: false, clientRequestId });
             setMsg(`예약했습니다. 다음 실행: ${r.nextRunAt ? dateTime(r.nextRunAt) : "-"}`);
             setF({ ...f, text: "", media: "" });
             setPieceId("");
+            setClientRequestId(newRequestId());
           } catch (err) { setMsg(errorMessage(err)); }
+          finally { setSubmitting(false); }
         }}>
           <div><label className="label">스페이스</label><select className="input" required value={f.spaceId} onChange={(e) => setF({ ...f, spaceId: e.target.value })}><option value="">선택</option>{usable.map((s) => <option key={s._id} value={s._id}>[{PLATFORM_LABEL[s.platform]}] {s.name}</option>)}</select></div>
           <div><label className="label">주기</label><select className="input" value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value as Kind })}><option value="DAILY">매일</option><option value="WEEKLY">요일별</option><option value="ONE_SHOT">1회</option></select></div>
@@ -71,11 +79,12 @@ function SchedulesPageInner() {
           {f.kind === "WEEKLY" && <div className="sm:col-span-2"><label className="label">요일</label><div className="flex gap-2">{DOW.map((d, i) => <label key={i} className="flex items-center gap-1 text-sm"><input type="checkbox" checked={f.days.includes(i)} onChange={(e) => setF({ ...f, days: e.target.checked ? [...f.days, i] : f.days.filter((x) => x !== i) })} />{d}</label>)}</div></div>}
           {f.kind === "ONE_SHOT" && <div><label className="label">실행 일자</label><input className="input" type="date" required value={f.runDate} onChange={(e) => setF({ ...f, runDate: e.target.value })} /></div>}
           <div className="sm:col-span-2"><label className="label">라이브러리 콘텐츠</label><select className="input" value={pieceId} onChange={(e) => applyPiece(e.target.value)}><option value="">직접 입력</option>{library?.map((p) => <option key={p._id} value={p._id}>[{CHANNEL_LABEL[p.channel] ?? p.channel}] {p.caption.slice(0, 50)}</option>)}</select></div>
+          {!pieceId && selectedSpace?.platform === "INSTAGRAM" && <div><label className="label">Instagram 게시 형식</label><select className="input" value={f.contentChannel} onChange={(e) => setF({ ...f, contentChannel: e.target.value as "INSTAGRAM_FEED" | "INSTAGRAM_REEL" })}><option value="INSTAGRAM_FEED">피드 이미지</option><option value="INSTAGRAM_REEL">Reel 영상</option></select></div>}
           <div className="sm:col-span-2"><label className="label">본문</label><textarea className="input" rows={4} required value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} placeholder="게시할 문안. 링크를 선택하면 본문 끝에 단축 링크가 붙습니다." /></div>
           <div><label className="label">이미지 URL (공백 구분)</label><input className="input" value={f.media} onChange={(e) => setF({ ...f, media: e.target.value })} placeholder="https://…" /></div>
           <div><label className="label">마케팅 링크</label><select className="input" value={f.linkId} onChange={(e) => setF({ ...f, linkId: e.target.value })}><option value="">없음</option>{links?.map((l) => <option key={l._id} value={l._id}>{l.product?.name ?? l.shortCode}</option>)}</select></div>
-          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.autoApprove} onChange={(e) => setF({ ...f, autoApprove: e.target.checked })} />승인 없이 자동 게시</label>
-          <div className="sm:col-span-2"><button className="btn-primary" disabled={usable.length === 0}>예약 등록</button></div>
+          <p className="text-sm text-stone-600">각 실행은 작업 결과 또는 텔레그램에서 최종 승인해야 게시됩니다.</p>
+          <div className="sm:col-span-2"><button className="btn-primary" disabled={usable.length === 0 || submitting}>{submitting ? "등록 중…" : "예약 등록"}</button></div>
         </form>
         {msg && <p className="mt-2 text-sm text-stone-700">{msg}</p>}
       </section>
@@ -89,7 +98,7 @@ function SchedulesPageInner() {
               <tr key={s._id}>
                 <td>{s.spaceName}</td>
                 <td className="text-xs">{s.kind === "DAILY" ? "매일" : s.kind === "WEEKLY" ? s.daysOfWeek.map((d) => DOW[d]).join("") : s.runDate} {s.timeOfDay} ±{s.jitterMinutes}분</td>
-                <td className="max-w-xs truncate text-xs">{s.text}</td>
+                <td className="max-w-xs truncate text-xs">{s.contentChannel ? `[${CHANNEL_LABEL[s.contentChannel] ?? s.contentChannel}] ` : ""}{s.text}</td>
                 <td className="text-xs">{s.nextRunAt ? dateTime(s.nextRunAt) : "-"}</td>
                 <td className="text-xs">{s.lastRunAt ? dateTime(s.lastRunAt) : "-"}</td>
                 <td className="text-xs">{s.autoApprove ? "자동" : "수동"}</td>

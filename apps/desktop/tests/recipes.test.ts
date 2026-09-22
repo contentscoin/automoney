@@ -15,7 +15,7 @@ const vid = path.join(tmp, "a.mp4");
 fs.writeFileSync(img, "fake-jpg");
 fs.writeFileSync(vid, "fake-mp4");
 
-const helpers = (allowPublish: boolean): RecipeHelpers => ({
+const helpers = (allowPublish: boolean, onContinuation: () => Promise<void> = async () => {}): RecipeHelpers => ({
   async humanType(page, selector, text) {
     const t = selector ? page.locator(selector).first() : page.locator(":focus").first();
     await t.pressSequentially(text, { delay: 1 });
@@ -24,6 +24,7 @@ const helpers = (allowPublish: boolean): RecipeHelpers => ({
   async beforePublish() {
     return allowPublish;
   },
+  revalidatePublishContinuation: onContinuation,
   async waitHuman() {},
 });
 
@@ -69,6 +70,31 @@ describe("platform recipes on fixture pages", () => {
     await page.close();
   });
 
+  it("revalidates a distinct Naver confirmation and never clicks a single-step button twice", async () => {
+    const recipe = getRecipe("NAVER_BLOG")!;
+    const page = await browser.newPage();
+    let continuations = 0;
+    process.env.AUTOMONEY_NAVER_URL = fixture("fake-naver.html");
+    await recipe.publish(page, { text: "제목\n본문", mediaPaths: [] }, helpers(true, async () => { continuations++; }));
+    expect(continuations).toBe(1);
+
+    process.env.AUTOMONEY_NAVER_URL = fixture("fake-naver-single.html");
+    await recipe.publish(page, { text: "제목\n본문", mediaPaths: [] }, helpers(true, async () => { continuations++; }));
+    expect(await page.locator("#count").textContent()).toBe("1");
+    expect(continuations).toBe(1);
+    await page.close();
+  });
+
+  it("stops a two-step Naver publish when continuation policy is revoked", async () => {
+    process.env.AUTOMONEY_NAVER_URL = fixture("fake-naver.html");
+    const page = await browser.newPage();
+    await expect(getRecipe("NAVER_BLOG")!.publish(page, { text: "제목\n본문", mediaPaths: [] }, helpers(true, async () => {
+      throw new Error("JOB_CANCELLED");
+    }))).rejects.toThrow(/JOB_CANCELLED/);
+    expect(await page.locator('[data-automoney="post-link"]').count()).toBe(0);
+    await page.close();
+  });
+
   it("keeps an interactive Threads login open and ignores hidden challenge text", async () => {
     const page = await browser.newPage();
     await page.setContent(`
@@ -83,15 +109,106 @@ describe("platform recipes on fixture pages", () => {
     expect(login.state).toBe("LOGIN_REQUIRED");
     expect(page.url()).toBe(beforeUrl);
 
+    await page.setContent('<main><button data-automoney="compose">New thread</button></main>');
+    const composerWithoutIdentity = await recipe.checkSession(page, { navigate: false });
+    expect(composerWithoutIdentity).toMatchObject({ state: "LOGIN_REQUIRED", handle: null, detail: expect.stringContaining("IDENTITY_UNVERIFIED") });
+
     await page.context().addCookies([
       { name: "sessionid", value: "test-session", domain: ".threads.com", path: "/", expires: Math.floor(Date.now() / 1000) + 3600 },
     ]);
     const authenticated = await recipe.checkSession(page, { navigate: false });
-    expect(authenticated.state).toBe("HEALTHY");
+    expect(authenticated).toMatchObject({ state: "LOGIN_REQUIRED", handle: null, detail: expect.stringContaining("IDENTITY_UNVERIFIED") });
+
+    await page.setContent('<main><a href="/@feed_author">unrelated feed profile</a></main>');
+    const unrelatedProfile = await recipe.checkSession(page, { navigate: false });
+    expect(unrelatedProfile).toMatchObject({ state: "LOGIN_REQUIRED", handle: null, detail: expect.stringContaining("IDENTITY_UNVERIFIED") });
+
+    await page.setContent('<main><a data-automoney="handle" href="/@cookie_user">profile</a></main>');
+    const cookieWithHandle = await recipe.checkSession(page, { navigate: false });
+    expect(cookieWithHandle).toMatchObject({ state: "HEALTHY", handle: "cookie_user" });
+
+    await page.setContent('<nav><a aria-label="Profile" href="/@semantic_user">profile</a></nav>');
+    const cookieWithSemanticHandle = await recipe.checkSession(page, { navigate: false });
+    expect(cookieWithSemanticHandle).toMatchObject({ state: "HEALTHY", handle: "semantic_user" });
+
+    await page.setContent('<nav><a data-testid="suggested-profile-card" href="/@other">suggested</a><a rel="me" href="/@actual_owner">my profile</a></nav>');
+    const exactOwnerAfterDecoy = await recipe.checkSession(page, { navigate: false });
+    expect(exactOwnerAfterDecoy).toMatchObject({ state: "HEALTHY", handle: "actual_owner" });
 
     await page.setContent("<main>이 계정은 일시적으로 이용 제한되었습니다.</main>");
     const restricted = await recipe.checkSession(page, { navigate: false });
     expect(restricted.state).toBe("RESTRICTED");
+    await page.close();
+  });
+
+  it("does not treat an Instagram feed author's profile as the signed-in account", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <main>
+        <button data-automoney="compose">Create</button>
+        <a href="/feed_author/" role="link"><img alt="feed_author's profile picture" /></a>
+      </main>
+    `);
+
+    const check = await getRecipe("INSTAGRAM")!.checkSession(page, { navigate: false });
+    expect(check).toMatchObject({ state: "LOGIN_REQUIRED", handle: null, detail: expect.stringContaining("IDENTITY_UNVERIFIED") });
+    await page.close();
+  });
+
+  it("prefers an exact Instagram self marker over an earlier profile-like decoy", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <nav>
+        <a href="/other/" data-testid="suggested-profile-card">Other</a>
+        <a href="/owner/" rel="me">My profile</a>
+      </nav>
+      <button data-automoney="compose">Create</button>
+    `);
+
+    const check = await getRecipe("INSTAGRAM")!.checkSession(page, { navigate: false });
+    expect(check).toMatchObject({ state: "HEALTHY", handle: "owner" });
+    await page.close();
+  });
+
+  it("does not treat Naver's GoBlogWrite route as a blog ID", async () => {
+    const page = await browser.newPage();
+    await page.route("https://blog.naver.com/GoBlogWrite.naver", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<main><div data-automoney="editor" contenteditable="true"></div></main>',
+      });
+    });
+    await page.goto("https://blog.naver.com/GoBlogWrite.naver");
+
+    const check = await getRecipe("NAVER_BLOG")!.checkSession(page, { navigate: false });
+    expect(check).toMatchObject({ state: "LOGIN_REQUIRED", handle: null, detail: expect.stringContaining("IDENTITY_UNVERIFIED") });
+    await page.close();
+  });
+
+  it("does not treat another Naver blog's readable content as the signed-in writer", async () => {
+    const page = await browser.newPage();
+    await page.route("https://blog.naver.com/other_author", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<article><p class="se-text-paragraph">read-only post</p><div contenteditable="true" role="textbox">comment</div></article>',
+      });
+    });
+    await page.goto("https://blog.naver.com/other_author");
+
+    const check = await getRecipe("NAVER_BLOG")!.checkSession(page, { navigate: false });
+    expect(check).toMatchObject({ state: "LOGIN_REQUIRED", handle: null, detail: expect.stringContaining("IDENTITY_UNVERIFIED") });
+    await page.close();
+  });
+
+  it.each([
+    ["X", '<button data-automoney="compose">Post</button>'],
+    ["TIKTOK", '<input data-automoney="compose" type="file" accept="video/mp4" />'],
+  ])("fails closed when %s can compose but its own profile identity is missing", async (platform, html) => {
+    const page = await browser.newPage();
+    await page.setContent(`<main>${html}</main>`);
+
+    const check = await getRecipe(platform)!.checkSession(page, { navigate: false });
+    expect(check).toMatchObject({ state: "LOGIN_REQUIRED", handle: null, detail: expect.stringContaining("IDENTITY_UNVERIFIED") });
     await page.close();
   });
 });

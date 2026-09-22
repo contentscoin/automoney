@@ -1,4 +1,5 @@
-import { LONG_LIVED_TTL_MS, META_SCOPES, MetaApiError, type MetaAdapter, type MetaInsights, type MetaPlatform, type MetaProfile, type MetaPublishInput, type MetaPublishResult, type MetaTokens } from "./adapter";
+import { guessMediaKind } from "@automoney/shared";
+import { LONG_LIVED_TTL_MS, META_SCOPES, MetaApiError, type MetaAdapter, type MetaInsights, type MetaPlatform, type MetaProfile, type MetaPublishInput, type MetaPublishResult } from "./adapter";
 
 /**
  * Mock 어댑터: 앱 자격증명·앱 리뷰 없이 전체 플로우(연결 → 발행 → 인사이트)를 검증한다.
@@ -38,13 +39,21 @@ export const mockMetaAdapter: MetaAdapter = {
     const name = accessToken.split("-").slice(2).join("-") || `${platform.toLowerCase()}_user`;
     return { providerUserId: `mock_${platform}_${hash(name)}`, username: name };
   },
-  async publish(accessToken, profile, input): Promise<MetaPublishResult> {
+  async publish(accessToken, profile, input, beforeCommit): Promise<MetaPublishResult> {
     assertToken(accessToken);
+    if (input.mediaUrls.length > 1) throw new MetaApiError("META_PUBLISH_FAILED", "Meta API adapter supports at most one media item");
     if (input.text.includes("[meta-fail]")) throw new MetaApiError("META_PUBLISH_FAILED", "mock: forced publish failure");
     if (input.platform === "INSTAGRAM" && input.mediaUrls.length === 0) throw new MetaApiError("META_PUBLISH_FAILED", "instagram requires media");
+    if (input.platform === "INSTAGRAM") {
+      const mediaKind = guessMediaKind(input.mediaUrls[0] ?? "");
+      if (input.contentChannel === "INSTAGRAM_FEED" && mediaKind !== "image") throw new MetaApiError("META_PUBLISH_FAILED", "Instagram feed requires a verifiable image URL");
+      if (input.contentChannel === "INSTAGRAM_REEL" && mediaKind !== "video") throw new MetaApiError("META_PUBLISH_FAILED", "Instagram Reel requires a verifiable video URL");
+      if (input.contentChannel !== "INSTAGRAM_FEED" && input.contentChannel !== "INSTAGRAM_REEL") throw new MetaApiError("META_PUBLISH_FAILED", "Instagram publish channel is required");
+    }
+    await beforeCommit?.();
     const id = `MOCK${hash(`${profile.providerUserId}:${input.text}:${Date.now()}`).toString(36).toUpperCase()}`;
     const user = profile.username ?? "mock";
-    return { externalPostId: id, postUrl: input.platform === "THREADS" ? `https://www.threads.net/@${user}/post/${id}` : `https://www.instagram.com/p/${id}/` };
+    return { externalPostId: id, postUrl: input.platform === "THREADS" ? `https://www.threads.net/@${user}/post/${id}` : `https://www.instagram.com/${input.contentChannel === "INSTAGRAM_REEL" ? "reel" : "p"}/${id}/` };
   },
   async insights(platform: MetaPlatform, accessToken, externalPostId): Promise<MetaInsights> {
     assertToken(accessToken);

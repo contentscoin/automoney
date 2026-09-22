@@ -68,17 +68,20 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     .sort((a, b) => b.href.length - a.href.length)[0]?.href;
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-6xl">
+    <>
+      <a className="skip-link" href="#main-content">본문으로 건너뛰기</a>
+      <div className="mx-auto flex min-h-screen max-w-6xl">
       <aside className="hidden w-56 shrink-0 border-r border-stone-200 p-5 md:block">
         <Link href="/dashboard" className="text-lg font-bold" style={{ color: "var(--accent)" }}>
           automoney
         </Link>
         <p className="mt-1 text-xs text-stone-500">아뜨랑스 파트너</p>
-        <nav className="mt-6 flex flex-col gap-1">
+        <nav className="mt-6 flex flex-col gap-1" aria-label="주요 메뉴">
           {items.map((it) => (
             <Link
               key={it.href}
               href={it.href}
+              aria-current={activeHref === it.href ? "page" : undefined}
               className={`rounded-lg px-3 py-2 text-sm ${activeHref === it.href ? "bg-orange-50 font-medium text-orange-800" : "text-stone-700 hover:bg-stone-100"}`}
             >
               {it.label}
@@ -104,12 +107,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </header>
         {menuOpen && (
-          <nav id="mobile-nav" className="grid grid-cols-2 gap-1 border-b border-stone-200 bg-white p-3 md:hidden">
-            {items.map((it) => <Link key={it.href} href={it.href} onClick={() => setMenuOpen(false)} className={`rounded-lg px-3 py-2 text-sm ${activeHref === it.href ? "bg-orange-50 font-medium text-orange-800" : "text-stone-700"}`}>{it.label}</Link>)}
+          <nav id="mobile-nav" className="grid grid-cols-2 gap-1 border-b border-stone-200 bg-white p-3 md:hidden" aria-label="모바일 주요 메뉴">
+            {items.map((it) => <Link key={it.href} href={it.href} aria-current={activeHref === it.href ? "page" : undefined} onClick={() => setMenuOpen(false)} className={`rounded-lg px-3 py-2 text-sm ${activeHref === it.href ? "bg-orange-50 font-medium text-orange-800" : "text-stone-700"}`}>{it.label}</Link>)}
           </nav>
         )}
-        <main className="p-4 md:p-6">{children}</main>
+        <main id="main-content" tabIndex={-1} className="p-4 md:p-6">{children}</main>
       </div>
-    </div>
+      </div>
+    </>
   );
 }

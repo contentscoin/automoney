@@ -1,6 +1,44 @@
 import type { Page } from "playwright";
 import { RESTRICTION_HINTS, type PlatformRecipe, type SessionCheck } from "./types";
 
+/** Only selectors that explicitly identify the signed-in user's own profile. */
+const selfProfileSelectors = [
+  '[data-automoney="handle"]',
+  'nav a[href^="/"][rel~="me"]',
+  'nav a[href^="/"][aria-label="Profile" i]',
+  'nav a[href^="/"][aria-label="프로필"]',
+];
+
+const RESERVED_PROFILE_PATHS = new Set(["accounts", "direct", "explore", "p", "reel", "reels", "stories"]);
+
+function profileHandle(href: string | null): string | null {
+  if (!href) return null;
+  try {
+    const url = new URL(href, "https://www.instagram.com");
+    if (!/(^|\.)instagram\.com$/i.test(url.hostname)) return null;
+    const match = url.pathname.match(/^\/([^/?#]+)\/?$/);
+    const handle = match?.[1]?.toLowerCase() ?? null;
+    return handle && !RESERVED_PROFILE_PATHS.has(handle) ? handle : null;
+  } catch {
+    return null;
+  }
+}
+
+async function signedInProfileHandle(page: Page): Promise<string | null> {
+  // Locator unions use DOM order, not selector order. Evaluate only exact
+  // self-profile markers one at a time so an earlier suggested account cannot
+  // shadow rel=me or the app-owned test hook.
+  for (const selector of selfProfileSelectors) {
+    const links = page.locator(selector);
+    const count = await links.count();
+    for (let index = 0; index < count; index++) {
+      const handle = profileHandle(await links.nth(index).getAttribute("href").catch(() => null));
+      if (handle) return handle;
+    }
+  }
+  return null;
+}
+
 /** Instagram 웹 피드 게시 레시피. 이미지/영상 필수. */
 export const instagramRecipe: PlatformRecipe = {
   platform: "INSTAGRAM",
@@ -17,8 +55,10 @@ export const instagramRecipe: PlatformRecipe = {
     if (RESTRICTION_HINTS.some((re) => re.test(body))) return { state: "RESTRICTED", detail: "restriction hint on page" };
     const create = page.locator('[data-automoney="compose"], a[href="#"]:has(svg[aria-label="새로운 게시물"]), svg[aria-label="New post"], svg[aria-label="만들기"], svg[aria-label="Create"]').first();
     if (await create.isVisible({ timeout: 8_000 }).catch(() => false)) {
-      const handle = await page.locator('[data-automoney="handle"], a[href^="/"][role="link"]:has(img[alt$="프로필 사진"]), a[href^="/"][role="link"]:has(img[alt$="profile picture"])').first().getAttribute("href").catch(() => null);
-      return { state: "HEALTHY", handle: handle ? handle.replace(/^\//, "").replace(/\/$/, "") : null };
+      const handle = await signedInProfileHandle(page);
+      return handle
+        ? { state: "HEALTHY", handle }
+        : { state: "LOGIN_REQUIRED", handle: null, detail: "IDENTITY_UNVERIFIED: Instagram composer is available but the signed-in profile handle could not be verified" };
     }
     if (await page.locator('input[name="username"], [data-automoney="login"]').first().isVisible({ timeout: 3_000 }).catch(() => false)) return { state: "LOGIN_REQUIRED" };
     return { state: "LOGIN_REQUIRED", detail: "create button not found" };
@@ -52,9 +92,10 @@ export const instagramRecipe: PlatformRecipe = {
     await caption.click();
     await h.humanType(page, "", input.text);
     await h.checkpoint("ready", 70);
-    if (!(await h.beforePublish())) return { postUrl: null, detail: "dry-run: not published" };
     const share = page.locator('[data-automoney="post"], [role="button"]:has-text("공유하기"), [role="button"]:has-text("Share")').last();
-    await share.click();
+    await share.click({ trial: true, timeout: 20_000 });
+    if (!(await h.beforePublish())) return { postUrl: null, detail: "dry-run: not published" };
+    await share.click({ timeout: 3_000 });
     await h.checkpoint("posted", 90);
     await page.locator('[data-automoney="post-link"], :text("게시물이 공유되었습니다"), :text("Your post has been shared")').first().waitFor({ state: "visible", timeout: 60_000 }).catch(() => {});
     const link = await page.locator('[data-automoney="post-link"], a[href*="/p/"]').first().getAttribute("href").catch(() => null);

@@ -22,6 +22,14 @@ export interface SpaceUpdate {
 
 export interface CompletionJobRef { id: string; attemptNo?: number; leaseToken?: string }
 
+export interface PublishPreflight {
+  ok: true;
+  dryRun: boolean;
+  publishIntentId: string | null;
+  protocolVersion: 2;
+  livePublishEnabled: boolean;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(message);
@@ -32,7 +40,7 @@ type FetchLike = typeof fetch;
 
 /** 클라우드 에이전트 API 클라이언트 (Convex HTTP actions). blogautomcp siteFetch 계승. */
 export class AgentApi {
-  constructor(private cfg: AgentConfig, private fetchImpl: FetchLike = fetch, private appVersion = "0.1.11") {}
+  constructor(private cfg: AgentConfig, private fetchImpl: FetchLike = fetch, private appVersion = "0.1.13") {}
 
   private async call<T>(path: string, init: { method?: string; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
     if (!this.cfg.deviceToken) throw new ApiError(401, "UNPAIRED", "device not paired");
@@ -78,8 +86,14 @@ export class AgentApi {
   heartbeat(job: CompletionJobRef, stage?: string, progress?: number): Promise<{ active: boolean; cancelRequested: boolean; staleAttempt?: boolean }> {
     return this.call(`/agent/jobs/${job.id}/heartbeat`, { body: { attemptNo: job.attemptNo, leaseToken: job.leaseToken, stage, progress }, timeoutMs: 15_000 });
   }
-  preflight(job: CompletionJobRef): Promise<{ ok: true; dryRun: boolean; publishIntentId: string | null }> {
+  preflight(job: CompletionJobRef): Promise<PublishPreflight> {
     return this.call(`/agent/jobs/${job.id}/preflight`, { body: { attemptNo: job.attemptNo, leaseToken: job.leaseToken }, timeoutMs: 15_000 });
+  }
+  markPublishAttempted(job: CompletionJobRef): Promise<{ recorded: true }> {
+    return this.call(`/agent/jobs/${job.id}/publish-attempt`, { body: { attemptNo: job.attemptNo, leaseToken: job.leaseToken }, timeoutMs: 15_000 });
+  }
+  revalidatePublishContinuation(job: CompletionJobRef): Promise<{ authorized: true }> {
+    return this.call(`/agent/jobs/${job.id}/publish-continuation`, { body: { attemptNo: job.attemptNo, leaseToken: job.leaseToken }, timeoutMs: 15_000 });
   }
   complete(job: CompletionJobRef, input: { completionId: string; status: "SUCCEEDED" | "FAILED"; result?: JobResultEnvelope; errorCode?: string; errorMessage?: string; spaceUpdate?: SpaceUpdate }): Promise<{ ok: boolean; duplicate?: boolean }> {
     return this.call(`/agent/jobs/${job.id}/complete`, { body: { ...input, attemptNo: job.attemptNo, leaseToken: job.leaseToken } });

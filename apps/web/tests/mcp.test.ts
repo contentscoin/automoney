@@ -19,8 +19,9 @@ const tool = async (call: ReturnType<typeof client>, name: string, args: unknown
 
 async function pairDevice(t: T, user: Awaited<ReturnType<typeof signup>>) {
   const { code } = await user.as.mutation(api.devices.createPairCode, {});
-  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.0" });
+  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.13" });
 }
+const authed = (token: string, init: RequestInit = {}) => ({ ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, "content-type": "application/json" } });
 
 describe("stateless MCP server", () => {
   it("issues credentials with role-bounded scopes and lists/revokes them", async () => {
@@ -72,7 +73,7 @@ describe("stateless MCP server", () => {
     const t = makeT();
     const user = await signup(t, "mcp3@test.com");
     await seedProduct(t, 100001);
-    await pairDevice(t, user);
+    const paired = await pairDevice(t, user);
     const c = await user.as.mutation(api.mcp.createCredential, { label: "flow", scopes: ["mcp:read", "mcp:write"] });
     const call = client(t, new URL(c.endpointUrl).pathname);
     const products = (await tool(call, "product_search", { term: "테스트" })).result as { productId: string }[];
@@ -89,13 +90,23 @@ describe("stateless MCP server", () => {
     expect(created.spaceId).toBeTruthy();
     const job = (await tool(call, "job_get", { jobId: created.jobId })).result as { jobType: string; status: string; source: string; executor: string };
     expect(job).toMatchObject({ jobType: "space.create", status: "QUEUED", source: "MCP", executor: "DESKTOP" });
-    const sched = (await tool(call, "post_schedule", { spaceId: created.spaceId, kind: "DAILY", timeOfDay: "10:00", text: "MCP 예약 본문", linkId: link.linkId })).result as { scheduleId: string; nextRunAt: number | null };
+    await t.fetch("/agent/claim", authed(paired.deviceToken, { method: "POST", body: "{}" }));
+    await t.fetch(`/agent/jobs/${created.jobId}/complete`, authed(paired.deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY", handle: "mcp_shop" } }) }));
+    const scheduleInput = { spaceId: created.spaceId, kind: "DAILY", timeOfDay: "10:00", text: "MCP 예약 본문", linkId: link.linkId, clientRequestId: "schedule_flow_001" };
+    const schedulePreviewCall = await tool(call, "post_schedule", scheduleInput);
+    expect(schedulePreviewCall.rpc?.error).toBeUndefined();
+    const schedulePreview = schedulePreviewCall.result as { requiresConfirmation: boolean };
+    expect(schedulePreview.requiresConfirmation).toBe(true);
+    const sched = (await tool(call, "post_schedule", { ...scheduleInput, confirmed: true })).result as { scheduleId: string; nextRunAt: number | null };
     expect(sched.scheduleId).toBeTruthy();
+    expect(((await tool(call, "post_schedule", { ...scheduleInput, confirmed: true })).result as { scheduleId: string }).scheduleId).toBe(sched.scheduleId);
+    expect((await tool(call, "post_schedule", { ...scheduleInput, text: "충돌 본문", confirmed: true })).isError).toBe(true);
     // post_publish: preview → confirmed(승인 대기)
     const pp = (await tool(call, "post_publish", { spaceId: created.spaceId, text: "MCP 게시" })).result as { requiresConfirmation: boolean; preview: { space: { authMode: string } } };
     expect(pp.requiresConfirmation).toBe(true);
     expect(pp.preview.space.authMode).toBe("BROWSER");
-    const pub = (await tool(call, "post_publish", { spaceId: created.spaceId, text: "MCP 게시", confirmed: true })).result as { jobId: string; requiresApproval: boolean };
+    expect((await tool(call, "post_publish", { spaceId: created.spaceId, text: "MCP 게시", confirmed: true })).isError).toBe(true);
+    const pub = (await tool(call, "post_publish", { spaceId: created.spaceId, text: "MCP 게시", clientRequestId: "publish_flow_001", confirmed: true })).result as { jobId: string; requiresApproval: boolean };
     expect(pub.requiresApproval).toBe(true);
     expect(((await tool(call, "job_get", { jobId: pub.jobId })).result as { status: string }).status).toBe("NEEDS_APPROVAL");
     const verify = (await tool(call, "post_verify_published", { jobId: pub.jobId })).result as { published: boolean };

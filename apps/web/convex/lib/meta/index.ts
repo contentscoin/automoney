@@ -9,6 +9,15 @@ export function metaMode(): "mock" | "graph" {
   return process.env.META_APP_ID && process.env.META_APP_SECRET ? "graph" : "mock";
 }
 
+/** Mock may exercise live-shaped flows only inside the explicit test harness. */
+export function metaLivePublishAvailable(accountMode?: "mock" | "graph"): boolean {
+  if (process.env.NODE_ENV === "test" && process.env.META_ALLOW_MOCK_LIVE_TESTS === "true") return true;
+  return metaMode() === "graph"
+    && !!process.env.META_APP_ID
+    && !!process.env.META_APP_SECRET
+    && accountMode !== "mock";
+}
+
 export function getMetaAdapter(): MetaAdapter {
   return metaMode() === "graph" ? createGraphAdapter({ appId: process.env.META_APP_ID!, appSecret: process.env.META_APP_SECRET! }) : mockMetaAdapter;
 }

@@ -17,8 +17,12 @@ export const xRecipe: PlatformRecipe = {
     if (RESTRICTION_HINTS.some((re) => re.test(body))) return { state: "RESTRICTED", detail: "restriction hint on page" };
     const compose = page.locator('[data-automoney="compose"], a[data-testid="SideNav_NewTweet_Button"], [data-testid="tweetTextarea_0"]').first();
     if (await compose.isVisible({ timeout: 8_000 }).catch(() => false)) {
-      const handle = await page.locator('[data-automoney="handle"], a[data-testid="AppTabBar_Profile_Link"]').first().getAttribute("href").catch(() => null);
-      return { state: "HEALTHY", handle: handle ? handle.replace(/^\//, "") : null };
+      const profileLink = page.locator('[data-automoney="handle"], a[data-testid="AppTabBar_Profile_Link"]').first();
+      const handle = (await profileLink.count()) > 0 ? await profileLink.getAttribute("href").catch(() => null) : null;
+      const profile = handle?.match(/^\/?@?([A-Za-z0-9_]{1,15})\/?(?:[?#].*)?$/)?.[1] ?? null;
+      return profile
+        ? { state: "HEALTHY", handle: profile }
+        : { state: "LOGIN_REQUIRED", handle: null, detail: "IDENTITY_UNVERIFIED: X composer is available but the signed-in profile handle could not be verified" };
     }
     if (await page.locator('input[autocomplete="username"], [data-automoney="login"]').first().isVisible({ timeout: 3_000 }).catch(() => false)) return { state: "LOGIN_REQUIRED" };
     return { state: "LOGIN_REQUIRED", detail: "compose not found" };
@@ -38,9 +42,10 @@ export const xRecipe: PlatformRecipe = {
       await h.waitHuman(800, 1600);
     }
     await h.checkpoint("ready", 70);
-    if (!(await h.beforePublish())) return { postUrl: null, detail: "dry-run: not published" };
     const post = page.locator('[data-automoney="post"], [data-testid="tweetButtonInline"], [data-testid="tweetButton"]').first();
-    await post.click();
+    await post.click({ trial: true, timeout: 20_000 });
+    if (!(await h.beforePublish())) return { postUrl: null, detail: "dry-run: not published" };
+    await post.click({ timeout: 3_000 });
     await h.checkpoint("posted", 90);
     await h.waitHuman(1500, 3000);
     const link = await page.locator('[data-automoney="post-link"], a[href*="/status/"]').first().getAttribute("href").catch(() => null);

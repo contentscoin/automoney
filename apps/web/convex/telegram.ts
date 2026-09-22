@@ -9,7 +9,8 @@ import { sha256Hex, timingSafeEqual } from "./lib/crypto";
 import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
 import { kstMonth } from "./lib/time";
-import { enqueueJob } from "./jobs";
+import { approveJobFor, enqueueJob } from "./jobs";
+import { livePublishEnabled } from "./lib/publishPolicy";
 import { weeklySummaryFor } from "./analytics";
 
 const BIND_CODE_LENGTH = 6;
@@ -80,22 +81,79 @@ export const webhook = httpAction(async (ctx, request) => {
   } catch {
     return new Response("bad request", { status: 400 });
   }
+  if (telegramUpdateId((update as TgUpdate | null)?.update_id) === null)
+    return new Response("missing or invalid update_id", { status: 400 });
   const out = await ctx.runMutation(internal.telegram.processUpdate, { update });
-  for (const m of out.messages) await ctx.runAction(internal.telegram.send, m);
-  if (out.answerCallbackQueryId) await ctx.runAction(internal.telegram.answerCallback, { callbackQueryId: out.answerCallbackQueryId, text: out.answerText ?? "" });
+  if (!out.replayed) {
+    for (const m of out.messages) await ctx.runAction(internal.telegram.send, m);
+    if (out.answerCallbackQueryId) await ctx.runAction(internal.telegram.answerCallback, { callbackQueryId: out.answerCallbackQueryId, text: out.answerText ?? "" });
+  }
   return new Response("ok", { status: 200 });
 });
 
 interface TgUpdate {
+  update_id?: number;
   message?: { chat: { id: number | string }; text?: string; from?: { username?: string } };
   callback_query?: { id: string; data?: string; message?: { chat: { id: number | string } } };
+}
+
+function publishApprovalMessage(job: Doc<"agentJobs">, space: Doc<"spaces"> | null, title: string): { text: string; inlineApprovalAllowed: boolean } {
+  const payload = job.payload as { text?: unknown; mediaUrls?: unknown; linkUrl?: unknown; dryRun?: unknown; targetHandle?: unknown };
+  const body = typeof payload.text === "string" ? payload.text : "";
+  const mediaUrls = Array.isArray(payload.mediaUrls) ? payload.mediaUrls.filter((url): url is string => typeof url === "string") : [];
+  const linkUrl = typeof payload.linkUrl === "string" ? payload.linkUrl : null;
+  const targetHandle = typeof payload.targetHandle === "string" ? payload.targetHandle : null;
+  const target = `[${space?.platform ?? ""}] ${space?.name ?? ""}${targetHandle ? ` @${targetHandle}` : " · 핸들 미확인"}`;
+  const mode = payload.dryRun === true ? "테스트 실행 · 실제 게시 안 함" : "⚠️ 실게시";
+  const details = [
+    title,
+    `대상: ${target}`,
+    `모드: ${mode}`,
+    `미디어: ${mediaUrls.length}개`,
+    ...mediaUrls.map((url, index) => `  ${index + 1}. ${url}`),
+    `링크: ${linkUrl ?? "없음"}`,
+    `승인 결합 해시: ${job.payloadHash ?? "없음"}`,
+    "",
+    "전체 본문:",
+    body || "(본문 없음)",
+  ].join("\n");
+  if (details.length <= 3300) return { text: details, inlineApprovalAllowed: true };
+  const site = process.env.SITE_URL?.replace(/\/$/, "");
+  return {
+    text: [
+      title,
+      `대상: ${target}`,
+      `모드: ${mode}`,
+      `본문: ${body.length}자 · 미디어 ${mediaUrls.length}개 · 링크 ${linkUrl ? "있음" : "없음"}`,
+      `승인 결합 해시: ${job.payloadHash ?? "없음"}`,
+      "",
+      "전체 승인 내용을 텔레그램 한 메시지에 안전하게 표시할 수 없어 인라인 승인을 막았습니다.",
+      site ? `대시보드에서 확인·승인: ${site}/dashboard/jobs` : "대시보드 > 작업 결과에서 전체 내용을 확인·승인하세요.",
+    ].join("\n"),
+    inlineApprovalAllowed: false,
+  };
+}
+
+type ProcessUpdateResult = { messages: Outgoing[]; answerCallbackQueryId?: string; answerText?: string; replayed?: boolean };
+
+function telegramUpdateId(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 /** 업데이트 처리(뮤테이션): 명령 해석 → 응답 메시지 목록. 외부 호출은 하지 않는다. */
 export const processUpdate = internalMutation({
   args: { update: v.any() },
-  handler: async (ctx, args): Promise<{ messages: Outgoing[]; answerCallbackQueryId?: string; answerText?: string }> => {
+  handler: async (ctx, args): Promise<ProcessUpdateResult> => {
     const u = args.update as TgUpdate;
+    const updateId = telegramUpdateId(u.update_id);
+    if (updateId !== null) {
+      const previous = await ctx.db
+        .query("telegramUpdates")
+        .withIndex("by_updateId", (q) => q.eq("updateId", updateId))
+        .unique();
+      if (previous) return { ...(previous.result as ProcessUpdateResult), replayed: true };
+    }
+    const result = await (async (): Promise<ProcessUpdateResult> => {
     if (u.callback_query) {
       const chatId = String(u.callback_query.message?.chat.id ?? "");
       const binding = chatId ? await bindingByChat(ctx, chatId) : null;
@@ -185,6 +243,7 @@ export const processUpdate = internalMutation({
         return reply(chatId, ["오늘의 추천 콘텐츠", ...lines, "", "게시: /post <스페이스명> <내용> 또는 대시보드 > 콘텐츠 > 이 콘텐츠로 게시"].join("\n"), userId);
       }
       case "/post": {
+        if (!livePublishEnabled()) return reply(chatId, "실게시가 현재 운영 정책으로 중지되어 있습니다.", userId);
         const spaceName = rest[0];
         const body = rest.slice(1).join(" ").trim();
         if (!spaceName || !body) return reply(chatId, "사용법: /post <스페이스명> <내용>", userId);
@@ -192,8 +251,18 @@ export const processUpdate = internalMutation({
         const space = spaces.find((s) => s.name === spaceName || s.handle === spaceName.replace(/^@/, ""));
         if (!space) return reply(chatId, `스페이스 "${spaceName}" 을 찾을 수 없습니다. /status 로 목록을 확인하세요.`, userId);
         try {
-          const jobId = await enqueueJob(ctx, { userId, jobType: "post.publish", payload: { spaceId: space._id, platform: space.platform, text: body, mediaUrls: [], linkUrl: null }, spaceId: space._id, source: "TELEGRAM", needsApproval: true });
-          return { messages: [{ chatId, userId, text: `[${space.platform}] ${space.name} 에 게시할까요?\n\n${body}`, keyboard: approvalKeyboard(jobId) }] };
+          const jobId = await enqueueJob(ctx, {
+            userId,
+            jobType: "post.publish",
+            payload: { spaceId: space._id, platform: space.platform, text: body, mediaUrls: [], linkUrl: null },
+            spaceId: space._id,
+            source: "TELEGRAM",
+            needsApproval: true,
+            requestKey: updateId === null ? undefined : `telegram:update:${updateId}`,
+          });
+          const job = (await ctx.db.get(jobId))!;
+          const approval = publishApprovalMessage(job, space, "즉시 발행 승인 요청");
+          return { messages: [{ chatId, userId, text: approval.text, ...(approval.inlineApprovalAllowed ? { keyboard: approvalKeyboard(jobId) } : {}) }] };
         } catch (e) {
           return reply(chatId, `등록 실패: ${(e as { data?: { message?: string } }).data?.message ?? "내용을 확인하세요."}`, userId);
         }
@@ -201,6 +270,9 @@ export const processUpdate = internalMutation({
       default:
         return reply(chatId, "알 수 없는 명령입니다. /help 를 참고하세요.", userId);
     }
+    })();
+    if (updateId !== null) await ctx.db.insert("telegramUpdates", { updateId, result, createdAt: Date.now() });
+    return result;
   },
 });
 
@@ -230,9 +302,9 @@ async function handleCallback(ctx: MutationCtx, binding: Doc<"telegramBindings">
   const now = Date.now();
   if (m[1] === "approve") {
     if (job.status !== "NEEDS_APPROVAL") return { toast: `이미 ${job.status} 상태입니다.` };
-    await ctx.db.patch(job._id, { status: "QUEUED", runAfter: now, updatedAt: now });
-    if (job.executor === "CLOUD") await ctx.scheduler.runAfter(0, internal.meta.runCloudJob, { jobId: job._id });
-    await audit(ctx, { actorUserId: binding.userId, action: "job.approve", metadata: { jobId: job._id, via: "telegram" } });
+    const user = await ctx.db.get(binding.userId);
+    if (!user || (user.status ?? "ACTIVE") !== "ACTIVE") return { toast: "계정 상태를 확인하세요." };
+    await approveJobFor(ctx, user, job._id, "telegram");
     return { text: "승인했습니다. 에이전트가 곧 게시합니다.", toast: "승인됨" };
   }
   if (["NEEDS_APPROVAL", "QUEUED"].includes(job.status)) {
@@ -280,8 +352,8 @@ export const notifyApproval = internalMutation({
     const b = await ctx.db.query("telegramBindings").withIndex("by_user", (q) => q.eq("userId", j.userId)).unique();
     if (!b?.chatId) return;
     const space = j.spaceId ? await ctx.db.get(j.spaceId) : null;
-    const text = `예약 발행 승인 요청 [${space?.platform ?? ""}] ${space?.name ?? ""}\n\n${String((j.payload as { text?: string }).text ?? "").slice(0, 1500)}`;
-    await ctx.scheduler.runAfter(0, internal.telegram.send, { chatId: b.chatId, text, userId: j.userId, keyboard: approvalKeyboard(j._id) });
+    const approval = publishApprovalMessage(j, space, "예약 발행 승인 요청");
+    await ctx.scheduler.runAfter(0, internal.telegram.send, { chatId: b.chatId, text: approval.text, userId: j.userId, ...(approval.inlineApprovalAllowed ? { keyboard: approvalKeyboard(j._id) } : {}) });
   },
 });
 

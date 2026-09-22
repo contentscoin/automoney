@@ -411,7 +411,20 @@ export default defineSchema({
     approvalRequired: v.optional(v.boolean()),
     approval: v.optional(v.object({ actorUserId: v.id("users"), approvedAt: v.number(), payloadHash: v.string() })),
     protocolVersion: v.optional(v.number()),
-    publishPhase: v.optional(v.union(v.literal("PREPARING"), v.literal("INTENT_RECORDED"), v.literal("CONFIRMED"), v.literal("UNCERTAIN"))),
+    publishPhase: v.optional(v.union(v.literal("PREPARING"), v.literal("INTENT_RECORDED"), v.literal("CONFIRMED"), v.literal("UNCERTAIN"), v.literal("NOT_PUBLISHED"))),
+    publishPreflightAttemptNo: v.optional(v.number()),
+    publishPreflightPayloadHash: v.optional(v.string()),
+    publishPreflightAt: v.optional(v.number()),
+    publishIntentId: v.optional(v.id("publishReservations")),
+    publishExecutionHandle: v.optional(v.string()),
+    publishAttemptedAt: v.optional(v.number()),
+    manualPublishResolution: v.optional(v.object({
+      outcome: v.union(v.literal("PUBLISHED"), v.literal("NOT_PUBLISHED")),
+      actorUserId: v.id("users"),
+      resolvedAt: v.number(),
+      evidenceUrl: v.optional(v.string()),
+      releaseAt: v.optional(v.number()),
+    })),
     completionId: v.optional(v.string()),
     completionHash: v.optional(v.string()),
     claimedByDeviceId: v.optional(v.id("devices")),
@@ -431,13 +444,20 @@ export default defineSchema({
     .index("by_user_status", ["userId", "status", "runAfter"])
     .index("by_user", ["userId", "createdAt"])
     .index("by_status", ["status", "runAfter"])
+    .index("by_status_lease", ["status", "leaseUntil"])
+    .index("by_status_created", ["status", "createdAt"])
+    .index("by_user_device_executor_status_type", ["userId", "deviceId", "executor", "status", "jobType", "runAfter"])
     .index("by_idempotencyKey", ["idempotencyKey"])
     .index("by_user_requestKey", ["userId", "requestKey"])
+    .index("by_rootJobId", ["rootJobId"])
+    .index("by_schedule_status", ["scheduleId", "status"])
     .index("by_space", ["spaceId", "createdAt"]),
 
   publishReservations: defineTable({
     userId: v.id("users"),
     spaceId: v.id("spaces"),
+    /** Canonical posting identity. Meta API and its browser fallback share one key. */
+    publicationKey: v.optional(v.string()),
     rootJobId: v.id("agentJobs"),
     kstDay: v.string(),
     state: v.union(v.literal("RESERVED"), v.literal("COMMITTED"), v.literal("RELEASED"), v.literal("UNCERTAIN")),
@@ -446,6 +466,10 @@ export default defineSchema({
     committedAt: v.optional(v.number()),
   })
     .index("by_space_day", ["spaceId", "kstDay"])
+    .index("by_space_state", ["spaceId", "state"])
+    .index("by_publication_day", ["publicationKey", "kstDay"])
+    .index("by_publication_state", ["publicationKey", "state"])
+    .index("by_publication_state_committed", ["publicationKey", "state", "committedAt"])
     .index("by_root", ["rootJobId"]),
 
   schedules: defineTable({
@@ -460,7 +484,14 @@ export default defineSchema({
     mediaUrls: v.array(v.string()),
     linkId: v.optional(v.id("marketingLinks")),
     pieceId: v.optional(v.id("contentPieces")),
+    contentChannel: v.optional(v.union(v.literal("INSTAGRAM_FEED"), v.literal("INSTAGRAM_REEL"), v.literal("THREADS"), v.literal("X"), v.literal("TIKTOK"), v.literal("BLOG"))),
+    pieceOutputHash: v.optional(v.string()),
+    pieceSnapshotHash: v.optional(v.string()),
+    targetPublicationKey: v.optional(v.string()),
+    targetHandle: v.optional(v.string()),
     autoApprove: v.optional(v.boolean()),
+    requestKey: v.optional(v.string()),
+    payloadHash: v.optional(v.string()),
     revision: v.optional(v.number()),
     lastSkipReason: v.optional(v.string()),
     lastSkippedAt: v.optional(v.number()),
@@ -471,6 +502,7 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_user", ["userId"])
+    .index("by_user_requestKey", ["userId", "requestKey"])
     .index("by_enabled_next", ["enabled", "nextRunAt"]),
 
   telegramBindings: defineTable({
@@ -484,6 +516,12 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_chatId", ["chatId"])
     .index("by_bindCodeHash", ["bindCodeHash"]),
+
+  telegramUpdates: defineTable({
+    updateId: v.number(),
+    result: v.any(),
+    createdAt: v.number(),
+  }).index("by_updateId", ["updateId"]),
 
   telegramOutbox: defineTable({
     userId: v.optional(v.id("users")),
@@ -630,6 +668,9 @@ export default defineSchema({
       v.literal("manual"),
     ),
     runId: v.optional(v.id("contentRuns")),
+    /** Immutable production evidence inherited by a user copy without making it a run output. */
+    evidenceRunId: v.optional(v.id("contentRuns")),
+    copiedFromPieceId: v.optional(v.id("contentPieces")),
     /** Version/provider provenance for the production contract that accepted it. */
     productionMeta: v.optional(v.any()),
     jobId: v.optional(v.id("agentJobs")),
@@ -678,6 +719,26 @@ export default defineSchema({
   })
     .index("by_createdAt", ["createdAt"])
     .index("by_user", ["userId", "createdAt"]),
+
+  /** Immutable evidence of the exact content revision a person approved or rejected. */
+  contentReviewEvents: defineTable({
+    pieceId: v.id("contentPieces"),
+    runId: v.optional(v.id("contentRuns")),
+    actorUserId: v.id("users"),
+    action: v.union(v.literal("APPROVED"), v.literal("REJECTED")),
+    outputHash: v.string(),
+    snapshot: v.any(),
+    reviewChecklist: v.optional(v.object({
+      productFacts: v.boolean(),
+      adDisclosure: v.boolean(),
+      mediaRightsAndFit: v.boolean(),
+      finalCopy: v.boolean(),
+    })),
+    reason: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_piece", ["pieceId", "createdAt"])
+    .index("by_run", ["runId", "createdAt"]),
 
   // ---- M5 Stateless MCP ----
   mcpCredentials: defineTable({
@@ -763,6 +824,8 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_user", ["userId", "platform"])
+    .index("by_provider", ["platform", "providerUserId"])
+    .index("by_username", ["platform", "username"])
     .index("by_status_expiry", ["status", "tokenExpiresAt"]),
 
   metaOauthStates: defineTable({

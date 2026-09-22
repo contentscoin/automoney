@@ -36,7 +36,7 @@ const STEPS = [
 const GOAL_LABEL: Record<ContentGoal, string> = { DISCOVERY: "상품 발견", ENGAGEMENT: "반응 유도", CONVERSION: "상품 링크 전환" };
 const TONE_LABEL: Record<ContentTone, string> = { CHANNEL_NATIVE: "채널에 자연스럽게", POLITE: "정중한 존댓말", CASUAL: "친근한 말투" };
 const CTA_LABEL: Record<ContentCta, string> = { COMMENT: "댓글 유도", SAVE: "저장 유도", LINK: "상품 링크 확인" };
-const RUN_STATUS_LABEL: Record<string, string> = { QUEUED: "대기", RUNNING: "제작 중", COMPLETED: "기준 통과", REVIEW_REQUIRED: "검토 필요", FAILED: "실패" };
+const RUN_STATUS_LABEL: Record<string, string> = { QUEUED: "대기", RUNNING: "제작 중", COMPLETED: "검토·승인 완료", REVIEW_REQUIRED: "재검토 필요", FAILED: "실패" };
 const RUN_STATUS_TONE: Record<string, string> = { QUEUED: "PENDING", RUNNING: "PENDING", COMPLETED: "ACTIVE", REVIEW_REQUIRED: "PENDING", FAILED: "REJECTED" };
 
 function percent(value: number, total: number): number {
@@ -319,7 +319,13 @@ export default function WorkflowPage() {
           <button className="btn-primary" type="button" disabled={busy !== null || !!activeRunId || !deviceOnline || (DEFAULT_CONTENT_STANDARD.requireCodex && !codexReady) || !allLinksReady || channels.length === 0 || !brief.audience.trim()} onClick={async () => {
             setBusy("generate");
             try {
-              const result = await requestGenerateBatch({ productIds: selectedProducts.map((product) => product._id as Id<"products">), channels, brief: normalizeContentBrief(brief), standard: draftStandard });
+              const result = await requestGenerateBatch({
+                productIds: selectedProducts.map((product) => product._id as Id<"products">),
+                channels,
+                brief: normalizeContentBrief(brief),
+                standard: draftStandard,
+                clientRequestId: crypto.randomUUID(),
+              });
               selectRun(result.runId);
               setMsg(`상품 ${result.total}개의 제작 실행을 등록했습니다. 실행별 진행률과 품질 통과 수를 아래에서 확인하세요.`);
             } catch (error) {
@@ -336,6 +342,12 @@ export default function WorkflowPage() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2"><h3 id="run-progress-title" className="text-sm font-semibold">현재 제작 실행</h3><Badge value={RUN_STATUS_TONE[activeRun.status] ?? "PENDING"} label={RUN_STATUS_LABEL[activeRun.status] ?? activeRun.status} /></div>
               <time className="text-xs text-stone-500" dateTime={new Date(activeRun.createdAt).toISOString()}>{dateTime(activeRun.createdAt)}</time>
+            </div>
+            <div className={`mt-3 rounded-lg border p-3 text-sm ${activeRun.status === "COMPLETED" ? "border-emerald-200 bg-emerald-50 text-emerald-950" : activeRun.status === "FAILED" ? "border-rose-200 bg-rose-50 text-rose-950" : activeRun.status === "REVIEW_REQUIRED" ? "border-amber-200 bg-amber-50 text-amber-950" : "border-stone-200 bg-stone-50 text-stone-700"}`} role="status" aria-live="polite">
+              {activeRun.status === "COMPLETED" && <p><strong>검토와 사람 승인이 완료됐습니다.</strong> 아직 SNS에 게시된 상태는 아니며, 먼저 테스트 게시로 연결을 확인할 수 있습니다.</p>}
+              {activeRun.status === "REVIEW_REQUIRED" && <p><strong>제작은 끝났지만 재검토가 필요합니다.</strong> 자동 기준 미통과 또는 사람 미승인 결과가 있어 현재 실행으로는 게시할 수 없습니다. 아래 카드에서 수정·승인을 완료하세요.</p>}
+              {activeRun.status === "FAILED" && <p><strong>제작 실행에 실패했습니다.</strong> 성공 결과와 실패 결과를 구분해 확인하고, 원인을 해결한 뒤 같은 기준으로 새 실행을 준비하세요.</p>}
+              {["QUEUED", "RUNNING"].includes(activeRun.status) && <p><strong>아직 게시 준비 상태가 아닙니다.</strong> 모든 결과의 자동 기준 검사와 사람 승인이 끝날 때까지 기다리세요.</p>}
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
               <div className="rounded-lg bg-stone-50 p-2"><span className="block text-xs text-stone-500">예상 결과</span><strong className="tabular-nums">{expectedOutputs}</strong></div>
@@ -378,7 +390,7 @@ export default function WorkflowPage() {
           {selectedPieces.map((piece) => {
             const link = piece.productId ? linkByProduct.get(piece.productId) : undefined;
             const publishHref = `/dashboard/publish?piece=${piece._id}${link ? `&link=${link._id}` : ""}&dryRun=1`;
-            return <PieceCard key={piece._id} p={piece} publishHref={publishHref} publishingDisabledReason={activeRun && !runReadyToPublish ? "현재 실행의 전체 결과 검토가 끝나지 않았습니다" : undefined} onApprove={() => runPieceAction(() => approve({ pieceId: piece._id }), "콘텐츠를 승인했습니다.")} onReject={(reason) => runPieceAction(() => reject({ pieceId: piece._id, reason }), "콘텐츠를 폐기했습니다.")} onEdit={(value) => runPieceAction(() => edit({ pieceId: piece._id, ...value }), "콘텐츠를 수정하고 품질을 다시 확인했습니다.")} />;
+            return <PieceCard key={piece._id} p={piece} publishHref={publishHref} publishingDisabledReason={activeRun && !runReadyToPublish ? "현재 실행의 전체 결과 검토가 끝나지 않았습니다" : undefined} onApprove={(reviewChecklist) => runPieceAction(() => approve({ pieceId: piece._id, ...(piece.productionMeta?.outputHash ? { expectedOutputHash: piece.productionMeta.outputHash } : {}), reviewChecklist }), "콘텐츠를 승인했습니다.")} onReject={(reason) => runPieceAction(() => reject({ pieceId: piece._id, reason }), "콘텐츠를 폐기했습니다.")} onEdit={(value) => runPieceAction(() => edit({ pieceId: piece._id, ...value }), "콘텐츠를 수정하고 품질을 다시 확인했습니다.")} />;
           })}
         </div>
       </section>

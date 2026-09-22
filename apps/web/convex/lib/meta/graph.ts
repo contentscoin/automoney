@@ -1,4 +1,5 @@
-import { LONG_LIVED_TTL_MS, META_SCOPES, MetaApiError, type MetaAdapter, type MetaInsights, type MetaPlatform, type MetaProfile, type MetaPublishInput, type MetaPublishResult, type MetaTokens } from "./adapter";
+import { guessMediaKind } from "@automoney/shared";
+import { LONG_LIVED_TTL_MS, META_SCOPES, MetaApiError, type MetaAdapter, type MetaInsights, type MetaProfile, type MetaPublishResult, type MetaTokens } from "./adapter";
 
 /**
  * 실 Graph API 어댑터. Threads API(graph.threads.net) · Instagram API with Instagram Login(graph.instagram.com).
@@ -6,11 +7,39 @@ import { LONG_LIVED_TTL_MS, META_SCOPES, MetaApiError, type MetaAdapter, type Me
  */
 const THREADS = "https://graph.threads.net/v1.0";
 const IG = "https://graph.instagram.com/v21.0";
+const GRAPH_FETCH_TIMEOUT_MS = 30_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+async function verifiedPermalink(url: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(attempt * 1_000);
+    const info = await call<{ permalink?: string }>(url).catch(() => null);
+    if (typeof info?.permalink === "string" && info.permalink.trim()) return info.permalink;
+  }
+  return null;
+}
+
 async function call<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(url, init);
-  const body = (await res.json().catch(() => ({}))) as { error?: { code?: number; type?: string; message?: string; error_subcode?: number } } & T;
+  const controller = new AbortController();
+  const relayAbort = () => controller.abort();
+  if (init.signal?.aborted) controller.abort();
+  else init.signal?.addEventListener("abort", relayAbort, { once: true });
+  const timeout = setTimeout(() => controller.abort(), GRAPH_FETCH_TIMEOUT_MS);
+  let res: Response;
+  let body: { error?: { code?: number; type?: string; message?: string; error_subcode?: number } } & T;
+  try {
+    res = await fetch(url, { ...init, signal: controller.signal });
+    // Keep the same deadline through response-body consumption; fetch can
+    // resolve after headers while a stalled body would otherwise hang forever.
+    body = (await res.json().catch(() => ({}))) as typeof body;
+  } catch (error) {
+    if (controller.signal.aborted || (error as { name?: string } | null)?.name === "AbortError")
+      throw new MetaApiError("META_PUBLISH_FAILED", "graph api request timed out", true);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    init.signal?.removeEventListener("abort", relayAbort);
+  }
   if (!res.ok || body.error) {
     const e = body.error ?? {};
     const msg = `${e.type ?? res.status}: ${e.message ?? "graph api error"}`;
@@ -54,7 +83,8 @@ export function createGraphAdapter(cfg: { appId: string; appSecret: string }): M
       const r = await call<{ id?: string; user_id?: string; username?: string }>(url);
       return { providerUserId: String(r.id ?? r.user_id), username: r.username ?? null };
     },
-    async publish(accessToken, profile, input): Promise<MetaPublishResult> {
+    async publish(accessToken, profile, input, beforeCommit): Promise<MetaPublishResult> {
+      if (input.mediaUrls.length > 1) throw new MetaApiError("META_PUBLISH_FAILED", "Meta API adapter supports at most one media item");
       const text = input.linkUrl && !input.text.includes(input.linkUrl) ? `${input.text}\n${input.linkUrl}` : input.text;
       if (input.platform === "THREADS") {
         const media = input.mediaUrls[0];
@@ -64,13 +94,18 @@ export function createGraphAdapter(cfg: { appId: string; appSecret: string }): M
         if (kind === "VIDEO") params.video_url = media!;
         const c = await call<{ id: string }>(`${THREADS}/${profile.providerUserId}/threads`, form(params));
         if (kind === "VIDEO") await sleep(15_000);
+        await beforeCommit?.();
         const p = await call<{ id: string }>(`${THREADS}/${profile.providerUserId}/threads_publish`, form({ creation_id: c.id, access_token: accessToken }));
-        const info = await call<{ permalink?: string }>(`${THREADS}/${p.id}?fields=permalink&access_token=${accessToken}`).catch(() => ({ permalink: undefined }));
-        return { externalPostId: p.id, postUrl: info.permalink ?? `https://www.threads.net/@${profile.username ?? ""}/post/${p.id}` };
+        const postUrl = await verifiedPermalink(`${THREADS}/${p.id}?fields=permalink&access_token=${accessToken}`);
+        return { externalPostId: p.id, postUrl };
       }
       if (input.mediaUrls.length === 0) throw new MetaApiError("META_PUBLISH_FAILED", "instagram requires media");
       const media = input.mediaUrls[0]!;
-      const isVideo = /\.(mp4|mov)(\?|$)/i.test(media);
+      const mediaKind = guessMediaKind(media);
+      if (input.contentChannel === "INSTAGRAM_FEED" && mediaKind !== "image") throw new MetaApiError("META_PUBLISH_FAILED", "Instagram feed requires a verifiable image URL");
+      if (input.contentChannel === "INSTAGRAM_REEL" && mediaKind !== "video") throw new MetaApiError("META_PUBLISH_FAILED", "Instagram Reel requires a verifiable video URL");
+      if (input.contentChannel !== "INSTAGRAM_FEED" && input.contentChannel !== "INSTAGRAM_REEL") throw new MetaApiError("META_PUBLISH_FAILED", "Instagram publish channel is required");
+      const isVideo = mediaKind === "video";
       const params: Record<string, string> = { caption: text, access_token: accessToken };
       if (isVideo) {
         params.media_type = "REELS";
@@ -85,9 +120,10 @@ export function createGraphAdapter(cfg: { appId: string; appSecret: string }): M
           await sleep(5000);
         }
       }
+      await beforeCommit?.();
       const p = await call<{ id: string }>(`${IG}/${profile.providerUserId}/media_publish`, form({ creation_id: c.id, access_token: accessToken }));
-      const info = await call<{ permalink?: string }>(`${IG}/${p.id}?fields=permalink&access_token=${accessToken}`).catch(() => ({ permalink: undefined }));
-      return { externalPostId: p.id, postUrl: info.permalink ?? `https://www.instagram.com/p/${p.id}/` };
+      const postUrl = await verifiedPermalink(`${IG}/${p.id}?fields=permalink&access_token=${accessToken}`);
+      return { externalPostId: p.id, postUrl };
     },
     async insights(platform, accessToken, externalPostId): Promise<MetaInsights> {
       const metrics = platform === "THREADS" ? "views,likes,replies,reposts,shares" : "impressions,reach,likes,comments,saved,shares";

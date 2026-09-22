@@ -1,7 +1,7 @@
 import type { Doc } from "./_generated/dataModel";
 import { v } from "convex/values";
-import { generateCode, normalizeCode, PAIR_CODE_TTL_MS } from "@automoney/shared";
-import { internalMutation, internalQuery, mutation, query, type QueryCtx } from "./_generated/server";
+import { generateCode, normalizeCode, PAIR_CODE_TTL_MS, type PublishPayload } from "@automoney/shared";
+import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { sha256Hex } from "./lib/crypto";
 import { fail } from "./lib/errors";
@@ -9,6 +9,84 @@ import { requireUser } from "./lib/rbac";
 import { enqueueJob } from "./jobs";
 
 const PAIR_CODE_LENGTH = 8;
+
+async function stopJobsOwnedByDevice(
+  ctx: MutationCtx,
+  userId: Doc<"users">["_id"],
+  deviceId: Doc<"devices">["_id"],
+  reason: "device_replaced" | "device_revoked",
+  now: number,
+) {
+  const running = await ctx.db.query("agentJobs").withIndex("by_user_status", (q) => q.eq("userId", userId).eq("status", "RUNNING")).collect();
+  for (const job of running) {
+    if (job.claimedByDeviceId !== deviceId) continue;
+    if (job.jobType === "post.publish") {
+      const reservation = await ctx.db.query("publishReservations").withIndex("by_root", (q) => q.eq("rootJobId", job.rootJobId ?? job._id)).unique();
+      const payload = job.payload as PublishPayload;
+      const resultMayBeExternal = payload.dryRun !== true
+        && job.publishPhase === "INTENT_RECORDED"
+        && reservation?.state === "RESERVED";
+      await ctx.db.patch(job._id, {
+        status: "FAILED",
+        publishPhase: resultMayBeExternal ? "UNCERTAIN" : "PREPARING",
+        errorCode: resultMayBeExternal ? "AGENT_LOST_UNCERTAIN" : "AGENT_LOST_BEFORE_PUBLISH",
+        errorMessage: resultMayBeExternal
+          ? (reason === "device_replaced"
+              ? "게시 승인 이후 디바이스가 교체되었습니다. 실제 게시 여부를 확인하세요."
+              : "게시 승인 이후 디바이스 연결이 해제되었습니다. 실제 게시 여부를 확인하세요.")
+          : "외부 게시 승인 전에 디바이스 연결이 종료되어 게시하지 않았습니다.",
+        stage: `${resultMayBeExternal ? "uncertain" : "failed"}:${reason}`,
+        finishedAt: now,
+        updatedAt: now,
+      });
+      if (reservation && reservation.state !== "COMMITTED") await ctx.db.patch(reservation._id, { state: resultMayBeExternal ? "UNCERTAIN" : "RELEASED" });
+    } else if (job.spaceId) {
+      await ctx.db.patch(job._id, {
+        status: "FAILED",
+        errorCode: reason === "device_replaced" ? "DEVICE_REPLACED_BEFORE_RUN" : "DEVICE_REVOKED_BEFORE_RUN",
+        errorMessage: "이 작업의 브라우저 프로필을 보유한 디바이스 연결이 종료되었습니다. 새 스페이스에서 다시 요청하세요.",
+        stage: `failed:${reason}`,
+        finishedAt: now,
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.patch(job._id, {
+        status: "QUEUED",
+        deviceId: undefined,
+        claimedByDeviceId: undefined,
+        leaseUntil: undefined,
+        leaseTokenHash: undefined,
+        stage: `requeued:${reason}`,
+        updatedAt: now,
+      });
+    }
+    if (job.spaceId) {
+      const space = await ctx.db.get(job.spaceId);
+      if (space?.lockJobId === job._id) {
+        await ctx.db.patch(space._id, {
+          lockJobId: undefined,
+          sessionState: space.sessionState === "RUNNING" ? "HEALTHY" : space.sessionState,
+        });
+      }
+    }
+  }
+  const spaces = await ctx.db.query("spaces").withIndex("by_device", (q) => q.eq("deviceId", deviceId)).collect();
+  for (const space of spaces) {
+    await ctx.db.patch(space._id, { sessionState: "PAUSED", lockJobId: undefined, lastError: "연결된 디바이스가 교체되거나 해제되었습니다." });
+    const jobs = await ctx.db.query("agentJobs").withIndex("by_space", (q) => q.eq("spaceId", space._id)).collect();
+    for (const job of jobs) {
+      if (job.status !== "QUEUED" && job.status !== "NEEDS_APPROVAL") continue;
+      await ctx.db.patch(job._id, {
+        status: "FAILED",
+        errorCode: reason === "device_replaced" ? "DEVICE_REPLACED_BEFORE_RUN" : "DEVICE_REVOKED_BEFORE_RUN",
+        errorMessage: "이 작업의 브라우저 프로필을 보유한 디바이스 연결이 종료되었습니다. 새 스페이스에서 다시 요청하세요.",
+        stage: `failed:${reason}`,
+        finishedAt: now,
+        updatedAt: now,
+      });
+    }
+  }
+}
 
 /** 유저: 페어링 코드 발급 (10분 유효, 1회용). 코드는 해시만 저장. */
 export const createPairCode = mutation({
@@ -41,12 +119,7 @@ export const pair = mutation({
     const actives = await ctx.db.query("devices").withIndex("by_user", (q) => q.eq("userId", pc.userId).eq("status", "ACTIVE")).collect();
     for (const d of actives) {
       await ctx.db.patch(d._id, { status: "REPLACED" });
-      const running = await ctx.db.query("agentJobs").withIndex("by_user_status", (q) => q.eq("userId", pc.userId).eq("status", "RUNNING")).collect();
-      for (const j of running) {
-        if (j.claimedByDeviceId === d._id) {
-          await ctx.db.patch(j._id, { status: "QUEUED", claimedByDeviceId: undefined, leaseUntil: undefined, stage: "requeued:device_replaced", updatedAt: now });
-        }
-      }
+      await stopJobsOwnedByDevice(ctx, pc.userId, d._id, "device_replaced", now);
     }
     const rawToken = `${generateCode(20)}${generateCode(23)}`;
     const deviceId = await ctx.db.insert("devices", {
@@ -95,8 +168,7 @@ export const revoke = mutation({
     const d = await ctx.db.get(args.deviceId);
     if (!d || d.userId !== user._id) fail("NOT_FOUND", "디바이스를 찾을 수 없습니다.");
     await ctx.db.patch(d._id, { status: "REVOKED" });
-    const running = await ctx.db.query("agentJobs").withIndex("by_user_status", (q) => q.eq("userId", user._id).eq("status", "RUNNING")).collect();
-    for (const j of running) if (j.claimedByDeviceId === d._id) await ctx.db.patch(j._id, { status: "QUEUED", claimedByDeviceId: undefined, leaseUntil: undefined, updatedAt: Date.now() });
+    await stopJobsOwnedByDevice(ctx, user._id, d._id, "device_revoked", Date.now());
     await audit(ctx, { actorUserId: user._id, action: "device.revoke", metadata: { deviceId: d._id } });
   },
 });

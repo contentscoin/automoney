@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_CONTENT_STANDARD } from "@automoney/shared";
 import { api, internal } from "../convex/_generated/api";
+import { frozenProductionStandard } from "../convex/content";
+import { consumePiece } from "../convex/lib/pieces";
 import { parseTrendsRss } from "../convex/lib/search/provider";
 import { makeT, seedProduct, setRole, signup, type T } from "./helpers";
 
@@ -24,9 +27,10 @@ const RSS = `<?xml version="1.0"?><rss xmlns:ht="https://trends.google.com/trend
 
 async function pairDevice(t: T, user: Awaited<ReturnType<typeof signup>>) {
   const { code } = await user.as.mutation(api.devices.createPairCode, {});
-  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.11" });
+  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.13" });
 }
 const authed = (token: string, init: RequestInit = {}) => ({ ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, "content-type": "application/json" } });
+const REVIEW_CHECKLIST = { productFacts: true, adDisclosure: true, mediaRightsAndFit: true, finalCopy: true } as const;
 
 async function setup() {
   const t = makeT();
@@ -87,6 +91,139 @@ describe("magazines", () => {
 });
 
 describe("content generation gate", () => {
+  it("quarantines legacy automated pieces without a V2 run even for super admins", async () => {
+    const { t, owner, p1 } = await setup();
+    const legacyPieceId = await t.run((ctx) => ctx.db.insert("contentPieces", {
+      ownerUserId: owner.userId,
+      visibility: "PRIVATE",
+      productId: p1,
+      channel: "THREADS",
+      caption: "이전 자동 생성 콘텐츠",
+      hashtags: ["광고"],
+      mediaUrls: [],
+      qualityScore: 100,
+      qualityReport: { violations: [], fixed: [] },
+      status: "APPROVED",
+      generatedBy: "codex",
+      usageCount: 0,
+      createdAt: Date.now(),
+    }));
+    await expect(owner.as.mutation(api.content.setVisibility, { pieceId: legacyPieceId, visibility: "SHARED" }))
+      .rejects.toThrow(/이전 품질 계약/);
+    await expect(owner.as.mutation(api.content.edit, {
+      pieceId: legacyPieceId,
+      caption: "편집으로 출처를 세탁하면 안 되는 이전 자동 생성 콘텐츠",
+      hashtags: ["광고"],
+      mediaUrls: [],
+    })).rejects.toThrow(/이전 품질 계약/);
+    await expect(t.run((ctx) => consumePiece(ctx, owner.userId, legacyPieceId, "SUPER_ADMIN")))
+      .rejects.toThrow(/이전 품질 계약/);
+    await t.run((ctx) => ctx.db.patch(legacyPieceId, { status: "DRAFT" }));
+    await expect(owner.as.mutation(api.content.approve, { pieceId: legacyPieceId }))
+      .rejects.toThrow(/이전 품질 계약/);
+  });
+
+  it("binds shared manual pieces to their exact revision and unshares every edit", async () => {
+    const { t, owner } = await setup();
+    const viewer = await signup(t, "shared-manual-viewer@test.com");
+    const { deviceToken } = await pairDevice(t, viewer);
+    const createdSpace = await viewer.as.mutation(api.spaces.create, { platform: "THREADS", name: "공유 콘텐츠 게시", handle: "shared_manual" });
+    await t.run(async (ctx) => {
+      await ctx.db.patch(createdSpace.spaceId, { sessionState: "HEALTHY", handle: "shared_manual" });
+      await ctx.db.patch(createdSpace.jobId, { status: "SUCCEEDED", finishedAt: Date.now(), updatedAt: Date.now() });
+    });
+
+    const manual = await owner.as.mutation(api.content.createManual, {
+      channel: "THREADS",
+      caption: "가을 원피스로 완성하는 데일리 코디가 궁금하다면? 소재와 핏 정보를 상품 링크에서 자세히 확인해 보세요.",
+      hashtags: ["광고", "데일리룩", "원피스"],
+      mediaUrls: [],
+    });
+    if (manual.status === "DRAFT") await owner.as.mutation(api.content.approve, { pieceId: manual.pieceId });
+    await owner.as.mutation(api.content.setVisibility, { pieceId: manual.pieceId, visibility: "SHARED" });
+    expect((await viewer.as.query(api.content.listLibrary, {})).map((piece) => piece._id)).toContain(manual.pieceId);
+
+    await expect(viewer.as.mutation(api.jobs.enqueuePublish, {
+      spaceId: createdSpace.spaceId,
+      pieceId: manual.pieceId,
+      text: "공유 조각과 무관한 본문",
+      mediaUrls: [],
+    })).rejects.toThrow(/승인된 revision/);
+    await expect(viewer.as.mutation(api.schedules.upsert, {
+      spaceId: createdSpace.spaceId,
+      kind: "DAILY",
+      timeOfDay: "10:00",
+      daysOfWeek: [],
+      jitterMinutes: 0,
+      pieceId: manual.pieceId,
+      text: "공유 조각과 무관한 예약 본문",
+      mediaUrls: [],
+      autoApprove: false,
+    })).rejects.toThrow(/승인된 revision/);
+
+    const publishJobId = await viewer.as.mutation(api.jobs.enqueuePublish, {
+      spaceId: createdSpace.spaceId,
+      pieceId: manual.pieceId,
+      text: "",
+      mediaUrls: [],
+    });
+    const schedule = await viewer.as.mutation(api.schedules.upsert, {
+      spaceId: createdSpace.spaceId,
+      kind: "DAILY",
+      timeOfDay: "10:00",
+      daysOfWeek: [],
+      jitterMinutes: 0,
+      pieceId: manual.pieceId,
+      text: "",
+      mediaUrls: [],
+      autoApprove: false,
+    });
+    const storedJob = await t.run((ctx) => ctx.db.get(publishJobId));
+    expect((storedJob!.payload as { pieceOutputHash?: string }).pieceOutputHash).toMatch(/^[a-f0-9]{64}$/);
+    expect((storedJob!.payload as { pieceSnapshotHash?: string }).pieceSnapshotHash).toMatch(/^[a-f0-9]{64}$/);
+
+    const edited = await owner.as.mutation(api.content.edit, {
+      pieceId: manual.pieceId,
+      caption: "수정된 가을 원피스 코디입니다. 소재와 핏 정보는 상품 링크에서 자세히 확인해 보세요.",
+      hashtags: ["광고", "데일리룩", "원피스"],
+      mediaUrls: [],
+    });
+    if (edited.status === "DRAFT") await owner.as.mutation(api.content.approve, { pieceId: manual.pieceId });
+    expect(await owner.as.query(api.content.getPiece, { pieceId: manual.pieceId })).toMatchObject({ visibility: "PRIVATE", status: "APPROVED" });
+    expect((await viewer.as.query(api.content.listLibrary, {})).map((piece) => piece._id)).not.toContain(manual.pieceId);
+    await expect(t.run((ctx) => consumePiece(ctx, viewer.userId, manual.pieceId, "USER"))).rejects.toThrow(/접근/);
+
+    await owner.as.mutation(api.content.setVisibility, { pieceId: manual.pieceId, visibility: "SHARED" });
+    const due = (await t.run((ctx) => ctx.db.get(schedule.scheduleId)))!.nextRunAt!;
+    expect(await t.mutation(internal.schedules.tick, { now: due + 1 })).toMatchObject({ created: 0, skipped: 1 });
+    expect((await viewer.as.query(api.schedules.listMine, {}))[0]).toMatchObject({ lastSkipReason: "CONTENT_REVISION_CHANGED" });
+
+    await viewer.as.mutation(api.jobs.approve, { jobId: publishJobId });
+    const claim = (await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json()).data;
+    expect(claim.id).toBe(publishJobId);
+    const preflight = await t.fetch(`/agent/jobs/${publishJobId}/preflight`, authed(deviceToken, {
+      method: "POST",
+      body: JSON.stringify({ attemptNo: claim.attemptNo, leaseToken: claim.leaseToken }),
+    }));
+    expect(preflight.status).toBe(409);
+    expect((await preflight.json()).error.code).toBe("CONTENT_REVISION_CHANGED");
+  });
+
+  it("uses an exact frozen standard and blocks unknown contract versions", () => {
+    const frozen = frozenProductionStandard({
+      ...DEFAULT_CONTENT_STANDARD,
+      minScore: 99,
+      maxEmoji: 1,
+      forbiddenPhrases: [...DEFAULT_CONTENT_STANDARD.forbiddenPhrases, "테스트 금칙어"],
+    });
+    expect(frozen).toMatchObject({ minScore: 99, maxEmoji: 1 });
+    expect(frozen.forbiddenPhrases).toContain("테스트 금칙어");
+    expect(() => frozenProductionStandard({
+      ...DEFAULT_CONTENT_STANDARD,
+      qualityVersion: "content-quality/999.0.0",
+    })).toThrow(/지원하지 않는/);
+  });
+
   it("queues one generation job per selected product in a batch", async () => {
     const { t, owner, p1, p2 } = await setup();
     await pairDevice(t, owner);
@@ -117,6 +254,24 @@ describe("content generation gate", () => {
     expect((await owner.as.query(api.content.listRuns, {})).map((item) => item._id)).toContain(result.runId);
     await expect(owner.as.mutation(api.content.requestGenerateBatch, { productIds: [], channels: ["THREADS"] })).rejects.toThrow(/하나 이상/);
     await expect(owner.as.mutation(api.content.requestGenerateBatch, { productIds: Array(11).fill(p1), channels: ["THREADS"] })).rejects.toThrow(/최대 10개/);
+  });
+
+  it("deduplicates a retried batch request by client request id", async () => {
+    const { t, owner, p1 } = await setup();
+    await pairDevice(t, owner);
+    const input = {
+      productIds: [p1],
+      channels: ["THREADS" as const],
+      clientRequestId: "request_retry_1234",
+    };
+    const first = await owner.as.mutation(api.content.requestGenerateBatch, input);
+    const second = await owner.as.mutation(api.content.requestGenerateBatch, input);
+    expect(second).toEqual(first);
+    await expect(owner.as.mutation(api.content.requestGenerateBatch, { ...input, channels: ["X"] })).rejects.toThrow(/IDEMPOTENCY_CONFLICT/);
+    const runs = await owner.as.query(api.content.listRuns, {});
+    expect(runs.filter((run) => run._id === first.runId)).toHaveLength(1);
+    const jobs = await owner.as.query(api.jobs.listMine, { limit: 10 });
+    expect(jobs.filter((job) => first.jobIds.includes(job._id))).toHaveLength(1);
   });
 
   it("freezes the production standard and keeps template output in review", async () => {
@@ -197,7 +352,7 @@ describe("content generation gate", () => {
         provider: "template",
         attemptNo: 2,
         inputHash: queued.inputHash,
-        desktopVersion: "0.1.11",
+        desktopVersion: "0.1.13",
         provenanceComplete: true,
       },
     });
@@ -313,8 +468,28 @@ describe("content generation gate", () => {
       status: "REVIEW_REQUIRED",
     });
     const [piece] = await owner.as.query(api.content.listRunPieces, { runId: requested.runId });
-    expect(piece).toMatchObject({ status: "DRAFT", mediaUrls: [], productionMeta: { standardPassed: true } });
-    await owner.as.mutation(api.content.approve, { pieceId: piece!._id });
+    expect(piece).toMatchObject({
+      status: "DRAFT",
+      mediaUrls: [],
+      productionMeta: { standardPassed: true },
+      productEvidence: { name: "테스트 상품 100001", frozen: true, source: "MOCK" },
+    });
+    await expect(owner.as.mutation(api.content.approve, { pieceId: piece!._id, expectedOutputHash: "stale-review" }))
+      .rejects.toThrow(/변경/);
+    await expect(owner.as.mutation(api.content.approve, { pieceId: piece!._id, expectedOutputHash: piece!.productionMeta.outputHash }))
+      .rejects.toThrow(/모두 확인/);
+    await owner.as.mutation(api.content.approve, { pieceId: piece!._id, expectedOutputHash: piece!.productionMeta.outputHash, reviewChecklist: REVIEW_CHECKLIST });
+    const reviewEvents = await t.run((ctx) => ctx.db
+      .query("contentReviewEvents")
+      .withIndex("by_piece", (q) => q.eq("pieceId", piece!._id))
+      .collect());
+    expect(reviewEvents).toHaveLength(1);
+    expect(reviewEvents[0]).toMatchObject({
+      action: "APPROVED",
+      outputHash: piece!.productionMeta.outputHash,
+      reviewChecklist: REVIEW_CHECKLIST,
+      snapshot: { caption: piece!.caption, channel: "THREADS" },
+    });
     expect(await owner.as.query(api.content.getRun, { runId: requested.runId })).toMatchObject({
       expectedOutputs: 1,
       completedJobs: 1,
@@ -357,10 +532,11 @@ describe("content generation gate", () => {
     // 금칙 위반 조각은 유저가 승인 불가, 수정 후 승인 가능
     await expect(user.as.mutation(api.content.approve, { pieceId: x._id })).rejects.toThrow(/금칙/);
     await user.as.mutation(api.content.edit, { pieceId: x._id, caption: "테스트 상품 100001 원피스 셀렉션을 상품 링크에서 자세히 확인하세요", hashtags: ["광고", "니트"] });
-    expect((await user.as.query(api.content.getPiece, { pieceId: x._id })).status).toBe("DRAFT");
-    await user.as.mutation(api.content.approve, { pieceId: x._id });
+    const editedX = await user.as.query(api.content.getPiece, { pieceId: x._id });
+    expect(editedX.status).toBe("DRAFT");
+    await user.as.mutation(api.content.approve, { pieceId: x._id, expectedOutputHash: editedX.productionMeta.outputHash, reviewChecklist: REVIEW_CHECKLIST });
     expect((await user.as.query(api.content.getPiece, { pieceId: x._id })).status).toBe("APPROVED");
-    await user.as.mutation(api.content.approve, { pieceId: threads._id });
+    await user.as.mutation(api.content.approve, { pieceId: threads._id, expectedOutputHash: threads.productionMeta.outputHash, reviewChecklist: REVIEW_CHECKLIST });
     expect(await user.as.query(api.content.getRun, { runId: threads.runId! })).toMatchObject({ status: "COMPLETED", approvedOutputs: 2 });
     // 중복 ingest 방지
     expect(await t.mutation(internal.content.ingestGenerated, { jobId })).toMatchObject({ saved: 0, duplicate: true });
@@ -374,7 +550,10 @@ describe("content generation gate", () => {
     expect(otherLib.map((p) => p._id)).toEqual([threads._id]);
     const copied = await other.as.mutation(api.content.copyToMine, { pieceId: threads._id });
     const copiedPiece = await other.as.query(api.content.getPiece, { pieceId: copied.pieceId });
-    expect(copiedPiece).toMatchObject({ mine: true, visibility: "PRIVATE", status: "APPROVED", generatedBy: "manual" });
+    expect(copiedPiece).toMatchObject({ mine: true, visibility: "PRIVATE", status: "DRAFT", generatedBy: "codex", runId: threads.runId });
+    await expect(other.as.mutation(api.content.approve, { pieceId: copied.pieceId })).rejects.toThrow(/검토|확인/);
+    await other.as.mutation(api.content.approve, { pieceId: copied.pieceId, expectedOutputHash: copiedPiece.productionMeta.outputHash, reviewChecklist: REVIEW_CHECKLIST });
+    expect((await other.as.query(api.content.getPiece, { pieceId: copied.pieceId })).status).toBe("APPROVED");
 
     const manual = await other.as.mutation(api.content.createManual, {
       channel: "X",
@@ -383,6 +562,16 @@ describe("content generation gate", () => {
       mediaUrls: [],
     });
     expect(manual.status).toBe("DRAFT");
+    await expect(owner.as.mutation(api.content.approve, { pieceId: manual.pieceId })).rejects.toThrow(/금칙/);
+    const shortForm = await other.as.mutation(api.content.createManual, {
+      channel: "INSTAGRAM_REEL",
+      caption: "테스트 상품 100001 스타일을 상품 링크에서 확인하세요",
+      hashtags: ["광고", "데일리룩"],
+      script: "0-3초 상품 소개 장면\n3-7초 스타일 포인트 장면\n7-12초 상품 링크 확인 장면",
+      mediaUrls: ["https://cdn.example.com/product.jpg"],
+    });
+    expect(shortForm.status).toBe("DRAFT");
+    await expect(other.as.mutation(api.content.approve, { pieceId: shortForm.pieceId })).rejects.toThrow(/미디어 요건/);
     await expect(other.as.mutation(api.content.createManual, {
       channel: "THREADS",
       caption: "   ",
@@ -397,22 +586,39 @@ describe("content generation gate", () => {
     })).rejects.toThrow(/HTTPS/);
 
     // 거절 → RETIRED + 사유 기록
+    await expect(user.as.mutation(api.content.reject, { pieceId: x._id, reason: "   " })).rejects.toThrow(/사유/);
     await user.as.mutation(api.content.reject, { pieceId: x._id, reason: "톤이 안 맞음" });
+    await expect(user.as.mutation(api.content.reject, { pieceId: x._id, reason: "중복" })).rejects.toThrow(/이미 폐기/);
     expect((await user.as.query(api.content.listLibrary, {})).some((p) => p._id === x._id)).toBe(false);
     const stats = await owner.as.query(api.content.rejectionStats, {});
     expect(stats.total).toBe(1);
+    expect(await user.as.query(api.content.getRun, { runId: threads.runId! })).toMatchObject({ status: "REVIEW_REQUIRED", approvedOutputs: 1 });
+    await expect(user.as.mutation(api.content.approve, { pieceId: x._id, expectedOutputHash: x.productionMeta.outputHash, reviewChecklist: REVIEW_CHECKLIST }))
+      .rejects.toThrow(/초안만 승인/);
+    // 폐기 결과를 되살리려면 수정으로 새 revision을 만든 뒤 다시 검토해야 한다.
+    const rejectedX = await user.as.query(api.content.getPiece, { pieceId: x._id });
+    await user.as.mutation(api.content.edit, {
+      pieceId: x._id,
+      caption: rejectedX.caption,
+      hashtags: rejectedX.hashtags,
+      script: rejectedX.script ?? undefined,
+      mediaUrls: rejectedX.mediaUrls,
+    });
+    const revisedX = await user.as.query(api.content.getPiece, { pieceId: x._id });
+    await user.as.mutation(api.content.approve, { pieceId: x._id, expectedOutputHash: revisedX.productionMeta.outputHash, reviewChecklist: REVIEW_CHECKLIST });
 
     // pieceId 로 발행 잡 채우기(SHARED 조각을 타 유저가 사용, 실제 게시 성공 때만 usageCount 증가)
     const { deviceToken: otherToken } = await pairDevice(t, other);
     const { spaceId, jobId: createJob } = await other.as.mutation(api.spaces.create, { platform: "THREADS", name: "메인" });
     await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "준비 전 게시", mediaUrls: [] })).rejects.toThrow(/정상 상태/);
     await t.fetch("/agent/claim", authed(otherToken, { method: "POST", body: "{}" }));
-    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(otherToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY" } }) }));
+    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(otherToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY", handle: "demo" } }) }));
     const matchingLink = await other.as.action(api.links.issue, { productId: p1 });
     const mismatchedLink = await other.as.action(api.links.issue, { productId: p2 });
     const links = await other.as.query(api.links.listMine, {});
     const matchingLinkId = links.find((link) => link.shortCode === matchingLink.shortCode)!._id;
     const mismatchedLinkId = links.find((link) => link.shortCode === mismatchedLink.shortCode)!._id;
+    await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "승인되지 않은 덮어쓰기", mediaUrls: [], pieceId: threads._id, linkId: matchingLinkId })).rejects.toThrow(/승인된 revision/);
     await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: threads._id, linkId: mismatchedLinkId })).rejects.toThrow(/상품.*일치/);
     await other.as.mutation(api.links.setStatus, { linkId: matchingLinkId, status: "DISABLED" });
     await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: threads._id, linkId: matchingLinkId })).rejects.toThrow(/활성 상태/);
@@ -421,13 +627,18 @@ describe("content generation gate", () => {
     const job = await t.run(async (ctx) => ctx.db.get(pubJob));
     expect((job!.payload as { text: string }).text).toContain("#광고");
     expect((job!.payload as { pieceId: string }).pieceId).toBe(threads._id);
+    expect((job!.payload as { pieceOutputHash: string }).pieceOutputHash).toMatch(/^[a-f0-9]{64}$/);
+    expect((job!.payload as { pieceSnapshotHash: string }).pieceSnapshotHash).toMatch(/^[a-f0-9]{64}$/);
     expect((await user.as.query(api.content.getPiece, { pieceId: threads._id })).usageCount).toBe(0);
     await other.as.mutation(api.jobs.approve, { jobId: pubJob });
-    expect((await (await t.fetch("/agent/claim", authed(otherToken, { method: "POST", body: "{}" }))).json()).data.id).toBe(pubJob);
-    await t.fetch(`/agent/jobs/${pubJob}/complete`, authed(otherToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", result: { schema: "automoney.job-result/v1", kind: "ok", data: { postUrl: "https://threads.net/@demo/post/1" } } }) }));
+    const publishClaim = (await (await t.fetch("/agent/claim", authed(otherToken, { method: "POST", body: "{}" }))).json()).data;
+    expect(publishClaim.id).toBe(pubJob);
+    expect((await t.fetch(`/agent/jobs/${pubJob}/preflight`, authed(otherToken, { method: "POST", body: JSON.stringify({ attemptNo: publishClaim.attemptNo, leaseToken: publishClaim.leaseToken }) }))).status).toBe(200);
+    expect((await t.fetch(`/agent/jobs/${pubJob}/publish-attempt`, authed(otherToken, { method: "POST", body: JSON.stringify({ attemptNo: publishClaim.attemptNo, leaseToken: publishClaim.leaseToken }) }))).status).toBe(200);
+    await t.fetch(`/agent/jobs/${pubJob}/complete`, authed(otherToken, { method: "POST", body: JSON.stringify({ attemptNo: publishClaim.attemptNo, leaseToken: publishClaim.leaseToken, status: "SUCCEEDED", result: { schema: "automoney.job-result/v1", kind: "ok", data: { postUrl: "https://threads.net/@demo/post/1" } } }) }));
     expect((await user.as.query(api.content.getPiece, { pieceId: threads._id })).usageCount).toBe(1);
     const instagram = await other.as.mutation(api.spaces.create, { platform: "INSTAGRAM", name: "인스타" });
-    await t.run((ctx) => ctx.db.patch(instagram.spaceId, { sessionState: "HEALTHY" }));
+    await t.run((ctx) => ctx.db.patch(instagram.spaceId, { sessionState: "HEALTHY", handle: "ig_demo" }));
     await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId: instagram.spaceId, text: "", mediaUrls: [], pieceId: threads._id })).rejects.toThrow(/플랫폼/);
     const schedule = { kind: "DAILY" as const, timeOfDay: "10:00", daysOfWeek: [], jitterMinutes: 0, text: "", mediaUrls: [], autoApprove: false };
     await expect(other.as.mutation(api.schedules.upsert, { ...schedule, spaceId: instagram.spaceId, pieceId: threads._id })).rejects.toThrow(/플랫폼/);
@@ -436,9 +647,15 @@ describe("content generation gate", () => {
     await expect(other.as.mutation(api.schedules.upsert, { ...schedule, spaceId, pieceId: threads._id, linkId: matchingLinkId })).rejects.toThrow(/활성 상태/);
     await other.as.mutation(api.links.setStatus, { linkId: matchingLinkId, status: "ACTIVE" });
     const validSchedule = await other.as.mutation(api.schedules.upsert, { ...schedule, spaceId, pieceId: threads._id, linkId: matchingLinkId });
+    expect(await t.run(async (ctx) => ctx.db.get(validSchedule.scheduleId))).toMatchObject({ pieceOutputHash: (job!.payload as { pieceOutputHash: string }).pieceOutputHash });
     await other.as.mutation(api.links.setStatus, { linkId: matchingLinkId, status: "DISABLED" });
     expect(await t.mutation(internal.schedules.tick, { now: validSchedule.nextRunAt! + 1 })).toMatchObject({ created: 0, skipped: 1 });
     expect((await other.as.query(api.schedules.listMine, {}))[0]?.lastSkipReason).toBe("LINK_INACTIVE");
+    await other.as.mutation(api.links.setStatus, { linkId: matchingLinkId, status: "ACTIVE" });
+    await t.run(async (ctx) => ctx.db.patch(threads._id, { caption: `${threads.caption} 변경됨` }));
+    const revisedSchedule = (await other.as.query(api.schedules.listMine, {}))[0]!;
+    expect(await t.mutation(internal.schedules.tick, { now: revisedSchedule.nextRunAt! + 1 })).toMatchObject({ created: 0, skipped: 1 });
+    expect((await other.as.query(api.schedules.listMine, {}))[0]?.lastSkipReason).toBe("CONTENT_REVISION_CHANGED");
     await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: manual.pieceId })).rejects.toThrow();
     // 내 것도 SHARED 도 아닌 조각은 거부
     await expect(other.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "", mediaUrls: [], pieceId: x._id })).rejects.toThrow();

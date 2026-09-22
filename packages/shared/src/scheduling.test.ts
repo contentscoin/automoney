@@ -42,7 +42,10 @@ describe("validatePublishPayload", () => {
     expect(validatePublishPayload({ spaceId: "s", platform: "X", text: "x", mediaUrls: ["ftp://a"] })).toMatch(/http/);
     expect(validatePublishPayload({ spaceId: "s", platform: "X", text: "x", mediaUrls: ["http://a/1.jpg"] })).toMatch(/https/);
     expect(validatePublishPayload({ spaceId: "s", platform: "INSTAGRAM", text: "x", mediaUrls: [] })).toMatch(/requires media/);
-    expect(validatePublishPayload({ spaceId: "s", platform: "TIKTOK", text: "x", mediaUrls: ["https://a/1.jpg"] })).toMatch(/does not accept image/);
+    expect(validatePublishPayload({ spaceId: "s", platform: "TIKTOK", text: "x", mediaUrls: ["https://a/1.jpg"] })).toMatch(/requires a verifiable video/);
+    expect(validatePublishPayload({ spaceId: "s", platform: "TIKTOK", text: "x", mediaUrls: ["https://a/media"] })).toMatch(/requires a verifiable video/);
     expect(validatePublishPayload({ spaceId: "s", platform: "TIKTOK", text: "x", mediaUrls: ["https://a/1.mp4"] })).toBeNull();
+    expect(validatePublishPayload({ spaceId: "s", platform: "INSTAGRAM", contentChannel: "INSTAGRAM_REEL", text: "x", mediaUrls: ["https://a/1.jpg"] })).toMatch(/requires a verifiable video/);
+    expect(validatePublishPayload({ spaceId: "s", platform: "INSTAGRAM", contentChannel: "INSTAGRAM_REEL", text: "x", mediaUrls: ["https://a/1.mp4"] })).toBeNull();
   });
 });

@@ -92,7 +92,7 @@ Convex 추가 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELE
 - 확정 정책: 간접구매 유저 미지급(0bps), 원천징수·지급은 아뜨랑스 수행(세전 금액만 계산).
 
 ### M3a 데스크톱 에이전트 · 스페이스 · 예약 · 텔레그램 (구현)
-- 클라우드(`apps/web/convex`): `devices`(1회용 페어 코드 → 디바이스 토큰, 1유저 1활성 디바이스), `agent`(HTTP: `/agent/claim`, `/agent/jobs/:id/heartbeat|complete`, `/agent/spaces/sync`, `/agent/config`; lease 120s·하트비트 30s·스페이스 락), `jobs`(승인 대기·취소·lease 회수 크론), `spaces`(생성·핀·일시정지·일일 한도·로그인/검증 요청), `schedules`(KST 예약·지터·일일 한도·5분 틱), `telegram`(웹훅 시크릿 검증, /start 바인딩, /status /earnings /links /schedule /post /jobs, 인라인 승인 버튼, 알림).
+- 클라우드(`apps/web/convex`): `devices`(1회용 페어 코드 → 디바이스 토큰, 1유저 1활성 디바이스), `agent`(HTTP: `/agent/claim`, `/agent/jobs/:id/heartbeat|preflight|publish-attempt|publish-continuation|complete`, `/agent/spaces/sync`, `/agent/config`; lease 120s·하트비트 30s·스페이스 락), `jobs`(승인 대기·취소·lease 회수 크론), `spaces`(생성·핀·일시정지·일일 한도·로그인/검증 요청), `schedules`(KST 예약·지터·일일 한도·5분 틱), `telegram`(웹훅 시크릿 검증, /start 바인딩, /status /earnings /links /schedule /post /jobs, 인라인 승인 버튼, 알림).
 - 데스크톱(`apps/desktop`, Electron + Playwright): 트레이 + 최소 패널(페어링·상태), 딥링크 `automoney://pair?code=`, 스페이스별 격리 프로필·락·고정 지문, 오프스크린 실행, 쓰레드·X 레시피(세션 검증·게시), Codex 로그인 상태, `dist/cli.js` 로 Electron 없이 실행(`pair`, `run --once`, `status`).
 - 화면: `/dashboard/devices`, `/dashboard/spaces`, `/dashboard/jobs`, `/dashboard/schedules`, `/dashboard/telegram`.
 - 검증: `apps/desktop/scripts/e2e-agent.mjs` — 로컬 Convex 상대로 페어링 → 스페이스 생성 → 픽스처 페이지 세션 검증 → 승인 후 드라이런 게시 → 게시 URL 수집까지.
@@ -104,7 +104,7 @@ Convex 추가 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELE
 - 클라우드(`apps/web/convex`): `magazines`(수퍼어드민이 URL 또는 HTML 등록 → og·본문·이미지·`index_no` 상품 링크 추출 → 원자 HOOK/STYLE_TIP/PRODUCT_POINT/QUOTE/TREND_TIE_IN), `content`(생성 요청 → 잡 → 완료 시 `evaluatePiece` 품질 게이트: 광고 표기 자동 삽입, 금칙 주장 차단(최저가·1위·직접 착용·100%), 채널 길이·해시태그 규격, 90점 이상·차단 0 이면 자동 APPROVED 아니면 DRAFT; 라이브러리 = 내 것 + 운영 공유(SHARED); 수정·승인·거절 사유 축적; `pieceId` 로 즉시 게시·예약 채우기), `curation`(코디 제안 카드 — 매거진 테마×상품 역할 조합으로 세트 생성, 구글 트렌드 KR RSS 6시간 크론, 제품 정보 팩(카탈로그 규칙), 연예인 착용 검색은 `lib/search/provider.ts` SearchProvider 추상화 — `BRAVE_API_KEY`/`SERPAPI_KEY` 있을 때만, 출처 링크만 저장·이미지 재게시 금지 라벨, 수퍼어드민 수동 등록은 라이선스 메모 필수).
 - 데스크톱: `src/agent/codexText.ts`(codex exec 텍스트 생성), `handleContentGenerate`(프롬프트 → provider → 파싱 → 결과 봉투 `data.pieces`).
 - 화면: `/dashboard/content`(생성 요청·오늘의 매거진·라이브러리/짤/트렌드/제품정보/연예인 탭·조각 카드 → "이 콘텐츠로 게시/예약"), `/super/magazines`(매거진 등록·소재 보기·큐레이션 수동 등록·트렌드 갱신·프로바이더 상태·전체 조각 공유 관리·거절 통계), 작업·예약 화면의 라이브러리 선택. 텔레그램 `/content`.
-- 검증: shared 27 · convex-test 34 · desktop 19 테스트, `e2e-agent.mjs` 에 매거진 등록 → 생성(template) → 자동 승인 → pieceId 게시 → 공유 가시성 추가.
+- 검증: shared 51 · web/convex 111 · desktop 76 테스트. 제작 run·불변 검토 증거·수동/자동 콘텐츠 revision 결합·공유 재검토·Meta/브라우저 게시 안전 게이트와 취소 계열을 회귀 검증합니다.
 
 ### 데스크톱 배포·서명
 - 설치 파일 다운로드: https://github.com/contentscoin/automoney/releases/latest (`desktop-v*` 태그 푸시 시 GitHub Release 에 Windows `.exe`·macOS `.dmg/.zip` 자동 첨부). 패키징된 앱은 번들 Chromium 이 없으므로 시스템 Chrome → Edge 순으로 자동 폴백하며, `AUTOMONEY_BROWSER_CHANNEL`/`AUTOMONEY_BROWSER_EXECUTABLE` 로 고정할 수 있다. 모두 실패하면 `BROWSER_NOT_FOUND` 오류에 시도한 후보와 PC 에 실제 설치된 브라우저 경로를 담아 돌려주고, 트레이 패널의 "브라우저" 항목과 스페이스 카드에서 조치 방법을 안내한다.

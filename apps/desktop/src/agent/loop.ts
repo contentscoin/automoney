@@ -48,7 +48,7 @@ export class AgentLoop {
   cfg: AgentConfig;
   api: AgentApi;
 
-  constructor(private events: LoopEvents = {}, private appVersion = "0.1.11", private fetchImpl: typeof fetch = fetch, private handlers: Record<JobType, Handler> = HANDLERS) {
+  constructor(private events: LoopEvents = {}, private appVersion = "0.1.13", private fetchImpl: typeof fetch = fetch, private handlers: Record<JobType, Handler> = HANDLERS) {
     this.cfg = loadConfig();
     this.api = new AgentApi(this.cfg, this.fetchImpl, this.appVersion);
     this.status.paired = isPaired(this.cfg);
@@ -159,14 +159,19 @@ export class AgentLoop {
     try {
       const handler = this.handlers[job.jobType];
       if (!handler) throw new JobError("INTERNAL", `unknown job type ${job.jobType}`);
-      if (job.jobType === "post.publish") await this.api.preflight(job);
+      // Dry-run preflight records the non-publishing protocol marker required
+      // by completion. Live jobs reserve an external intent only at the
+      // handler's final, submit-adjacent gate.
+      if (job.jobType === "post.publish" && (job.payload as { dryRun?: boolean }).dryRun === true) {
+        await this.api.preflight(job);
+      }
       const outcome = await handler(ctx);
-      completion = { jobId: job.id, attemptNo: job.attemptNo, completionId: randomUUID(), status: "SUCCEEDED", result: outcome.result, spaceUpdate: outcome.spaceUpdate };
+      completion = { jobId: job.id, attemptNo: job.attemptNo, leaseToken: job.leaseToken, completionId: randomUUID(), status: "SUCCEEDED", result: outcome.result, spaceUpdate: outcome.spaceUpdate };
     } catch (e) {
       const code = e instanceof CancelledError ? "JOB_CANCELLED" : e instanceof JobError || e instanceof ApiError ? e.code : (e as { code?: string })?.code === "SPACE_LOCKED" ? "SPACE_LOCKED" : (e as { code?: string })?.code === "SPACE_NOT_FOUND" ? "SPACE_NOT_FOUND" : (e as { code?: string })?.code === "BROWSER_NOT_FOUND" ? "BROWSER_NOT_FOUND" : "RECIPE_FAILED";
       const message = e instanceof Error ? e.message : String(e);
       log("error", "job failed", { id: job.id, jobType: job.jobType, code, message });
-      completion = { jobId: job.id, attemptNo: job.attemptNo, completionId: randomUUID(), status: "FAILED", errorCode: code, errorMessage: message.slice(0, 900), result: errorResult(job.jobType, code as never, message.slice(0, 200)), spaceUpdate: e instanceof JobError ? e.spaceUpdate : undefined };
+      completion = { jobId: job.id, attemptNo: job.attemptNo, leaseToken: job.leaseToken, completionId: randomUUID(), status: "FAILED", errorCode: code, errorMessage: message.slice(0, 900), result: errorResult(job.jobType, code as never, message.slice(0, 200)), spaceUpdate: e instanceof JobError ? e.spaceUpdate : undefined };
     }
     completionJournal.put(completion);
     try {
@@ -174,8 +179,14 @@ export class AgentLoop {
       completionJournal.remove(completion.completionId);
       log("info", `job ${completion.status === "SUCCEEDED" ? "succeeded" : "failed"}`, { id: job.id, jobType: job.jobType });
     } catch (err) {
-      // 실행 결과는 바꾸지 않는다. 다음 poll/start에서 같은 completionId로 재전송한다.
-      log("error", "completion delivery failed; journaled for retry", { id: job.id, error: String(err) });
+      // 실행 결과는 바꾸지 않는다. 다음 poll/start에서 같은 completionId와 fencing token으로 재전송한다.
+      const quarantineReason = permanentCompletionFailure(err);
+      if (quarantineReason) {
+        completionJournal.quarantine(completion.completionId, quarantineReason);
+        log("error", "completion rejected permanently; quarantined", { id: job.id, reason: quarantineReason });
+      } else {
+        log("error", "completion delivery failed; journaled for retry", { id: job.id, error: String(err) });
+      }
     } finally {
       clearInterval(hb);
       this.status.activeJob = null;
@@ -186,11 +197,22 @@ export class AgentLoop {
 
   private async flushCompletions(): Promise<void> {
     for (const entry of completionJournal.list()) {
+      if (entry.attemptNo !== undefined && !entry.leaseToken) {
+        completionJournal.quarantine(entry.completionId, "MISSING_FENCING_TOKEN");
+        log("warn", "legacy completion missing fencing token; quarantined", { id: entry.jobId });
+        continue;
+      }
       try {
-        await this.api.complete({ id: entry.jobId, attemptNo: entry.attemptNo }, entry);
+        await this.api.complete({ id: entry.jobId, attemptNo: entry.attemptNo, leaseToken: entry.leaseToken }, entry);
         completionJournal.remove(entry.completionId);
       } catch (e) {
-        log("warn", "completion journal flush failed", { id: entry.jobId, error: String(e) });
+        const quarantineReason = permanentCompletionFailure(e);
+        if (quarantineReason) {
+          completionJournal.quarantine(entry.completionId, quarantineReason);
+          log("warn", "stale completion quarantined", { id: entry.jobId, reason: quarantineReason });
+          continue;
+        }
+        log("warn", "completion journal flush paused after transient failure", { id: entry.jobId, error: String(e) });
         break;
       }
     }
@@ -215,6 +237,14 @@ export class AgentLoop {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
   }
+}
+
+function permanentCompletionFailure(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  const reason = `${error.code} ${error.message}`.toUpperCase();
+  if (error.status === 400) return `HTTP_400:${reason}`;
+  if (error.status === 409 && /(STALE_ATTEMPT|JOB_NOT_ACTIVE|COMPLETION_CONFLICT|LEASE_EXPIRED|LEASE_PROOF_REQUIRED|PREFLIGHT_REQUIRED|PUBLISH_INTENT_REQUIRED|PUBLISH_INTENT_INVALID)/.test(reason)) return reason;
+  return null;
 }
 
 function safeCodexStatus() {

@@ -14,6 +14,38 @@ const composeSelector = [
   '[aria-label="Create"]',
 ].join(", ");
 
+/** Only selectors that explicitly identify the signed-in user's own profile. */
+const selfProfileSelectors = [
+  '[data-automoney="handle"]',
+  'nav a[href^="/@"][rel~="me"]',
+  'nav a[href^="/@"][aria-label="Profile" i]',
+  'nav a[href^="/@"][aria-label="프로필"]',
+];
+
+function threadsHandle(href: string | null): string | null {
+  if (!href) return null;
+  try {
+    const url = new URL(href, "https://www.threads.net");
+    if (!/(^|\.)threads\.(?:com|net)$/i.test(url.hostname)) return null;
+    return url.pathname.match(/^\/@([^/?#]+)\/?$/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function signedInProfileHandle(page: Page): Promise<string | null> {
+  // Evaluate trusted self markers by strength. A selector union's `.first()`
+  // follows DOM order and could otherwise pick an earlier suggested profile.
+  for (const selector of selfProfileSelectors) {
+    const links = page.locator(selector);
+    for (let index = 0; index < await links.count(); index++) {
+      const handle = threadsHandle(await links.nth(index).getAttribute("href").catch(() => null));
+      if (handle) return handle;
+    }
+  }
+  return null;
+}
+
 async function dismissOptionalFediverseNotice(page: Page) {
   const notice = page
     .getByRole("dialog")
@@ -40,11 +72,15 @@ export const threadsRecipe: PlatformRecipe = {
     const hasSession = (await page.context().cookies()).some(
       (cookie) => cookie.name === "sessionid" && /(^|\.)threads\.(com|net)$/.test(cookie.domain) && cookie.value.length > 0,
     );
-    if (hasSession) return { state: "HEALTHY", detail: "threads session cookie present" };
+    const handle = await signedInProfileHandle(page);
+    if (hasSession) return handle
+      ? { state: "HEALTHY", handle, detail: "threads session cookie and profile handle present" }
+      : { state: "LOGIN_REQUIRED", handle: null, detail: "IDENTITY_UNVERIFIED: Threads session cookie is present but the signed-in profile handle could not be verified" };
     const compose = page.locator(composeSelector).first();
     if (await compose.isVisible({ timeout: 8_000 }).catch(() => false)) {
-      const handle = await page.locator('[data-automoney="handle"], a[href^="/@"]').first().getAttribute("href").catch(() => null);
-      return { state: "HEALTHY", handle: handle ? handle.replace(/^\/@/, "").split("/")[0] ?? null : null };
+      return handle
+        ? { state: "HEALTHY", handle }
+        : { state: "LOGIN_REQUIRED", handle: null, detail: "IDENTITY_UNVERIFIED: Threads composer is available but the signed-in profile handle could not be verified" };
     }
     const loginForm = page.locator('input[name="username"], input[autocomplete="username"], [data-automoney="login"]').first();
     if (await loginForm.isVisible({ timeout: 3_000 }).catch(() => false)) return { state: "LOGIN_REQUIRED" };
@@ -75,15 +111,15 @@ export const threadsRecipe: PlatformRecipe = {
       await h.waitHuman(800, 1600);
     }
     await h.checkpoint("ready", 70);
-    if (!(await h.beforePublish())) return { postUrl: null, detail: "dry-run: not published" };
     const post = page
       .locator('[data-automoney="post"], [role="button"]')
       .filter({ hasText: /^(게시|Post)$/ })
       .last();
-    await post.waitFor({ state: "visible", timeout: 20_000 }).catch(() => {
+    await post.click({ trial: true, timeout: 20_000 }).catch(() => {
       throw new Error("Threads 게시 버튼을 찾지 못했습니다.");
     });
-    await post.click();
+    if (!(await h.beforePublish())) return { postUrl: null, detail: "dry-run: not published" };
+    await post.click({ timeout: 3_000 });
     await h.checkpoint("posted", 90);
     await h.waitHuman(1500, 3000);
     const link = await page.locator('[data-automoney="post-link"], a[href*="/post/"]').first().getAttribute("href").catch(() => null);

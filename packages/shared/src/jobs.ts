@@ -49,6 +49,8 @@ export const AGENT_ERROR_CODES = [
   "AGENT_LOST",
   "AGENT_LOST_UNCERTAIN",
   "PUBLISH_RESULT_UNCERTAIN",
+  "PUBLISH_RECEIPT_MISSING",
+  "LOCAL_DRY_RUN_OVERRIDE",
   "APP_UPDATE_REQUIRED",
   "JOB_CANCELLED",
   "INTERNAL",
@@ -85,6 +87,14 @@ export function errorResult(jobType: JobType, errorCode: AgentErrorCode, summary
 export interface PublishPayload {
   spaceId: string;
   platform: SnsPlatform;
+  /** Immutable server-owned external account identity bound into approval. */
+  targetPublicationKey?: string;
+  /** Human-readable account handle captured with the approval target. */
+  targetHandle?: string;
+  /** Schedule revision that authorized this occurrence. Server-owned. */
+  scheduleRevision?: number;
+  /** Original content channel; preserves feed vs reel semantics. */
+  contentChannel?: Channel;
   text: string;
   mediaUrls: string[];
   linkUrl?: string | null;
@@ -92,6 +102,10 @@ export interface PublishPayload {
   linkId?: string;
   /** 게시 성공 시 콘텐츠 사용 횟수·성과를 연결하기 위한 내부 참조 */
   pieceId?: string;
+  /** Workflow piece revision approved by the content gate. Server-owned. */
+  pieceOutputHash?: string;
+  /** Canonical text/media/link snapshot approved for this publish job. Server-owned. */
+  pieceSnapshotHash?: string;
   dryRun?: boolean;
 }
 
@@ -112,18 +126,46 @@ export function guessMediaKind(url: string): "image" | "video" | "unknown" {
   return "unknown";
 }
 
+/** Content-level media contract, independent of the selected publishing account. */
+export function validateContentMedia(channel: Channel, mediaUrls: string[]): string | null {
+  if (mediaUrls.length > 10) return "media is limited to 10 items";
+  if (mediaUrls.some((url) => !/^https:\/\//i.test(url))) return "media url must use https";
+  if (channel === "INSTAGRAM_REEL" || channel === "TIKTOK") {
+    if (mediaUrls.length !== 1) return `${channel} requires exactly one video`;
+    if (guessMediaKind(mediaUrls[0]!) !== "video") return `${channel} requires a verifiable video URL`;
+  }
+  if (channel === "INSTAGRAM_FEED" && mediaUrls.some((url) => guessMediaKind(url) !== "image"))
+    return "INSTAGRAM_FEED requires verifiable image URLs; videos must use INSTAGRAM_REEL";
+  return null;
+}
+
 export function validatePublishPayload(p: PublishPayload): string | null {
   const lim = PLATFORM_LIMITS[p.platform];
   if (!lim) return "unsupported platform";
   const text = (p.text ?? "").trim();
   if (!text && p.mediaUrls.length === 0) return "text or media required";
+  if (p.linkUrl) {
+    try {
+      const link = new URL(p.linkUrl);
+      if (link.protocol !== "https:" || link.username || link.password) return "link url must be an absolute https URL";
+    } catch {
+      return "link url must be an absolute https URL";
+    }
+  }
   const full = p.linkUrl ? `${text}\n${p.linkUrl}` : text;
   if ([...full].length > lim.maxChars) return `text exceeds ${lim.maxChars} chars`;
   if (p.mediaUrls.length > lim.maxMedia) return `too many media (max ${lim.maxMedia})`;
   if (lim.mediaRequired && p.mediaUrls.length === 0) return `${p.platform} requires media`;
+  if (p.platform === "INSTAGRAM" && p.contentChannel !== "INSTAGRAM_FEED" && p.contentChannel !== "INSTAGRAM_REEL")
+    return "Instagram requires an explicit INSTAGRAM_FEED or INSTAGRAM_REEL channel";
+  const videoOnly = p.platform === "TIKTOK" || p.contentChannel === "INSTAGRAM_REEL";
+  const contentMediaError = p.contentChannel ? validateContentMedia(p.contentChannel, p.mediaUrls) : null;
+  if (contentMediaError) return contentMediaError;
+  if (videoOnly && p.mediaUrls.length !== 1) return `${p.contentChannel ?? p.platform} requires exactly one video`;
   for (const u of p.mediaUrls) {
     if (!/^https:\/\//.test(u)) return "media url must use https";
     const kind = guessMediaKind(u);
+    if (videoOnly && kind !== "video") return `${p.contentChannel ?? p.platform} requires a verifiable video URL`;
     if (kind !== "unknown" && !lim.mediaKinds.includes(kind)) return `${p.platform} does not accept ${kind}`;
   }
   return null;
