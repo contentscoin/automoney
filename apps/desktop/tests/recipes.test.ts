@@ -67,4 +67,24 @@ describe("platform recipes on fixture pages", () => {
     await expect(getRecipe("TIKTOK")!.publish(page, { text: "x", mediaPaths: [] }, helpers(true))).rejects.toMatchObject({ code: "RECIPE_UNSUPPORTED" });
     await page.close();
   });
+
+  it("keeps an interactive Threads login open and ignores hidden challenge text", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <main><button data-automoney="login">Instagram으로 계속하기</button></main>
+      <script>window.__challenge = "challenge";</script>
+    `);
+
+    const recipe = getRecipe("THREADS")!;
+    const beforeUrl = page.url();
+    const login = await recipe.checkSession(page, { navigate: false });
+
+    expect(login.state).toBe("LOGIN_REQUIRED");
+    expect(page.url()).toBe(beforeUrl);
+
+    await page.setContent("<main>이 계정은 일시적으로 이용 제한되었습니다.</main>");
+    const restricted = await recipe.checkSession(page, { navigate: false });
+    expect(restricted.state).toBe("RESTRICTED");
+    await page.close();
+  });
 });

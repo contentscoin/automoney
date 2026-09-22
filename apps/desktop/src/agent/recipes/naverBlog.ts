@@ -14,9 +14,9 @@ export const naverBlogRecipe: PlatformRecipe = {
     return process.env.AUTOMONEY_NAVER_URL ?? "https://blog.naver.com/GoBlogWrite.naver";
   },
 
-  async checkSession(page: Page): Promise<SessionCheck> {
-    await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
-    const body = (await page.textContent("body").catch(() => "")) ?? "";
+  async checkSession(page: Page, options = {}): Promise<SessionCheck> {
+    if (options.navigate !== false) await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    const body = await page.locator("body").innerText().catch(() => "");
     if (RESTRICTION_HINTS.some((re) => re.test(body))) return { state: "RESTRICTED", detail: "restriction hint on page" };
     if (/nidlogin|로그인/.test(page.url()) && (await page.locator('#id, input[name="id"], [data-automoney="login"]').first().isVisible({ timeout: 3_000 }).catch(() => false))) return { state: "LOGIN_REQUIRED" };
     const editor = page.locator('[data-automoney="editor"], .se-component-content, .se-text-paragraph, [contenteditable="true"]').first();

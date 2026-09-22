@@ -11,9 +11,9 @@ export const xRecipe: PlatformRecipe = {
     return process.env.AUTOMONEY_X_URL ?? "https://x.com/home";
   },
 
-  async checkSession(page: Page): Promise<SessionCheck> {
-    await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
-    const body = (await page.textContent("body").catch(() => "")) ?? "";
+  async checkSession(page: Page, options = {}): Promise<SessionCheck> {
+    if (options.navigate !== false) await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    const body = await page.locator("body").innerText().catch(() => "");
     if (RESTRICTION_HINTS.some((re) => re.test(body))) return { state: "RESTRICTED", detail: "restriction hint on page" };
     const compose = page.locator('[data-automoney="compose"], a[data-testid="SideNav_NewTweet_Button"], [data-testid="tweetTextarea_0"]').first();
     if (await compose.isVisible({ timeout: 8_000 }).catch(() => false)) {

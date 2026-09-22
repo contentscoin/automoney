@@ -11,9 +11,9 @@ export const tiktokRecipe: PlatformRecipe = {
     return process.env.AUTOMONEY_TIKTOK_URL ?? "https://www.tiktok.com/tiktokstudio/upload";
   },
 
-  async checkSession(page: Page): Promise<SessionCheck> {
-    await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
-    const body = (await page.textContent("body").catch(() => "")) ?? "";
+  async checkSession(page: Page, options = {}): Promise<SessionCheck> {
+    if (options.navigate !== false) await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    const body = await page.locator("body").innerText().catch(() => "");
     if (RESTRICTION_HINTS.some((re) => re.test(body))) return { state: "RESTRICTED", detail: "restriction hint on page" };
     const upload = page.locator('[data-automoney="compose"], input[type="file"][accept*="video"], [data-e2e="upload-btn"], button:has-text("동영상 선택"), button:has-text("Select video")').first();
     if (await upload.count().then((c) => c > 0) && (await upload.first().isVisible({ timeout: 8_000 }).catch(() => false) || (await upload.first().count()) > 0)) {

@@ -107,11 +107,11 @@ export async function handleSpaceLogin(ctx: JobContext): Promise<JobOutcome> {
     ctx.onUserAttention?.(`[${p.platform}] 로그인 창이 열렸습니다. 로그인 후 창을 그대로 두세요.`);
     await space.page.goto(recipe.loginUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => {});
     const deadline = Date.now() + Number(process.env.AUTOMONEY_LOGIN_WAIT_MS ?? 10 * 60_000);
-    let last: SessionCheck = await recipe.checkSession(space.page).catch((): SessionCheck => ({ state: "LOGIN_REQUIRED" }));
+    let last: SessionCheck = await recipe.checkSession(space.page, { navigate: false }).catch((): SessionCheck => ({ state: "LOGIN_REQUIRED" }));
     while (last.state !== "HEALTHY" && Date.now() < deadline) {
       await ctx.checkpoint("waiting_login", 50);
       await sleep(5000);
-      last = await recipe.checkSession(space.page).catch(() => last);
+      last = await recipe.checkSession(space.page, { navigate: false }).catch(() => last);
       if (last.state === "RESTRICTED") break;
     }
     appendHistory(p.spaceId, { action: "space.login", state: last.state, handle: last.handle ?? null });

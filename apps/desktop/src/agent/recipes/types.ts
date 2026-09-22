@@ -1,6 +1,7 @@
 import type { Page } from "playwright";
 
 export type SessionCheck = { state: "HEALTHY" | "LOGIN_REQUIRED" | "RESTRICTED"; handle?: string | null; detail?: string };
+export type SessionCheckOptions = { navigate?: boolean };
 
 export interface PublishInput {
   text: string;
@@ -20,7 +21,7 @@ export interface PlatformRecipe {
   platform: "THREADS" | "X" | "INSTAGRAM" | "TIKTOK" | "NAVER_BLOG";
   loginUrl: string;
   homeUrl: string;
-  checkSession(page: Page): Promise<SessionCheck>;
+  checkSession(page: Page, options?: SessionCheckOptions): Promise<SessionCheck>;
   publish(page: Page, input: PublishInput, helpers: RecipeHelpers): Promise<PublishOutcome>;
 }
 
@@ -34,4 +35,10 @@ export interface RecipeHelpers {
   waitHuman(minMs?: number, maxMs?: number): Promise<void>;
 }
 
-export const RESTRICTION_HINTS = [/suspended/i, /계정이 정지/i, /일시적으로 제한/i, /temporarily restricted/i, /unusual activity/i, /확인이 필요/i, /challenge/i];
+/** 화면에 실제 표시된 계정 차단 문구만 판정한다. 일반 인증 challenge/본인 확인은 로그인 흐름이다. */
+export const RESTRICTION_HINTS = [
+  /account.{0,40}(?:suspended|disabled|temporarily restricted)/i,
+  /(?:suspended|disabled|temporarily restricted).{0,40}account/i,
+  /계정.{0,30}(?:정지|이용 제한|비활성화)/,
+  /일시적으로.{0,20}(?:계정.{0,10})?제한/,
+];

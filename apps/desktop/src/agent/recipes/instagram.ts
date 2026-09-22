@@ -11,9 +11,9 @@ export const instagramRecipe: PlatformRecipe = {
     return process.env.AUTOMONEY_INSTAGRAM_URL ?? "https://www.instagram.com/";
   },
 
-  async checkSession(page: Page): Promise<SessionCheck> {
-    await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
-    const body = (await page.textContent("body").catch(() => "")) ?? "";
+  async checkSession(page: Page, options = {}): Promise<SessionCheck> {
+    if (options.navigate !== false) await page.goto(this.homeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    const body = await page.locator("body").innerText().catch(() => "");
     if (RESTRICTION_HINTS.some((re) => re.test(body))) return { state: "RESTRICTED", detail: "restriction hint on page" };
     const create = page.locator('[data-automoney="compose"], a[href="#"]:has(svg[aria-label="새로운 게시물"]), svg[aria-label="New post"], svg[aria-label="만들기"], svg[aria-label="Create"]').first();
     if (await create.isVisible({ timeout: 8_000 }).catch(() => false)) {
