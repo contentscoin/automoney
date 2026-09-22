@@ -31,7 +31,11 @@ export default function AuthForm({ flow }: { flow: "signIn" | "signUp" }) {
             fd.set("flow", flow);
             if (flow === "signUp" && !inviteCode.trim()) fd.delete("inviteCode");
             try {
-              await signIn("password", fd);
+              const result = await signIn("password", fd);
+              if (!result.signingIn) {
+                setError("이메일 또는 비밀번호가 올바르지 않습니다.");
+                return;
+              }
               const next = params.get("next") ?? "";
               router.replace(next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard");
             } catch (err) {

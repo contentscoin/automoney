@@ -1,4 +1,5 @@
-import { Password } from "@convex-dev/auth/providers/Password";
+import { Password, type PasswordConfig } from "@convex-dev/auth/providers/Password";
+import type { ConvexCredentialsUserConfig } from "@convex-dev/auth/providers/ConvexCredentials";
 import { convexAuth } from "@convex-dev/auth/server";
 import { ConvexError } from "convex/values";
 import { normalizeCode } from "@automoney/shared";
@@ -6,9 +7,40 @@ import type { DataModel } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { provisionNewUser } from "./lib/onboarding";
 
+function safePasswordProvider(config: PasswordConfig<DataModel>) {
+  const provider = Password<DataModel>(config);
+  const options = (
+    provider as unknown as {
+      options: { authorize: ConvexCredentialsUserConfig<DataModel>["authorize"] };
+    }
+  ).options;
+  const authorize = options.authorize;
+
+  // @convex-dev/auth 0.0.95 throws its internal lookup errors before the
+  // Password provider can turn an unknown account or bad secret into a normal
+  // failed sign-in. Keep invalid credentials on the expected null result path.
+  options.authorize = async (params, ctx) => {
+    try {
+      return await authorize(params, ctx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message.includes("InvalidAccountId") ||
+        message.includes("InvalidSecret") ||
+        message.includes("Invalid credentials")
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  };
+
+  return provider;
+}
+
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [
-    Password<DataModel>({
+    safePasswordProvider({
       profile(params) {
         const email = String(params.email ?? "")
           .trim()
