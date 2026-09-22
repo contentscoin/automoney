@@ -27,6 +27,7 @@ function safePasswordProvider(config: PasswordConfig<DataModel>) {
       if (
         message.includes("InvalidAccountId") ||
         message.includes("InvalidSecret") ||
+        message.includes("TooManyFailedAttempts") ||
         message.includes("Invalid credentials")
       ) {
         return null;
