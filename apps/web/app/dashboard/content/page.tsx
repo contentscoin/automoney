@@ -118,7 +118,7 @@ export default function ContentPage() {
               <PieceCard key={p._id} p={p}
                 onApprove={async () => { try { await approve({ pieceId: p._id }); } catch (err) { setMsg(errorMessage(err)); } }}
                 onReject={async (reason) => { try { await reject({ pieceId: p._id, reason }); } catch (err) { setMsg(errorMessage(err)); } }}
-                onEdit={async (v) => { try { await edit({ pieceId: p._id, ...v }); } catch (err) { setMsg(errorMessage(err)); } }}
+                onEdit={async (v) => { try { await edit({ pieceId: p._id, ...v }); return true; } catch (err) { setMsg(errorMessage(err)); return false; } }}
                 onCopy={!p.mine ? async () => { try { await copyToMine({ pieceId: p._id }); setMsg("내 콘텐츠로 가져왔습니다. 내 콘텐츠에서 수정하거나 게시할 수 있습니다."); setScope("MINE"); } catch (err) { setMsg(errorMessage(err)); } } : undefined} />
             ))}
           </div>

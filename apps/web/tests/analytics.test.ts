@@ -8,7 +8,7 @@ const authed = (token: string, init: RequestInit = {}) => ({ ...init, headers: {
 
 async function pairDevice(t: T, user: Awaited<ReturnType<typeof signup>>) {
   const { code } = await user.as.mutation(api.devices.createPairCode, {});
-  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.0" });
+  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.11" });
 }
 
 /** 브라우저 스페이스로 게시 성공까지(에이전트 HTTP 계약 사용) */

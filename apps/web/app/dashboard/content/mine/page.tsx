@@ -23,8 +23,8 @@ export default function MyContentPage() {
   const [form, setForm] = useState({ channel: "THREADS" as Channel, caption: "", hashtags: "", script: "", media: "", productId: "" });
   const mine = all?.filter((piece) => piece.mine) ?? [];
   const run = async (action: () => Promise<unknown>, success?: string) => {
-    try { await action(); if (success) setMsg(success); }
-    catch (e) { setMsg(errorMessage(e)); }
+    try { await action(); if (success) setMsg(success); return true; }
+    catch (e) { setMsg(errorMessage(e)); return false; }
   };
   const save = async () => {
     try {

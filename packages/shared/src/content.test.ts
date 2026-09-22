@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { buildGenerationPrompt, evaluatePiece, extractAtoms, extractMagazine, isAutoApprovable, parseGeneratedPieces, stripMatchingTrailingHashtagBlock, templateGenerate, CHANNELS, CHANNEL_SPEC } from "./index";
+import {
+  buildGenerationPrompt,
+  buildRepairPrompt,
+  evaluatePiece,
+  extractAtoms,
+  extractMagazine,
+  isAutoApprovable,
+  normalizeContentBrief,
+  parseGeneratedPieces,
+  passesContentStandard,
+  stripMatchingTrailingHashtagBlock,
+  templateGenerate,
+  CHANNELS,
+  CHANNEL_SPEC,
+  CONTENT_PROMPT_VERSION,
+  CONTENT_QUALITY_VERSION,
+  CONTENT_WORKFLOW_VERSION,
+  DEFAULT_CONTENT_STANDARD,
+} from "./index";
 
 const HTML = `<!doctype html><html><head><title>fallback</title>
 <meta property="og:title" content="가을 하객룩, 이렇게 입으면 실패 없어요" />
@@ -93,7 +111,7 @@ describe("templateGenerate + prompt/parse", () => {
   it("builds a prompt and parses model output", () => {
     const prompt = buildGenerationPrompt({ channels: ["X", "THREADS"], atoms: [], products, magazineTitle: "t" });
     expect(prompt).toContain("#광고");
-    expect(prompt).toContain("X: 최대 280자");
+    expect(prompt).toContain("X: 본문 30~280자");
     const parsed = parseGeneratedPieces('설명…\n[{"channel":"X","caption":"hi","hashtags":["a"],"script":null},{"channel":"TIKTOK","caption":"no"},{"channel":"THREADS","caption":""}]', ["X", "THREADS"]);
     expect(parsed).toEqual([{ channel: "X", caption: "hi", hashtags: ["a"], script: null }]);
     expect(parseGeneratedPieces("garbage", ["X"])).toEqual([]);
@@ -113,5 +131,210 @@ describe("templateGenerate + prompt/parse", () => {
       ["THREADS"],
     );
     expect(parsed).toEqual([{ channel: "THREADS", caption: "니트 코디 추천", hashtags: ["광고", "니트"], script: null }]);
+  });
+});
+
+describe("content production quality contract V2", () => {
+  it("exports stable versions, the Attrangs standard, and normalizes legacy briefs", () => {
+    expect(CONTENT_WORKFLOW_VERSION).toBe("content-workflow/2.0.0");
+    expect(CONTENT_PROMPT_VERSION).toBe("content-prompt/2.0.0");
+    expect(CONTENT_QUALITY_VERSION).toBe("content-quality/2.0.0");
+    expect(DEFAULT_CONTENT_STANDARD).toMatchObject({
+      id: "ATTRANGS_STANDARD_KO_V2",
+      version: "2.0.0",
+      brand: "아뜨랑스",
+      minScore: 92,
+      requireCodex: true,
+      maxAttempts: 3,
+      maxEmoji: 2,
+    });
+    expect(normalizeContentBrief()).toEqual({
+      goal: "CONVERSION",
+      tone: "CHANNEL_NATIVE",
+      cta: "LINK",
+      audience: "20~30대 여성 패션 관심 고객",
+    });
+    expect(normalizeContentBrief({
+      goal: "ENGAGEMENT",
+      tone: "POLITE",
+      cta: "COMMENT",
+      audience: "  출근룩을 찾는 고객  ",
+      keyMessage: "  활용도 높은 니트  ",
+    })).toEqual({
+      goal: "ENGAGEMENT",
+      tone: "POLITE",
+      cta: "COMMENT",
+      audience: "출근룩을 찾는 고객",
+      keyMessage: "활용도 높은 니트",
+    });
+  });
+
+  it("turns V2 CTA, script, hashtag, emoji, forbidden phrase and price failures into hard blocks", () => {
+    const report = evaluatePiece({
+      channel: "INSTAGRAM_REEL",
+      caption: "놓치지 마세요 😀😀😀\n38,000원 상품",
+      hashtags: ["니트"],
+      script: null,
+    }, {
+      products,
+      brief: normalizeContentBrief({ cta: "SAVE" }),
+      standard: DEFAULT_CONTENT_STANDARD,
+    });
+    expect(report.violations.filter((violation) => violation.severity === "block").map((violation) => violation.code))
+      .toEqual(expect.arrayContaining([
+        "HASHTAGS_FEW",
+        "SCRIPT_MISSING",
+        "CTA_MISSING",
+        "EMOJI_EXCESS",
+        "FORBIDDEN_PHRASE",
+        "PRICE_MISMATCH",
+      ]));
+    expect(passesContentStandard(report, "codex", DEFAULT_CONTENT_STANDARD)).toBe(false);
+  });
+
+  it("applies the base banned-claim rules to script and hashtags only in the strict path", () => {
+    const piece = {
+      channel: "INSTAGRAM_REEL" as const,
+      caption: "가을 니트 코디\n프로필 링크에서 확인하세요",
+      hashtags: ["니트", "코디", "패션", "100%", "광고"],
+      script: "[0-3초] 최저가 니트를 소개해요\n[마무리] 링크를 확인하세요",
+    };
+    const legacy = evaluatePiece(piece, { products });
+    expect(legacy.violations.map((violation) => violation.code)).not.toContain("PRICE_CLAIM");
+    const strict = evaluatePiece(piece, {
+      products,
+      brief: normalizeContentBrief(),
+      standard: DEFAULT_CONTENT_STANDARD,
+    });
+    expect(strict.violations.map((violation) => violation.code))
+      .toEqual(expect.arrayContaining(["PRICE_CLAIM", "ABSOLUTE_CLAIM"]));
+  });
+
+  it("blocks operational claims that are not represented in the product snapshot", () => {
+    const report = evaluatePiece({
+      channel: "THREADS",
+      caption: "오늘출발과 무료 교환이 가능한 니트예요.\n상품 링크에서 확인하세요.",
+      hashtags: ["광고"],
+    }, {
+      products,
+      brief: normalizeContentBrief(),
+      standard: DEFAULT_CONTENT_STANDARD,
+    });
+    expect(report.violations.map((violation) => violation.code)).toContain("UNVERIFIED_CATALOG_CLAIM");
+    expect(passesContentStandard(report, "codex")).toBe(false);
+  });
+
+  it("hard-blocks undersized channel copy and incomplete short-form scripts", () => {
+    const blog = evaluatePiece({
+      channel: "BLOG",
+      caption: "플라워 셔링 롱 원피스는 링크에서 확인하세요.",
+      hashtags: ["광고"],
+    }, { products, brief: normalizeContentBrief(), standard: DEFAULT_CONTENT_STANDARD });
+    expect(blog.violations.map((violation) => violation.code)).toContain("CONTENT_TOO_SHORT");
+
+    const reel = evaluatePiece({
+      channel: "INSTAGRAM_REEL",
+      caption: "플라워 셔링 롱 원피스의 가을 코디를 프로필 링크에서 자세히 확인하세요.",
+      hashtags: ["원피스", "가을코디", "하객룩", "아뜨랑스", "광고"],
+      script: "링크",
+    }, { products, brief: normalizeContentBrief(), standard: DEFAULT_CONTENT_STANDARD });
+    expect(reel.violations.map((violation) => violation.code))
+      .toEqual(expect.arrayContaining(["SCRIPT_TOO_SHORT", "SCRIPT_STRUCTURE"]));
+    expect(passesContentStandard(reel, "codex")).toBe(false);
+  });
+
+  it("requires product and key-message relevance and blocks unsupported attributes", () => {
+    const report = evaluatePiece({
+      channel: "THREADS",
+      caption: "다른 옷은 울 30% 소재라 체형 보정에 좋아요. 자세한 내용은 링크에서 확인하세요.",
+      hashtags: ["광고"],
+    }, {
+      products,
+      brief: normalizeContentBrief({ keyMessage: "출근룩 활용도" }),
+      standard: DEFAULT_CONTENT_STANDARD,
+    });
+    expect(report.violations.map((violation) => violation.code)).toEqual(expect.arrayContaining([
+      "UNVERIFIED_PRODUCT_ATTRIBUTE",
+      "PRODUCT_REFERENCE_MISSING",
+      "KEY_MESSAGE_MISSING",
+    ]));
+  });
+
+  it("validates won, 만원, symbol and KRW prices without treating product IDs as money", () => {
+    for (const priceText of ["9만원", "₩99,000", "99,000 KRW"]) {
+      const report = evaluatePiece({
+        channel: "THREADS",
+        caption: `플라워 셔링 롱 원피스 가격은 ${priceText}입니다. 상품 링크에서 자세히 확인하세요.`,
+        hashtags: ["광고"],
+      }, { products, brief: normalizeContentBrief(), standard: DEFAULT_CONTENT_STANDARD });
+      expect(report.violations.map((violation) => violation.code), priceText).toContain("PRICE_MISMATCH");
+    }
+    const idOnly = evaluatePiece({
+      channel: "THREADS",
+      caption: "플라워 셔링 롱 원피스 상품 번호 100001의 코디를 상품 링크에서 자세히 확인하세요.",
+      hashtags: ["광고"],
+    }, { products, brief: normalizeContentBrief(), standard: DEFAULT_CONTENT_STANDARD });
+    expect(idOnly.violations.map((violation) => violation.code)).not.toContain("PRICE_MISMATCH");
+  });
+
+  it("requires the contracted score and provider after all hard gates pass", () => {
+    const report = evaluatePiece({
+      channel: "THREADS",
+      caption: "가을 니트 코디가 궁금한가요?\n플라워 셔링 롱 원피스와 함께 매치해 보세요.\n44,100원, 자세한 정보는 링크에서 확인하세요.",
+      hashtags: ["가을코디", "원피스", "광고"],
+    }, {
+      products,
+      brief: normalizeContentBrief({ cta: "LINK" }),
+      standard: DEFAULT_CONTENT_STANDARD,
+    });
+    expect(report.violations.filter((violation) => violation.severity === "block")).toEqual([]);
+    expect(report.score).toBeGreaterThanOrEqual(92);
+    expect(passesContentStandard(report, "codex")).toBe(true);
+    expect(passesContentStandard(report, "template")).toBe(false);
+  });
+
+  it("adds contract, brief and allowed-price constraints to generation and repair prompts", () => {
+    const input: Parameters<typeof buildGenerationPrompt>[0] = {
+      channels: ["THREADS", "INSTAGRAM_REEL"],
+      atoms: [],
+      products,
+      runId: "run-20260922-001",
+      brief: normalizeContentBrief({
+        goal: "ENGAGEMENT",
+        tone: "POLITE",
+        cta: "COMMENT",
+        audience: "출근룩을 찾는 고객",
+      }),
+      standard: DEFAULT_CONTENT_STANDARD,
+    };
+    const prompt = buildGenerationPrompt(input);
+    expect(prompt).toContain(CONTENT_WORKFLOW_VERSION);
+    expect(prompt).toContain(CONTENT_PROMPT_VERSION);
+    expect(prompt).toContain(CONTENT_QUALITY_VERSION);
+    expect(prompt).toContain("run-20260922-001");
+    expect(prompt).toContain("ENGAGEMENT");
+    expect(prompt).toContain("COMMENT");
+    expect(prompt).toContain("44,100");
+    expect(prompt).toContain("허용 가격");
+    expect(prompt).toContain("본문 40~500자");
+    expect(prompt).toContain("80자 이상");
+
+    const failedPiece = {
+      channel: "INSTAGRAM_REEL" as const,
+      caption: "이전 출력",
+      hashtags: ["광고"],
+      script: null,
+      attemptNo: 1,
+    };
+    const report = evaluatePiece(failedPiece, {
+      products,
+      brief: input.brief,
+      standard: DEFAULT_CONTENT_STANDARD,
+    });
+    const repair = buildRepairPrompt(input, [{ channel: "INSTAGRAM_REEL", piece: failedPiece, report }]);
+    expect(repair).toContain("재생성 요청");
+    expect(repair).toContain("SCRIPT_MISSING");
+    expect(repair).toContain("INSTAGRAM_REEL");
+    expect(repair).not.toContain("- THREADS:");
   });
 });

@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { APPROVAL_TTL_MS, CHANNEL_PLATFORM, JOB_LEASE_MS, kstDayKey, type PublishPayload } from "@automoney/shared";
 import { internal } from "./_generated/api";
-import { ingestGeneratedJob } from "./content";
+import { ingestGeneratedJob, MIN_CONTENT_DESKTOP_VERSION, versionAtLeast } from "./content";
 import { ingestReadbackJob, recordPublishedPost } from "./analytics";
 import type { Id } from "./_generated/dataModel";
 import { httpAction, internalMutation, internalQuery, type ActionCtx } from "./_generated/server";
@@ -140,6 +140,8 @@ export const claimJob = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     await ctx.db.patch(args.deviceId, { lastSeenAt: now, ...(args.appVersion ? { appVersion: args.appVersion } : {}), ...(args.snapshot !== undefined ? { snapshot: args.snapshot } : {}) });
+    const device = await ctx.db.get(args.deviceId);
+    const appVersion = args.appVersion ?? device?.appVersion ?? "0.0.0";
     const candidates = await ctx.db
       .query("agentJobs")
       .withIndex("by_user_status", (q) => q.eq("userId", args.userId).eq("status", "QUEUED").lte("runAfter", now))
@@ -147,6 +149,14 @@ export const claimJob = internalMutation({
       .take(20);
     for (const j of candidates) {
       if (j.executor === "CLOUD") continue;
+      const contentPayload = j.jobType === "content.generate" && j.payload && typeof j.payload === "object"
+        ? j.payload as { runId?: unknown; standard?: unknown }
+        : null;
+      if (
+        contentPayload
+        && (typeof contentPayload.runId === "string" || contentPayload.standard !== undefined)
+        && !versionAtLeast(appVersion, MIN_CONTENT_DESKTOP_VERSION)
+      ) continue;
       if (j.spaceId) {
         const s = await ctx.db.get(j.spaceId);
         if (!s) {
@@ -202,6 +212,12 @@ export const preflightJob = internalMutation({
     const payload = j.payload as PublishPayload;
     const piece = payload.pieceId ? await ctx.db.get(payload.pieceId as Id<"contentPieces">) : null;
     if (payload.pieceId && (!piece || piece.status !== "APPROVED")) return deny("CONTENT_UNAVAILABLE", "승인된 콘텐츠를 찾을 수 없습니다.");
+    if (piece?.runId) {
+      const run = await ctx.db.get(piece.runId);
+      const standardPassed = (piece.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
+      if (!standardPassed || run?.status !== "COMPLETED")
+        return deny("CONTENT_REVIEW_REQUIRED", "전체 제작 실행의 품질 검수와 사람 승인이 완료되지 않았습니다.");
+    }
     if (piece && CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) return deny("CONTENT_PLATFORM_MISMATCH", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
     const link = payload.linkId ? await ctx.db.get(payload.linkId as Id<"marketingLinks">) : null;
     if (payload.linkId && (!link || link.userId !== j.userId)) return deny("LINK_NOT_FOUND", "마케팅 링크를 찾을 수 없습니다.");
@@ -294,7 +310,7 @@ export const completeJob = internalMutation({
         });
       }
     }
-    if (j.jobType === "content.generate" && args.status === "SUCCEEDED" && !cancelled) await ingestGeneratedJob(ctx, j._id);
+    if (j.jobType === "content.generate") await ingestGeneratedJob(ctx, j._id);
     if (args.status === "SUCCEEDED" && !cancelled) {
       const done = (await ctx.db.get(j._id))!;
       if (j.jobType === "post.publish") await recordPublishedPost(ctx, done);
@@ -337,7 +353,7 @@ export const deviceConfig = internalQuery({
     return {
       deviceId: d._id,
       userEmail: user?.email ?? "",
-      minAppVersion: process.env.MIN_DESKTOP_VERSION ?? "0.1.0",
+      minAppVersion: process.env.MIN_DESKTOP_VERSION ?? MIN_CONTENT_DESKTOP_VERSION,
       spaces: spaces.map((s) => ({ _id: s._id, platform: s.platform, name: s.name, handle: s.handle ?? null, pinned: s.pinned, sessionState: s.sessionState })),
     };
   },

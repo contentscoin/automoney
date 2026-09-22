@@ -1,4 +1,10 @@
-import type { Channel, ContentAtom, ProductBrief } from "./content";
+import type {
+  Channel,
+  ContentAtom,
+  ContentProductionBrief,
+  ContentProductionStandard,
+  ProductBrief,
+} from "./content";
 /** 데스크톱 에이전트 ↔ 클라우드 잡 계약 (docs/01-architecture.md §2.2) */
 export const JOB_TYPES = ["post.publish", "space.create", "space.login", "space.verify", "codex.login", "content.generate", "post.readback", "meta.token_refresh"] as const;
 /** 잡 실행 주체: DESKTOP = 유저 PC 에이전트, CLOUD = Convex 액션(Meta API 발행·토큰 갱신) */
@@ -135,4 +141,10 @@ export interface ContentGeneratePayload {
   playbook?: string[];
   /** 거절 사유 상위 패턴(피해야 할 것) */
   avoid?: string[];
+  /** Stable identifier shared by every attempt in one production workflow. */
+  runId?: string;
+  /** V2 content intent. Optional so queued V1 jobs remain executable. */
+  brief?: ContentProductionBrief;
+  /** V2 quality contract snapshot. Optional so queued V1 jobs remain executable. */
+  standard?: ContentProductionStandard;
 }

@@ -26,6 +26,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release tag matches desktop version
+        if: startsWith(github.ref, 'refs/tags/desktop-v') || startsWith(inputs.release_tag, 'desktop-v')
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./apps/desktop/package.json').version")"
+          test "$RELEASE_TAG" = "desktop-v$PACKAGE_VERSION" || {
+            echo "Release tag $RELEASE_TAG does not match apps/desktop/package.json ($PACKAGE_VERSION)."
+            exit 1
+          }
       - uses: pnpm/action-setup@v4 # 버전은 루트 package.json 의 packageManager 를 따른다
       - uses: actions/setup-node@v4
         with:

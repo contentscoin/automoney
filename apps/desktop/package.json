@@ -1,6 +1,6 @@
 {
   "name": "@automoney/desktop",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "description": "automoney 데스크톱 에이전트 — 브라우저 스페이스·SNS 포스팅·Codex 실행",
   "author": "automoney",
@@ -74,7 +74,7 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": false
+    "notarize": true
     },
     "linux": {
       "target": [

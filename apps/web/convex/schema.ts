@@ -544,6 +544,62 @@ export default defineSchema({
     rank: v.number(),
   }).index("by_magazine", ["magazineId", "rank"]),
 
+  /**
+   * A durable, versioned snapshot of one content-production request. Agent jobs
+   * describe execution attempts; this table describes the user-facing production
+   * run and remains stable when an execution is retried.
+   */
+  contentRuns: defineTable({
+    userId: v.id("users"),
+    batchKey: v.string(),
+    productIds: v.array(v.id("products")),
+    /** Immutable catalog evidence used by this run, retained even after products change. */
+    productSnapshots: v.array(v.object({
+      productId: v.id("products"),
+      attrangsProductId: v.number(),
+      name: v.string(),
+      price: v.number(),
+      salePrice: v.union(v.number(), v.null()),
+      category: v.union(v.string(), v.null()),
+      detailUrl: v.string(),
+      imageUrls: v.array(v.string()),
+      status: productStatusValidator,
+      syncedAt: v.number(),
+      source: v.union(v.literal("CSV"), v.literal("MOCK"), v.literal("API")),
+    })),
+    channels: v.array(
+      v.union(
+        v.literal("INSTAGRAM_FEED"),
+        v.literal("INSTAGRAM_REEL"),
+        v.literal("THREADS"),
+        v.literal("X"),
+        v.literal("TIKTOK"),
+        v.literal("BLOG"),
+      ),
+    ),
+    briefSnapshot: v.any(),
+    standardSnapshot: v.any(),
+    inputHash: v.string(),
+    jobIds: v.array(v.id("agentJobs")),
+    expectedOutputs: v.number(),
+    completedJobs: v.optional(v.number()),
+    savedOutputs: v.optional(v.number()),
+    approvedOutputs: v.optional(v.number()),
+    status: v.union(
+      v.literal("QUEUED"),
+      v.literal("RUNNING"),
+      v.literal("COMPLETED"),
+      v.literal("REVIEW_REQUIRED"),
+      v.literal("FAILED"),
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId", "createdAt"])
+    .index("by_user_status", ["userId", "status", "updatedAt"])
+    .index("by_batchKey", ["batchKey"])
+    .index("by_inputHash", ["inputHash"]),
+
   contentPieces: defineTable({
     ownerUserId: v.optional(v.id("users")),
     visibility: v.union(v.literal("PRIVATE"), v.literal("SHARED")),
@@ -573,13 +629,17 @@ export default defineSchema({
       v.literal("template"),
       v.literal("manual"),
     ),
+    runId: v.optional(v.id("contentRuns")),
+    /** Version/provider provenance for the production contract that accepted it. */
+    productionMeta: v.optional(v.any()),
     jobId: v.optional(v.id("agentJobs")),
     usageCount: v.number(),
     createdAt: v.number(),
   })
     .index("by_owner", ["ownerUserId", "createdAt"])
     .index("by_visibility", ["visibility", "status", "createdAt"])
-    .index("by_job", ["jobId"]),
+    .index("by_job", ["jobId"])
+    .index("by_run", ["runId"]),
 
   curationItems: defineTable({
     kind: v.union(

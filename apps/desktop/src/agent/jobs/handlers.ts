@@ -3,7 +3,25 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { lookup } from "node:dns/promises";
-import { buildGenerationPrompt, okResult, parseGeneratedPieces, templateGenerate, type ContentGeneratePayload, type PublishPayload, type ReadbackPayload } from "@automoney/shared";
+import {
+  buildGenerationPrompt,
+  buildRepairPrompt,
+  DEFAULT_CONTENT_STANDARD,
+  evaluatePiece,
+  isAutoApprovable,
+  okResult,
+  parseGeneratedPieces,
+  passesContentStandard,
+  templateGenerate,
+  type Channel,
+  type ContentGeneratePayload,
+  type ContentRepairFailure,
+  type GeneratedPiece,
+  type GenerationInput,
+  type PublishPayload,
+  type QualityReport,
+  type ReadbackPayload,
+} from "@automoney/shared";
 import { codexGenerateText } from "../codexText";
 import { codexStatus, startCodexLogin } from "../codex";
 import { createCodexPlanner, runAutopilot, scriptedPlanner, type Planner } from "../autopilot";
@@ -243,14 +261,21 @@ export async function handleCodexLogin(ctx: JobContext): Promise<JobOutcome> {
 }
 
 export type ContentProvider = "codex" | "template";
+type ContentResultProvider = ContentProvider | "mixed";
 
-/** 콘텐츠 생성: 클라우드 LLM 없이 유저 PC 의 Codex 가 생성(ADR-0005). Codex 미설치·미로그인·파싱 실패 시 규칙 템플릿으로 폴백 */
+type EvaluatedCandidate = { piece: GeneratedPiece; report: QualityReport };
+
+/**
+ * 콘텐츠 생성: 클라우드 LLM 없이 유저 PC 의 Codex 가 생성(ADR-0005).
+ * V2 계약 잡은 실패한 채널만 최대 3회 교정하고, 끝까지 미달인 결과와
+ * 템플릿 폴백은 provenance를 보존한 검토용 초안으로 서버에 전달한다.
+ */
 export async function handleContentGenerate(ctx: JobContext, deps: { generate?: (prompt: string) => Promise<{ ok: true; text: string } | { ok: false; reason: string }> } = {}): Promise<JobOutcome> {
   const p = ctx.job.payload as unknown as ContentGeneratePayload;
   const preferred = ((process.env.AUTOMONEY_CONTENT_PROVIDER ?? "codex").toLowerCase() === "template" ? "template" : "codex") as ContentProvider;
   const channels = [...new Set(p.channels)];
   const duplicateRequestedChannels = [...new Set(p.channels.filter((channel, index) => p.channels.indexOf(channel) !== index))];
-  const input = {
+  const input: GenerationInput = {
     channels,
     atoms: p.atoms,
     products: p.products,
@@ -258,50 +283,172 @@ export async function handleContentGenerate(ctx: JobContext, deps: { generate?: 
     brand: p.brand,
     playbook: p.playbook,
     avoid: p.avoid,
+    runId: p.runId,
+    brief: p.brief,
+    standard: p.standard,
   };
   await ctx.checkpoint("preparing", 10);
-  let generatedBy: ContentProvider = "template";
-  let pieces = [] as ReturnType<typeof templateGenerate>;
+  let pieces: GeneratedPiece[] = [];
   let fallbackReason: string | null = null;
   const warnings: string[] = duplicateRequestedChannels.length > 0
     ? [`중복 요청 채널 제거: ${duplicateRequestedChannels.join(", ")}`]
     : [];
-  if (preferred === "codex") {
-    await ctx.checkpoint("codex_generating", 30);
-    const r = await (deps.generate ?? codexGenerateText)(buildGenerationPrompt(input));
-    if (r.ok) {
-      const parsed = parseGeneratedPieces(r.text, channels);
-      if (parsed.length > 0) {
-        generatedBy = "codex";
-        const byChannel = new Map<(typeof channels)[number], (typeof parsed)[number]>();
-        const duplicateGeneratedChannels = new Set<(typeof channels)[number]>();
-        for (const piece of parsed) {
-          if (byChannel.has(piece.channel)) duplicateGeneratedChannels.add(piece.channel);
-          else byChannel.set(piece.channel, piece);
-        }
-        if (duplicateGeneratedChannels.size > 0) warnings.push(`Codex 중복 결과 제거: ${[...duplicateGeneratedChannels].join(", ")}`);
+  const accepted = new Map<Channel, GeneratedPiece>();
+  const bestCandidate = new Map<Channel, EvaluatedCandidate>();
+  let repairFailures: ContentRepairFailure[] = [];
+  let attempts = 0;
 
-        const missingChannels = channels.filter((channel) => !byChannel.has(channel));
-        if (missingChannels.length > 0) {
-          const fillers = templateGenerate({ ...input, channels: missingChannels });
-          for (const piece of fillers) byChannel.set(piece.channel, piece);
-          warnings.push(`Codex 결과 누락으로 템플릿 보완: ${missingChannels.join(", ")}`);
+  if (preferred === "codex") {
+    const maxAttempts = p.standard
+      ? Math.max(1, Math.min(DEFAULT_CONTENT_STANDARD.maxAttempts, Math.round(p.standard.maxAttempts || 1)))
+      : 1;
+    for (let attemptNo = 1; attemptNo <= maxAttempts; attemptNo++) {
+      const pendingChannels = channels.filter((channel) => !accepted.has(channel));
+      if (pendingChannels.length === 0) break;
+      attempts = attemptNo;
+      await ctx.checkpoint(attemptNo === 1 ? "codex_generating" : `codex_repairing_${attemptNo}`, Math.min(25 + attemptNo * 20, 80));
+      const promptInput = { ...input, channels: pendingChannels };
+      const prompt = attemptNo === 1
+        ? buildGenerationPrompt(promptInput)
+        : buildRepairPrompt(promptInput, repairFailures);
+      const result = await (deps.generate ?? codexGenerateText)(prompt);
+      if (!result.ok) {
+        fallbackReason = result.reason;
+        const nonRetryable = /(?:login|logged\s*in|install|not\s*found|로그인|설치|인증)/i.test(result.reason);
+        if (!nonRetryable && attemptNo < maxAttempts) {
+          repairFailures = pendingChannels.map((channel) => ({ channel }));
+          warnings.push(`Codex 일시 오류로 재시도(${attemptNo}/${maxAttempts}): ${result.reason}`);
+          continue;
         }
-        pieces = channels.flatMap((channel) => {
-          const piece = byChannel.get(channel);
-          return piece ? [piece] : [];
+        warnings.push(`Codex 생성 중단: ${result.reason}`);
+        break;
+      }
+
+      const parsed = parseGeneratedPieces(result.text, pendingChannels);
+      if (parsed.length === 0) {
+        fallbackReason = `unparseable codex output: ${result.text.slice(0, 120)}`;
+        repairFailures = pendingChannels.map((channel) => ({ channel }));
+        if (attemptNo < maxAttempts) {
+          warnings.push(`Codex ${attemptNo}회차 결과를 파싱하지 못해 교정 재생성`);
+          continue;
+        }
+        break;
+      }
+
+      const byChannel = new Map<Channel, GeneratedPiece>();
+      const duplicateGeneratedChannels = new Set<Channel>();
+      for (const rawPiece of parsed) {
+        if (byChannel.has(rawPiece.channel)) duplicateGeneratedChannels.add(rawPiece.channel);
+        else byChannel.set(rawPiece.channel, { ...rawPiece, generatedBy: "codex", attemptNo });
+      }
+      if (duplicateGeneratedChannels.size > 0) {
+        const prefix = attemptNo === 1 ? "Codex 중복 결과 제거" : `Codex ${attemptNo}회차 중복 결과 제거`;
+        warnings.push(`${prefix}: ${[...duplicateGeneratedChannels].join(", ")}`);
+      }
+
+      const nextFailures: ContentRepairFailure[] = [];
+      for (const channel of pendingChannels) {
+        const piece = byChannel.get(channel);
+        if (!piece) {
+          nextFailures.push({ channel });
+          continue;
+        }
+        if (!p.standard) {
+          accepted.set(channel, piece);
+          continue;
+        }
+        const report = evaluatePiece(piece, {
+          linkExpected: true,
+          products: input.products,
+          brief: input.brief,
+          standard: p.standard,
         });
-      } else fallbackReason = `unparseable codex output: ${r.text.slice(0, 120)}`;
-    } else fallbackReason = r.reason;
-    if (fallbackReason) log("warn", "content.generate: codex unavailable, falling back to template", { reason: fallbackReason });
+        const previous = bestCandidate.get(channel);
+        if (!previous || report.score > previous.report.score) bestCandidate.set(channel, { piece, report });
+        if (passesContentStandard(report, "codex", p.standard)) accepted.set(channel, piece);
+        else nextFailures.push({ channel, piece, report });
+      }
+      repairFailures = nextFailures;
+      if (repairFailures.length > 0 && attemptNo < maxAttempts) {
+        warnings.push(`품질 계약 미달 채널 교정 재생성(${attemptNo}/${maxAttempts}): ${repairFailures.map((failure) => failure.channel).join(", ")}`);
+      }
+    }
+    if (channels.every((channel) => accepted.has(channel))) fallbackReason = null;
+    if (fallbackReason) log("warn", "content.generate: codex unavailable or invalid", { reason: fallbackReason, attempts });
   }
-  if (generatedBy === "template") {
+
+  const unresolvedChannels = channels.filter((channel) => !accepted.has(channel) && !bestCandidate.has(channel));
+  const templateByChannel = new Map<Channel, GeneratedPiece>();
+  if (preferred === "template" || unresolvedChannels.length > 0) {
     await ctx.checkpoint("template_generating", 60);
-    pieces = templateGenerate(input);
+    const requested = preferred === "template" ? channels : unresolvedChannels;
+    for (const piece of templateGenerate({ ...input, channels: requested })) {
+      templateByChannel.set(piece.channel, {
+        ...piece,
+        generatedBy: "template",
+        attemptNo: Math.max(attempts, 1),
+      });
+    }
+    if (preferred !== "template" && unresolvedChannels.length > 0) {
+      warnings.push(`Codex 결과 누락으로 템플릿 보완: ${unresolvedChannels.join(", ")}`);
+    }
+  }
+
+  pieces = channels.flatMap((channel) => {
+    const piece = accepted.get(channel)
+      ?? bestCandidate.get(channel)?.piece
+      ?? templateByChannel.get(channel);
+    return piece ? [piece] : [];
+  });
+
+  const providers = new Set(pieces.map((piece) => piece.generatedBy ?? "template"));
+  const generatedBy: ContentResultProvider = providers.size > 1
+    ? "mixed"
+    : providers.has("codex") ? "codex" : "template";
+  const quality = pieces.map((piece) => {
+    const report = evaluatePiece(piece, {
+      linkExpected: true,
+      products: input.products,
+      brief: input.brief,
+      standard: p.standard,
+    });
+    const provider = piece.generatedBy ?? generatedBy;
+    return {
+      channel: piece.channel,
+      provider,
+      attemptNo: piece.attemptNo ?? 1,
+      score: report.score,
+      passed: p.standard
+        ? passesContentStandard(report, provider, p.standard)
+        : isAutoApprovable(report),
+      violations: report.violations,
+    };
+  });
+  const failedQualityChannels = quality.filter((item) => !item.passed).map((item) => item.channel);
+  if (failedQualityChannels.length > 0) {
+    warnings.push(`자동 승인 불가 — 검토 필요: ${failedQualityChannels.join(", ")}`);
   }
   if (warnings.length > 0) log("warn", "content.generate: normalized channel results", { warnings });
   await ctx.checkpoint("done", 95);
-  return { result: okResult("content.generate", `${pieces.length}개 조각 생성 (${generatedBy})`, { pieces, generatedBy, fallbackReason, warnings }) };
+  return {
+    result: okResult("content.generate", `${pieces.length}개 조각 생성 (${generatedBy})`, {
+      pieces,
+      generatedBy,
+      engine: generatedBy === "template" ? "template" : "codex-cli",
+      fallbackReason,
+      warnings,
+      attempts,
+      quality,
+      runId: p.runId ?? null,
+      versions: p.standard ? {
+        standardId: p.standard.id,
+        standardVersion: p.standard.version,
+        workflowVersion: p.standard.workflowVersion,
+        promptVersion: p.standard.promptVersion,
+        qualityVersion: p.standard.qualityVersion,
+      } : null,
+    }),
+  };
 }
 
 /** 게시물 지표 readback(분석 루프): 스페이스 세션으로 게시물 페이지를 열어 좋아요·댓글·조회 등을 읽는다 */

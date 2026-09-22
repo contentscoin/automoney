@@ -13,6 +13,12 @@ export async function consumePiece(
   const p = await ctx.db.get(pieceId);
   if (!p || p.status !== "APPROVED")
     fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+  if (p.runId) {
+    const run = await ctx.db.get(p.runId);
+    const standardPassed = (p.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
+    if (!standardPassed || run?.status !== "COMPLETED")
+      fail("CONFLICT", "전체 제작 실행의 품질 검수와 사람 승인이 완료된 콘텐츠만 게시할 수 있습니다.");
+  }
   if (
     p.ownerUserId !== userId &&
     !(p.visibility === "SHARED" && p.status === "APPROVED") &&

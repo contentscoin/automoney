@@ -24,7 +24,7 @@ const RSS = `<?xml version="1.0"?><rss xmlns:ht="https://trends.google.com/trend
 
 async function pairDevice(t: T, user: Awaited<ReturnType<typeof signup>>) {
   const { code } = await user.as.mutation(api.devices.createPairCode, {});
-  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.0" });
+  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.11" });
 }
 const authed = (token: string, init: RequestInit = {}) => ({ ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, "content-type": "application/json" } });
 
@@ -96,11 +96,232 @@ describe("content generation gate", () => {
     });
     expect(result.total).toBe(2);
     expect(result.jobIds).toHaveLength(2);
+    expect(result.runId).toBeTruthy();
     const jobs = await owner.as.query(api.jobs.listMine, { limit: 10 });
     expect(jobs.filter((job) => result.jobIds.includes(job._id))).toHaveLength(2);
     expect(jobs.find((job) => job._id === result.jobIds[0])?.contentProduct?.attrangsProductId).toBe(100001);
+    const run = await owner.as.query(api.content.getRun, { runId: result.runId });
+    expect(run).toMatchObject({
+      productIds: [p1, p2],
+      channels: ["THREADS", "INSTAGRAM_FEED"],
+      jobIds: result.jobIds,
+      expectedOutputs: 4,
+      completedJobs: 0,
+      savedOutputs: 0,
+      approvedOutputs: 0,
+      status: "QUEUED",
+    });
+    expect(run.productSnapshots).toHaveLength(2);
+    expect(run.productSnapshots[0]).toMatchObject({ productId: p1, attrangsProductId: 100001 });
+    expect(run.inputHash).toMatch(/^[a-f0-9]{64}$/);
+    expect((await owner.as.query(api.content.listRuns, {})).map((item) => item._id)).toContain(result.runId);
     await expect(owner.as.mutation(api.content.requestGenerateBatch, { productIds: [], channels: ["THREADS"] })).rejects.toThrow(/하나 이상/);
     await expect(owner.as.mutation(api.content.requestGenerateBatch, { productIds: Array(11).fill(p1), channels: ["THREADS"] })).rejects.toThrow(/최대 10개/);
+  });
+
+  it("freezes the production standard and keeps template output in review", async () => {
+    const { t, owner, p1 } = await setup();
+    await setRole(t, owner.userId, "USER");
+    const { deviceToken } = await pairDevice(t, owner);
+    const result = await owner.as.mutation(api.content.requestGenerateBatch, {
+      productIds: [p1],
+      channels: ["THREADS"],
+      brief: {
+        goal: "CONVERSION",
+        tone: "CHANNEL_NATIVE",
+        cta: "LINK",
+        audience: "출근룩을 찾는 20~30대 여성",
+        keyMessage: "가격과 코디 포인트를 구체적으로 안내",
+      },
+      // Client input may tighten the policy, but must not weaken the server baseline.
+      standard: {
+        id: "client-standard",
+        version: "1",
+        name: "약한 클라이언트 기준",
+        brand: "다른 브랜드",
+        minScore: 0,
+        requireCodex: false,
+        maxAttempts: 5,
+        maxEmoji: 10,
+        forbiddenPhrases: [],
+        workflowVersion: "forged",
+        promptVersion: "forged",
+        qualityVersion: "forged",
+      },
+    });
+    const queued = await owner.as.query(api.content.getRun, { runId: result.runId });
+    expect(queued.briefSnapshot).toMatchObject({ goal: "CONVERSION", cta: "LINK" });
+    expect(queued.standardSnapshot).toMatchObject({
+      id: "ATTRANGS_STANDARD_KO_V2",
+      version: "2.0.0",
+      name: "아뜨랑스 기본 콘텐츠 기준",
+      brand: "아뜨랑스",
+      minScore: 92,
+      requireCodex: true,
+      maxAttempts: 3,
+      maxEmoji: 2,
+    });
+    expect(queued.standardSnapshot.workflowVersion).not.toBe("forged");
+    expect(queued.standardSnapshot.forbiddenPhrases.length).toBeGreaterThan(0);
+
+    const claimed = await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json();
+    expect(claimed.data.payload.runId).toBe(result.runId);
+    expect(claimed.data.payload.brief.goal).toBe("CONVERSION");
+    const completed = await t.fetch(`/agent/jobs/${claimed.data.id}/complete`, authed(deviceToken, {
+      method: "POST",
+      body: JSON.stringify({
+        status: "SUCCEEDED",
+        result: {
+          schema: "automoney.job-result/v1",
+          kind: "ok",
+          data: {
+            generatedBy: "codex",
+            pieces: [{
+              channel: "THREADS",
+              caption: "가을 니트가 궁금하다면?\n가격과 코디 포인트를 링크에서 확인해 보세요",
+              hashtags: ["광고", "니트", "가을코디"],
+              generatedBy: "template",
+              attemptNo: 2,
+            }],
+          },
+        },
+      }),
+    }));
+    expect(completed.status).toBe(200);
+    const piece = (await owner.as.query(api.content.listLibrary, {}))[0]!;
+    expect(piece).toMatchObject({
+      runId: result.runId,
+      generatedBy: "template",
+      status: "DRAFT",
+      productionMeta: {
+        provider: "template",
+        attemptNo: 2,
+        inputHash: queued.inputHash,
+        desktopVersion: "0.1.11",
+        provenanceComplete: true,
+      },
+    });
+    expect(piece.productionMeta.jobInputHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(piece.productionMeta.outputHash).toMatch(/^[a-f0-9]{64}$/);
+    await expect(owner.as.mutation(api.content.approve, { pieceId: piece._id }))
+      .rejects.toThrow(/제작 기준/);
+    await setRole(t, owner.userId, "SUPER_ADMIN");
+    await expect(owner.as.mutation(api.content.approve, { pieceId: piece._id }))
+      .rejects.toThrow(/제작 기준/);
+    expect((await owner.as.query(api.content.getPiece, { pieceId: piece._id })).status).toBe("DRAFT");
+    const run = await owner.as.query(api.content.getRun, { runId: result.runId });
+    expect(run).toMatchObject({
+      completedJobs: 1,
+      savedOutputs: 1,
+      approvedOutputs: 0,
+      expectedOutputs: 1,
+      status: "REVIEW_REQUIRED",
+    });
+  });
+
+  it("rejects V2 requests from an outdated desktop and never trusts legacy job-level provenance", async () => {
+    const { t, owner, p1 } = await setup();
+    const { code } = await owner.as.mutation(api.devices.createPairCode, {});
+    await t.mutation(api.devices.pair, { code, deviceName: "Old PC", platform: "linux", appVersion: "0.1.10" });
+    await expect(owner.as.mutation(api.content.requestGenerateBatch, {
+      productIds: [p1],
+      channels: ["THREADS"],
+    })).rejects.toThrow(/0\.1\.11/);
+
+    const { code: replacementCode } = await owner.as.mutation(api.devices.createPairCode, {});
+    const { deviceToken } = await t.mutation(api.devices.pair, {
+      code: replacementCode,
+      deviceName: "Current PC",
+      platform: "linux",
+      appVersion: "0.1.11",
+    });
+    const requested = await owner.as.mutation(api.content.requestGenerateBatch, {
+      productIds: [p1],
+      channels: ["THREADS"],
+    });
+    await t.run((ctx) => ctx.db.patch(p1, { imageUrls: ["https://cdn.example.com/changed-after-run.jpg"] }));
+    const blockedClaim = await (await t.fetch("/agent/claim", authed(deviceToken, {
+      method: "POST",
+      body: JSON.stringify({ appVersion: "0.1.10" }),
+    }))).json();
+    expect(blockedClaim.data).toBeNull();
+    const claimed = await (await t.fetch("/agent/claim", authed(deviceToken, {
+      method: "POST",
+      body: JSON.stringify({ appVersion: "0.1.11" }),
+    }))).json();
+    await t.fetch(`/agent/jobs/${claimed.data.id}/complete`, authed(deviceToken, {
+      method: "POST",
+      body: JSON.stringify({
+        status: "SUCCEEDED",
+        result: {
+          data: {
+            generatedBy: "codex",
+            pieces: [{
+              channel: "THREADS",
+              caption: "테스트 상품 100001 원피스로 완성하는 가을 코디를 상품 링크에서 자세히 확인해 보세요.",
+              hashtags: ["광고", "원피스"],
+            }],
+          },
+        },
+      }),
+    }));
+    const [piece] = await owner.as.query(api.content.listRunPieces, { runId: requested.runId });
+    expect(piece).toMatchObject({
+      status: "DRAFT",
+      generatedBy: "template",
+      mediaUrls: [],
+      productionMeta: { provenanceComplete: false, standardPassed: false },
+    });
+    expect(piece!.qualityReport.violations.map((violation: { code: string }) => violation.code)).toContain("PROVENANCE_MISSING");
+    await expect(owner.as.mutation(api.content.approve, { pieceId: piece!._id })).rejects.toThrow(/제작 기준/);
+  });
+
+  it("completes a run only when every expected output passes the frozen standard", async () => {
+    const { t, owner, p1 } = await setup();
+    const { deviceToken } = await pairDevice(t, owner);
+    const requested = await owner.as.mutation(api.content.requestGenerateBatch, {
+      productIds: [p1],
+      channels: ["THREADS"],
+    });
+    const claimed = await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json();
+    const completed = await t.fetch(`/agent/jobs/${claimed.data.id}/complete`, authed(deviceToken, {
+      method: "POST",
+      body: JSON.stringify({
+        status: "SUCCEEDED",
+        result: {
+          schema: "automoney.job-result/v1",
+          kind: "ok",
+          data: {
+            generatedBy: "codex",
+            pieces: [{
+              channel: "THREADS",
+              caption: "테스트 상품 100001 원피스로 완성하는 가을 코디가 궁금하다면?\n가격과 코디 포인트를 상품 링크에서 자세히 확인해 보세요.",
+              hashtags: ["광고", "니트", "가을코디"],
+              generatedBy: "codex",
+              attemptNo: 1,
+            }],
+          },
+        },
+      }),
+    }));
+    expect(completed.status).toBe(200);
+    expect(await owner.as.query(api.content.getRun, { runId: requested.runId })).toMatchObject({
+      expectedOutputs: 1,
+      completedJobs: 1,
+      savedOutputs: 1,
+      approvedOutputs: 0,
+      status: "REVIEW_REQUIRED",
+    });
+    const [piece] = await owner.as.query(api.content.listRunPieces, { runId: requested.runId });
+    expect(piece).toMatchObject({ status: "DRAFT", mediaUrls: [], productionMeta: { standardPassed: true } });
+    await owner.as.mutation(api.content.approve, { pieceId: piece!._id });
+    expect(await owner.as.query(api.content.getRun, { runId: requested.runId })).toMatchObject({
+      expectedOutputs: 1,
+      completedJobs: 1,
+      savedOutputs: 1,
+      approvedOutputs: 1,
+      status: "COMPLETED",
+    });
   });
 
   it("requires a paired device, enqueues content.generate, ingests results with quality gate and honors visibility", async () => {
@@ -119,25 +340,28 @@ describe("content generation gate", () => {
     expect(claimed.data.payload.atoms.length).toBeGreaterThan(0);
 
     const pieces = [
-      { channel: "THREADS", caption: "가을 니트는 루즈핏이 정답. 와이드 슬랙스랑 매치하면 편하면서 단정해요. 링크에서 확인 👉", hashtags: ["가을코디", "니트", "아뜨랑스"], mediaUrls: [] },
-      { channel: "X", caption: "최저가 보장! 직접 입어봤는데 100% 만족", hashtags: ["광고"], mediaUrls: [] },
+      { channel: "THREADS", caption: "테스트 상품 100001 원피스로 완성하는 가을 코디.\n와이드 슬랙스와 매치하면 단정한 분위기를 연출할 수 있어요. 상품 링크에서 자세히 확인하세요.", hashtags: ["가을코디", "니트", "광고"], generatedBy: "codex", attemptNo: 1, mediaUrls: [] },
+      { channel: "X", caption: "테스트 상품 100001 최저가 보장! 직접 입어봤는데 100% 만족", hashtags: ["광고"], generatedBy: "codex", attemptNo: 1, mediaUrls: [] },
       { channel: "NOPE", caption: "x", hashtags: [], mediaUrls: [] },
     ];
-    const done = await t.fetch(`/agent/jobs/${jobId}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", result: { schema: "automoney.job-result/v1", kind: "ok", data: { pieces, generatedBy: "template" } } }) }));
+    const done = await t.fetch(`/agent/jobs/${jobId}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", result: { schema: "automoney.job-result/v1", kind: "ok", data: { pieces, generatedBy: "codex" } } }) }));
     expect(done.status).toBe(200);
     const lib = await user.as.query(api.content.listLibrary, {});
     expect(lib.length).toBe(2);
     const threads = lib.find((p) => p.channel === "THREADS")!;
     const x = lib.find((p) => p.channel === "X")!;
-    expect(threads.status).toBe("APPROVED");
+    expect(threads).toMatchObject({ status: "DRAFT", productionMeta: { standardPassed: true } });
     expect(threads.hashtags).toContain("광고");
     expect(x.status).toBe("DRAFT");
     expect(x.qualityScore).toBeLessThan(90);
     // 금칙 위반 조각은 유저가 승인 불가, 수정 후 승인 가능
     await expect(user.as.mutation(api.content.approve, { pieceId: x._id })).rejects.toThrow(/금칙/);
-    await user.as.mutation(api.content.edit, { pieceId: x._id, caption: "가을 니트 셀렉션, 링크에서 확인하세요", hashtags: ["광고", "니트"] });
+    await user.as.mutation(api.content.edit, { pieceId: x._id, caption: "테스트 상품 100001 원피스 셀렉션을 상품 링크에서 자세히 확인하세요", hashtags: ["광고", "니트"] });
+    expect((await user.as.query(api.content.getPiece, { pieceId: x._id })).status).toBe("DRAFT");
     await user.as.mutation(api.content.approve, { pieceId: x._id });
     expect((await user.as.query(api.content.getPiece, { pieceId: x._id })).status).toBe("APPROVED");
+    await user.as.mutation(api.content.approve, { pieceId: threads._id });
+    expect(await user.as.query(api.content.getRun, { runId: threads.runId! })).toMatchObject({ status: "COMPLETED", approvedOutputs: 2 });
     // 중복 ingest 방지
     expect(await t.mutation(internal.content.ingestGenerated, { jobId })).toMatchObject({ saved: 0, duplicate: true });
 
