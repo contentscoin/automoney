@@ -248,18 +248,50 @@ export type ContentProvider = "codex" | "template";
 export async function handleContentGenerate(ctx: JobContext, deps: { generate?: (prompt: string) => Promise<{ ok: true; text: string } | { ok: false; reason: string }> } = {}): Promise<JobOutcome> {
   const p = ctx.job.payload as unknown as ContentGeneratePayload;
   const preferred = ((process.env.AUTOMONEY_CONTENT_PROVIDER ?? "codex").toLowerCase() === "template" ? "template" : "codex") as ContentProvider;
-  const input = { channels: p.channels, atoms: p.atoms, products: p.products, magazineTitle: p.magazineTitle ?? null, brand: p.brand };
+  const channels = [...new Set(p.channels)];
+  const duplicateRequestedChannels = [...new Set(p.channels.filter((channel, index) => p.channels.indexOf(channel) !== index))];
+  const input = {
+    channels,
+    atoms: p.atoms,
+    products: p.products,
+    magazineTitle: p.magazineTitle ?? null,
+    brand: p.brand,
+    playbook: p.playbook,
+    avoid: p.avoid,
+  };
   await ctx.checkpoint("preparing", 10);
   let generatedBy: ContentProvider = "template";
   let pieces = [] as ReturnType<typeof templateGenerate>;
   let fallbackReason: string | null = null;
+  const warnings: string[] = duplicateRequestedChannels.length > 0
+    ? [`중복 요청 채널 제거: ${duplicateRequestedChannels.join(", ")}`]
+    : [];
   if (preferred === "codex") {
     await ctx.checkpoint("codex_generating", 30);
     const r = await (deps.generate ?? codexGenerateText)(buildGenerationPrompt(input));
     if (r.ok) {
-      pieces = parseGeneratedPieces(r.text, p.channels);
-      if (pieces.length > 0) generatedBy = "codex";
-      else fallbackReason = `unparseable codex output: ${r.text.slice(0, 120)}`;
+      const parsed = parseGeneratedPieces(r.text, channels);
+      if (parsed.length > 0) {
+        generatedBy = "codex";
+        const byChannel = new Map<(typeof channels)[number], (typeof parsed)[number]>();
+        const duplicateGeneratedChannels = new Set<(typeof channels)[number]>();
+        for (const piece of parsed) {
+          if (byChannel.has(piece.channel)) duplicateGeneratedChannels.add(piece.channel);
+          else byChannel.set(piece.channel, piece);
+        }
+        if (duplicateGeneratedChannels.size > 0) warnings.push(`Codex 중복 결과 제거: ${[...duplicateGeneratedChannels].join(", ")}`);
+
+        const missingChannels = channels.filter((channel) => !byChannel.has(channel));
+        if (missingChannels.length > 0) {
+          const fillers = templateGenerate({ ...input, channels: missingChannels });
+          for (const piece of fillers) byChannel.set(piece.channel, piece);
+          warnings.push(`Codex 결과 누락으로 템플릿 보완: ${missingChannels.join(", ")}`);
+        }
+        pieces = channels.flatMap((channel) => {
+          const piece = byChannel.get(channel);
+          return piece ? [piece] : [];
+        });
+      } else fallbackReason = `unparseable codex output: ${r.text.slice(0, 120)}`;
     } else fallbackReason = r.reason;
     if (fallbackReason) log("warn", "content.generate: codex unavailable, falling back to template", { reason: fallbackReason });
   }
@@ -267,8 +299,9 @@ export async function handleContentGenerate(ctx: JobContext, deps: { generate?: 
     await ctx.checkpoint("template_generating", 60);
     pieces = templateGenerate(input);
   }
+  if (warnings.length > 0) log("warn", "content.generate: normalized channel results", { warnings });
   await ctx.checkpoint("done", 95);
-  return { result: okResult("content.generate", `${pieces.length}개 조각 생성 (${generatedBy})`, { pieces, generatedBy, fallbackReason }) };
+  return { result: okResult("content.generate", `${pieces.length}개 조각 생성 (${generatedBy})`, { pieces, generatedBy, fallbackReason, warnings }) };
 }
 
 /** 게시물 지표 readback(분석 루프): 스페이스 세션으로 게시물 페이지를 열어 좋아요·댓글·조회 등을 읽는다 */

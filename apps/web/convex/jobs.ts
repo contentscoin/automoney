@@ -125,9 +125,11 @@ export async function enqueuePublishFor(ctx: MutationCtx, user: Doc<"users">, ar
   if (space.sessionState !== "HEALTHY" && source === "WEB") fail("CONFLICT", "정상 상태의 게시 계정만 사용할 수 있습니다. 연결 관리에서 로그인과 상태 확인을 완료하세요.");
   let text = args.text;
   let mediaUrls = args.mediaUrls;
+  let contentProductId: Id<"products"> | undefined;
   if (args.pieceId) {
     const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
     if (CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) fail("INVALID_ARGUMENT", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
+    contentProductId = piece.productId;
     if (!text.trim()) text = piece.text;
     if (mediaUrls.length === 0) mediaUrls = piece.mediaUrls;
   }
@@ -135,9 +137,20 @@ export async function enqueuePublishFor(ctx: MutationCtx, user: Doc<"users">, ar
   if (args.linkId) {
     const link = await ctx.db.get(args.linkId);
     if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
+    if (link.status !== "ACTIVE") fail("CONFLICT", "활성 상태의 링크만 게시에 사용할 수 있습니다.");
+    if (contentProductId && link.productId !== contentProductId) fail("INVALID_ARGUMENT", "콘텐츠 상품과 마케팅 링크 상품이 일치하지 않습니다.");
     linkUrl = `${process.env.SITE_URL ?? ""}/r/${link.shortCode}`;
   }
-  const payload: PublishPayload & { pieceId?: string } = { spaceId: space._id, platform: space.platform, text, mediaUrls, linkUrl, dryRun: args.dryRun ?? false, ...(args.pieceId ? { pieceId: args.pieceId } : {}) };
+  const payload: PublishPayload = {
+    spaceId: space._id,
+    platform: space.platform,
+    text,
+    mediaUrls,
+    linkUrl,
+    dryRun: args.dryRun ?? false,
+    ...(args.linkId ? { linkId: args.linkId } : {}),
+    ...(args.pieceId ? { pieceId: args.pieceId } : {}),
+  };
   const id = await enqueueJob(ctx, { userId: user._id, jobType: "post.publish", payload: payload as unknown as Record<string, unknown>, spaceId: space._id, source, needsApproval: args.requireApproval ?? true });
   await audit(ctx, { actorUserId: user._id, action: "job.enqueuePublish", metadata: { jobId: id, spaceId: space._id, pieceId: args.pieceId ?? null } });
   return id;
@@ -167,6 +180,12 @@ export async function listJobsFor(ctx: QueryCtx, user: Doc<"users">, args: Objec
       spaceName: space?.name ?? null,
       platform: space?.platform ?? null,
       preview: typeof j.payload?.text === "string" ? String(j.payload.text).slice(0, 80) : null,
+      contentProduct: j.jobType === "content.generate" && Array.isArray(j.payload?.products)
+        ? {
+            attrangsProductId: Number(j.payload.products[0]?.attrangsProductId ?? 0) || null,
+            name: typeof j.payload.products[0]?.name === "string" ? j.payload.products[0].name : null,
+          }
+        : null,
       errorCode: j.errorCode ?? null,
       errorMessage: j.errorMessage ?? null,
       result: j.result ?? null,

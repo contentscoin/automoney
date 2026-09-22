@@ -147,6 +147,31 @@ export const requestGenerate = mutation({
   },
 });
 
+/** 콘텐츠 제작 워크플로: 상품별 생성 잡을 최대 10개까지 한 번에 등록한다. */
+export const requestGenerateBatch = mutation({
+  args: {
+    productIds: v.array(v.id("products")),
+    channels: v.array(channelValidator),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    if (args.productIds.length === 0) fail("INVALID_ARGUMENT", "상품을 하나 이상 선택하세요.");
+    if (args.productIds.length > 10) fail("INVALID_ARGUMENT", "한 번에 상품을 최대 10개까지 선택할 수 있습니다.");
+    const productIds = args.productIds.filter((id, index) => args.productIds.indexOf(id) === index);
+    const channels = args.channels.filter((channel, index) => args.channels.indexOf(channel) === index);
+    const jobIds = [];
+    for (const productId of productIds) {
+      jobIds.push(await requestGenerateFor(ctx, user, { productId, channels }, "WEB"));
+    }
+    await audit(ctx, {
+      actorUserId: user._id,
+      action: "content.requestGenerateBatch",
+      metadata: { productCount: productIds.length, channels, jobIds },
+    });
+    return { total: jobIds.length, jobIds };
+  },
+});
+
 function brief(p: Doc<"products">): ProductBrief {
   return {
     attrangsProductId: p.attrangsProductId,

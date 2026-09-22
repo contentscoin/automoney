@@ -108,6 +108,7 @@ export default defineSchema({
     trackingCode: v.string(),
     shortCode: v.string(),
     targetUrl: v.string(),
+    origin: v.optional(v.union(v.literal("MOCK"), v.literal("POOL"), v.literal("API"), v.literal("DEMO"))),
     status: linkStatusValidator,
     issuedAt: v.number(),
     clickCount: v.number(),

@@ -20,6 +20,7 @@
 | [05-desktop-browser-spaces.md](docs/05-desktop-browser-spaces.md) | 데스크톱 에이전트, 스페이스, 브라우저 고정, AI 에이전트 조작, 다계정·예약 |
 | [06-content-engine.md](docs/06-content-engine.md) | 매거진 수집 → 채널별 콘텐츠 생성 → 품질 게이트 → 큐레이션 |
 | [07-roadmap.md](docs/07-roadmap.md) | 마일스톤, 리스크, 오픈 이슈, 검증 기준 |
+| [08-content-production-workflow.md](docs/08-content-production-workflow.md) | 상품 10개 선택부터 링크·AI 초안·검수·무게시 테스트까지의 운영 절차 |
 | [adr/](docs/adr/) | 핵심 아키텍처 결정 기록 |
 
 ## 요구사항 ↔ 문서 매핑
@@ -118,7 +119,7 @@ Convex 추가 환경변수: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELE
 
 ### M1 범위와 다음 단계
 - 구현: 회원·RBAC·총판 초대, KYC 제출·암호화·검수, 상품 CSV/Mock 동기화, 링크 발급·단축 URL·클릭 로그, 주문 웹훅(멱등·24h 재검증·취소 역분개), 유저/총판/수퍼어드민 대시보드(단일 요율 예상 수당, 간접구매는 수퍼어드민 전용).
-- 남은 로드맵: MCP OAuth(PKCE·DCR) 경로, Meta 앱 리뷰 후 실 API 검증, 코디 제안 카드. 아뜨랑스 실제 API 어댑터는 규격 합의 후.
+- 남은 외부 연동: Meta 앱 리뷰 후 실 API 검증과 아뜨랑스 실제 파트너 API·정산 규격 합의. MCP OAuth(PKCE·DCR)와 코디 제안 카드는 구현 완료했습니다.
 
 ## 전제 (사용자 확정)
 - 아뜨랑스에는 현재 파트너 API가 없으므로 **automoney가 인터페이스 규격을 제안**하고 아뜨랑스가 구현합니다. 초기 폴백은 CSV 배치입니다.

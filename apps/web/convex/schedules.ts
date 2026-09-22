@@ -1,6 +1,6 @@
 import type { Doc } from "./_generated/dataModel";
 import { v, type ObjectType } from "convex/values";
-import { computeNextRunAt, kstDayKey, parseTimeOfDay, validatePublishPayload, type PublishPayload } from "@automoney/shared";
+import { CHANNEL_PLATFORM, computeNextRunAt, kstDayKey, parseTimeOfDay, validatePublishPayload, type PublishPayload } from "@automoney/shared";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation, query, type QueryCtx, type MutationCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
@@ -33,13 +33,16 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
     const existing = await ctx.db.get(args.id);
     if (!existing || existing.userId !== user._id) fail("NOT_FOUND", "예약을 찾을 수 없습니다.");
   }
+  const space = await ctx.db.get(args.spaceId);
+  if (!space || space.userId !== user._id) fail("NOT_FOUND", "스페이스를 찾을 수 없습니다.");
+  let contentProductId: Doc<"contentPieces">["productId"];
   if (args.pieceId) {
     const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
+    if (CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) fail("INVALID_ARGUMENT", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
+    contentProductId = piece.productId;
     if (!args.text.trim()) args.text = piece.text;
     if (args.mediaUrls.length === 0) args.mediaUrls = piece.mediaUrls;
   }
-  const space = await ctx.db.get(args.spaceId);
-  if (!space || space.userId !== user._id) fail("NOT_FOUND", "스페이스를 찾을 수 없습니다.");
   if (!parseTimeOfDay(args.timeOfDay)) fail("INVALID_ARGUMENT", "시간은 HH:MM 형식입니다.");
   if (args.kind === "WEEKLY" && args.daysOfWeek.length === 0) fail("INVALID_ARGUMENT", "요일을 선택하세요.");
   if (args.kind === "ONE_SHOT" && !args.runDate) fail("INVALID_ARGUMENT", "실행 일자를 입력하세요.");
@@ -47,6 +50,8 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
   if (args.linkId) {
     const link = await ctx.db.get(args.linkId);
     if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
+    if (link.status !== "ACTIVE") fail("CONFLICT", "활성 상태의 링크만 예약에 사용할 수 있습니다.");
+    if (contentProductId && link.productId !== contentProductId) fail("INVALID_ARGUMENT", "콘텐츠 상품과 마케팅 링크 상품이 일치하지 않습니다.");
   }
   const err = validatePublishPayload({ spaceId: space._id, platform: space.platform, text: args.text, mediaUrls: args.mediaUrls, linkUrl: args.linkId ? "https://x/r/XXXXXXX" : null });
   if (err) fail("INVALID_ARGUMENT", `발행 내용 오류: ${err}`);
@@ -133,6 +138,25 @@ export const tick = internalMutation({
         skipped++;
         continue;
       }
+      const piece = s.pieceId ? await ctx.db.get(s.pieceId) : null;
+      const link = s.linkId ? await ctx.db.get(s.linkId) : null;
+      const invalidAssociation =
+        (s.pieceId && (!piece || piece.status !== "APPROVED")) ? "CONTENT_UNAVAILABLE"
+          : piece && CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform ? "CONTENT_PLATFORM_MISMATCH"
+            : s.linkId && (!link || link.userId !== s.userId) ? "LINK_NOT_FOUND"
+              : link && link.status !== "ACTIVE" ? "LINK_INACTIVE"
+                : piece?.productId && link && piece.productId !== link.productId ? "CONTENT_LINK_PRODUCT_MISMATCH"
+                  : null;
+      if (invalidAssociation) {
+        await ctx.db.patch(s._id, {
+          nextRunAt: next,
+          enabled: next !== undefined,
+          lastSkipReason: invalidAssociation,
+          lastSkippedAt: now,
+        });
+        skipped++;
+        continue;
+      }
       // 일일 한도: 같은 KST 일자에 생성된 발행 잡 수
       const dayKey = kstDayKey(now);
       const todays = (await ctx.db.query("agentJobs").withIndex("by_space", (q) => q.eq("spaceId", space._id)).order("desc").take(50)).filter(
@@ -149,16 +173,14 @@ export const tick = internalMutation({
         continue;
       }
       let linkUrl: string | null = null;
-      if (s.linkId) {
-        const link = await ctx.db.get(s.linkId);
-        if (link) linkUrl = `${process.env.SITE_URL ?? ""}/r/${link.shortCode}`;
-      }
-      const payload: PublishPayload & { pieceId?: string } = {
+      if (link) linkUrl = `${process.env.SITE_URL ?? ""}/r/${link.shortCode}`;
+      const payload: PublishPayload = {
         spaceId: space._id,
         platform: space.platform,
         text: s.text,
         mediaUrls: s.mediaUrls,
         linkUrl,
+        ...(s.linkId ? { linkId: s.linkId } : {}),
         ...(s.pieceId ? { pieceId: s.pieceId } : {}),
       };
       const jobId = await enqueueJob(ctx, {

@@ -11,15 +11,17 @@ const payload: ContentGeneratePayload = {
   ],
   products: [{ attrangsProductId: 100001, name: "루즈핏 니트", price: 39000, salePrice: 35000, detailUrl: "https://attrangs.co.kr/shop/view.php?index_no=100001", category: "니트" }],
   magazineTitle: "가을 니트 스타일링",
+  playbook: ["질문형 훅을 첫 줄에 사용"],
+  avoid: ["과장된 최상급 표현"],
 };
 
-function ctx(): JobContext & { stages: string[] } {
+function ctx(jobPayload: ContentGeneratePayload = payload): JobContext & { stages: string[] } {
   const stages: string[] = [];
   return {
     stages,
     cfg: {} as JobContext["cfg"],
     api: {} as JobContext["api"],
-    job: { id: "j1", jobType: "content.generate", payload: payload as unknown as Record<string, unknown>, spaceId: null, space: null, leaseMs: 1000 } as unknown as JobContext["job"],
+    job: { id: "j1", jobType: "content.generate", payload: jobPayload as unknown as Record<string, unknown>, spaceId: null, space: null, leaseMs: 1000 } as unknown as JobContext["job"],
     async checkpoint(stage) {
       stages.push(stage);
     },
@@ -31,21 +33,29 @@ afterEach(() => {
 });
 
 describe("content.generate handler", () => {
-  it("uses codex output when parseable and reports generatedBy=codex", async () => {
+  it("passes playbook guidance and fills each missing Codex channel exactly once", async () => {
     const c = ctx();
     let prompt = "";
     const out = await handleContentGenerate(c, {
       generate: async (p) => {
         prompt = p;
-        return { ok: true, text: 'here you go:\n[{"channel":"THREADS","caption":"니트 추천","hashtags":["광고","니트"],"mediaUrls":[]},{"channel":"X","caption":"허용 안 된 채널","hashtags":[]}]' };
+        return { ok: true, text: 'here you go:\n[{"channel":"THREADS","caption":"니트 추천","hashtags":["광고","니트"],"mediaUrls":[]},{"channel":"THREADS","caption":"중복 결과","hashtags":[]},{"channel":"X","caption":"허용 안 된 채널","hashtags":[]}]' };
       },
     });
     expect(prompt).toContain("THREADS");
     expect(prompt).toContain("루즈핏 니트");
+    expect(prompt).toContain("질문형 훅을 첫 줄에 사용");
+    expect(prompt).toContain("과장된 최상급 표현");
     expect(out.result.kind).toBe("ok");
-    const data = out.result.data as { pieces: { channel: string }[]; generatedBy: string; fallbackReason: string | null };
+    const data = out.result.data as { pieces: { channel: string; caption: string; script?: string | null }[]; generatedBy: string; fallbackReason: string | null; warnings: string[] };
     expect(data.generatedBy).toBe("codex");
-    expect(data.pieces.map((p) => p.channel)).toEqual(["THREADS"]);
+    expect(data.pieces.map((p) => p.channel)).toEqual(["THREADS", "INSTAGRAM_REEL"]);
+    expect(data.pieces.find((p) => p.channel === "THREADS")?.caption).toBe("니트 추천");
+    expect(data.pieces.find((p) => p.channel === "INSTAGRAM_REEL")?.script).toBeTruthy();
+    expect(data.warnings).toEqual(expect.arrayContaining([
+      "Codex 중복 결과 제거: THREADS",
+      "Codex 결과 누락으로 템플릿 보완: INSTAGRAM_REEL",
+    ]));
     expect(data.fallbackReason).toBeNull();
     expect(c.stages).toContain("codex_generating");
   });
@@ -66,7 +76,7 @@ describe("content.generate handler", () => {
 
   it("skips codex entirely when AUTOMONEY_CONTENT_PROVIDER=template", async () => {
     process.env.AUTOMONEY_CONTENT_PROVIDER = "template";
-    const c = ctx();
+    const c = ctx({ ...payload, channels: ["THREADS", "THREADS", "INSTAGRAM_REEL"] });
     let called = false;
     const out = await handleContentGenerate(c, {
       generate: async () => {
@@ -75,7 +85,10 @@ describe("content.generate handler", () => {
       },
     });
     expect(called).toBe(false);
-    expect((out.result.data as { generatedBy: string }).generatedBy).toBe("template");
+    const data = out.result.data as { generatedBy: string; pieces: { channel: string }[]; warnings: string[] };
+    expect(data.generatedBy).toBe("template");
+    expect(data.pieces.map((p) => p.channel)).toEqual(["THREADS", "INSTAGRAM_REEL"]);
+    expect(data.warnings).toContain("중복 요청 채널 제거: THREADS");
     expect(c.stages).not.toContain("codex_generating");
   });
 });

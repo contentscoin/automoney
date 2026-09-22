@@ -29,6 +29,8 @@ describe("links & clicks", () => {
     const mine = await user.as.query(api.links.listMine, {});
     expect(mine).toHaveLength(1);
     expect(mine[0]?.clickCount).toBe(1);
+    expect(mine[0]?.origin).toBe("MOCK");
+    expect(mine[0]?.targetUrl).toContain("attrangs.co.kr");
 
     const summary = await user.as.query(api.dashboard.userSummary, {});
     expect(summary.current.clicks).toBe(1);
@@ -44,6 +46,23 @@ describe("links & clicks", () => {
     const t = makeT();
     const r = await t.mutation(api.clicks.record, { shortCode: "NOPE123", secret: "redirect-secret" });
     expect(r.found).toBe(false);
+  });
+
+  it("issues up to ten product links as one workflow batch", async () => {
+    const t = makeT();
+    const user = await signup(t, "batch-links@test.com");
+    const first = await seedProduct(t, 210001);
+    const second = await seedProduct(t, 210002);
+    const result = await user.as.action(api.links.issueMany, { productIds: [first, second] });
+    expect(result).toMatchObject({ total: 2, issued: 2, existed: 0 });
+    expect((await user.as.query(api.links.listMine, {}))).toHaveLength(2);
+    expect(await user.as.action(api.links.issueMany, { productIds: [first, second] })).toMatchObject({ total: 2, issued: 0, existed: 2 });
+    const firstLink = (await user.as.query(api.links.listMine, {})).find((link) => link.product?._id === first)!;
+    await user.as.mutation(api.links.setStatus, { linkId: firstLink._id, status: "DISABLED" });
+    expect(await user.as.action(api.links.issueMany, { productIds: [first] })).toMatchObject({ issued: 0, existed: 1, reactivated: 1 });
+    expect((await user.as.query(api.links.listMine, {})).find((link) => link._id === firstLink._id)?.status).toBe("ACTIVE");
+    await expect(user.as.action(api.links.issueMany, { productIds: [] })).rejects.toThrow(/하나 이상/);
+    await expect(user.as.action(api.links.issueMany, { productIds: Array(11).fill(first) })).rejects.toThrow(/최대 10개/);
   });
 
   it("previews and resumes link-pool imports; real mode never falls back to mock", async () => {
@@ -63,6 +82,7 @@ describe("links & clicks", () => {
     try {
       expect((await firstUser.as.action(api.links.issue, { productId })).trackingCode).toBe("pool-a");
       expect((await secondUser.as.action(api.links.issue, { productId })).trackingCode).toBe("pool-b");
+      expect((await firstUser.as.query(api.links.listMine, {}))[0]?.origin).toBe("POOL");
       await expect(emptyUser.as.action(api.links.issue, { productId })).rejects.toThrow(/소진/);
     } finally {
       delete process.env.ATTRANGS_MODE;

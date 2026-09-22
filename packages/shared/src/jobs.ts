@@ -82,6 +82,10 @@ export interface PublishPayload {
   text: string;
   mediaUrls: string[];
   linkUrl?: string | null;
+  /** 서버가 실행 직전 링크 상태·상품 연결을 재검증하기 위한 내부 참조 */
+  linkId?: string;
+  /** 게시 성공 시 콘텐츠 사용 횟수·성과를 연결하기 위한 내부 참조 */
+  pieceId?: string;
   dryRun?: boolean;
 }
 

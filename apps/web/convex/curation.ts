@@ -180,7 +180,7 @@ export const isSuper = internalQuery({
     (await ctx.db.get(args.userId))?.role === "SUPER_ADMIN",
 });
 
-/** 제품 정보 팩: 카탈로그 필드로 규칙 기반 핵심 포인트·FAQ 생성 */
+/** 제품 정보 팩: 검증된 카탈로그 필드만 사용해 안전한 생성 근거를 만든다. */
 export const buildProductFacts = mutation({
   args: { productId: v.id("products") },
   handler: async (ctx, args) => {
@@ -203,17 +203,12 @@ export const buildProductFacts = mutation({
       {
         key: "category",
         title: "카테고리",
-        body: `${p.category ?? "의류"} · 아뜨랑스 자체제작 라인`,
-      },
-      {
-        key: "delivery",
-        title: "배송·교환",
-        body: "오늘출발 대상 상품은 당일 출고, 사이즈 교환 무료(아뜨랑스 정책 기준)",
+        body: p.category ?? "의류",
       },
       {
         key: "faq",
-        title: "자주 묻는 질문",
-        body: `Q. 어떤 사이즈가 맞을까요? → 상세 페이지의 실측 사이즈표를 확인하세요.\nQ. 세탁은? → 상품 상세의 소재·세탁 안내를 따르세요.`,
+        title: "확인 안내",
+        body: "사이즈·소재·세탁·배송·교환 조건은 변경될 수 있으므로 상품 상세 페이지의 최신 안내를 확인하세요.",
       },
       {
         key: "link",

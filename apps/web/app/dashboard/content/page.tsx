@@ -31,6 +31,7 @@ export default function ContentPage() {
   const [f, setF] = useState<{ magazineId: string; productId: string; channels: Channel[] }>({ magazineId: "", productId: "", channels: ["THREADS", "INSTAGRAM_FEED"] });
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showJobsLink, setShowJobsLink] = useState(false);
   const [scope, setScope] = useState<"SHARED" | "MINE">("SHARED");
   const activeDevice = devices?.find((d) => d.status === "ACTIVE");
   const hasDevice = !!activeDevice;
@@ -58,8 +59,12 @@ export default function ContentPage() {
           setBusy(true);
           try {
             await requestGenerate({ magazineId: (f.magazineId || undefined) as Id<"magazines"> | undefined, productId: (f.productId || undefined) as Id<"products"> | undefined, channels: f.channels });
+            setTab("PIECES");
+            setScope("MINE");
+            setStatusFilter("");
+            setShowJobsLink(true);
             setMsg("생성 작업을 등록했습니다. 에이전트가 완료하면 아래 라이브러리에 나타납니다(작업 페이지에서 진행 상황 확인).");
-          } catch (err) { setMsg(errorMessage(err)); } finally { setBusy(false); }
+          } catch (err) { setShowJobsLink(false); setMsg(errorMessage(err)); } finally { setBusy(false); }
         }}>
           <div><label className="label">매거진</label><select className="input" value={f.magazineId} onChange={(e) => setF({ ...f, magazineId: e.target.value })}><option value="">선택 안 함</option>{magazines?.map((m) => <option key={m._id} value={m._id}>{m.title} ({m.atomCount}소재·{m.productCount}상품)</option>)}</select></div>
           <div><label className="label">상품</label><select className="input" value={f.productId} onChange={(e) => setF({ ...f, productId: e.target.value })}><option value="">선택 안 함</option>{(f.magazineId && selectedMagazine ? selectedMagazine.products : products ?? []).map((p) => <option key={p._id} value={p._id}>{p.name}</option>)}</select></div>
@@ -72,7 +77,7 @@ export default function ContentPage() {
             {f.productId && <button type="button" className="btn-ghost" onClick={async () => { try { const r = await celebMatch({ productId: f.productId as Id<"products"> }); setMsg(r.found ? `연예인 착용 후보 ${r.found}건 (출처 링크만 저장)` : `검색 프로바이더(${r.provider}) 미설정 — 운영자가 키를 등록하면 활성화됩니다.`); } catch (err) { setMsg(errorMessage(err)); } }}>연예인 착용 검색</button>}
           </div>
         </form>
-        {msg && <p className="mt-2 text-sm text-stone-700">{msg}</p>}
+        {msg && <p className="mt-2 text-sm text-stone-700" role="status">{msg}{showJobsLink && <> <Link className="font-medium underline" href="/dashboard/jobs">작업 진행 상황 보기</Link></>}</p>}
         {selectedMagazine && (
           <details className="mt-3 text-sm"><summary className="cursor-pointer text-stone-600">매거진 소재 {selectedMagazine.atoms.length}개 보기</summary>
             <ul className="mt-1 grid gap-1 text-xs">{selectedMagazine.atoms.map((a) => <li key={a._id}><span className="rounded bg-stone-100 px-1">{a.atomType}</span> {a.text}</li>)}</ul>

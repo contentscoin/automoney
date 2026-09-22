@@ -27,7 +27,7 @@ export async function recordPublishedPost(ctx: MutationCtx, job: Doc<"agentJobs"
   const data = (job.result as { data?: { postUrl?: string; externalPostId?: string; dryRun?: boolean } } | undefined)?.data;
   if (!data?.postUrl || data.dryRun) return null;
   if (await ctx.db.query("postMetrics").withIndex("by_job", (q) => q.eq("jobId", job._id)).first()) return null;
-  const p = job.payload as PublishPayload & { pieceId?: string };
+  const p = job.payload as PublishPayload;
   const space = job.spaceId ? await ctx.db.get(job.spaceId) : null;
   const now = job.finishedAt ?? Date.now();
   let linkId: Id<"marketingLinks"> | undefined;
@@ -35,7 +35,7 @@ export async function recordPublishedPost(ctx: MutationCtx, job: Doc<"agentJobs"
     const code = p.linkUrl.split("/r/")[1];
     if (code) linkId = (await ctx.db.query("marketingLinks").withIndex("by_shortCode", (q) => q.eq("shortCode", code)).unique())?._id;
   }
-  return await ctx.db.insert("postMetrics", {
+  const metricsId = await ctx.db.insert("postMetrics", {
     jobId: job._id,
     userId: job.userId,
     spaceId: job.spaceId,
@@ -55,6 +55,11 @@ export async function recordPublishedPost(ctx: MutationCtx, job: Doc<"agentJobs"
     nextWindowAt: now + WINDOW_MS["24h"],
     done: false,
   });
+  if (p.pieceId) {
+    const piece = await ctx.db.get(p.pieceId as Id<"contentPieces">);
+    if (piece) await ctx.db.patch(piece._id, { usageCount: piece.usageCount + 1 });
+  }
+  return metricsId;
 }
 
 export async function latestMetricsForJob(ctx: QueryCtx | MutationCtx, jobId: Id<"agentJobs">) {

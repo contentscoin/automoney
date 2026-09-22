@@ -10,13 +10,15 @@ import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
 
 /** 링크 발급: 어댑터에서 tracking code 를 받아 저장. 상품×유저 1:1. */
-export type IssuedLink = { linkId: string; shortCode: string; trackingCode: string; existed: boolean };
+export type IssuedLink = { linkId: string; shortCode: string; trackingCode: string; existed: boolean; reactivated?: boolean };
 
 /** 링크 발급 본문(액션 컨텍스트): 웹 액션과 MCP `link_issue` 가 공유 */
 export async function issueLinkFor(ctx: ActionCtx, userId: Id<"users">, productId: Id<"products">): Promise<IssuedLink> {
   const prep = await ctx.runQuery(internal.links.prepareIssue, { userId, productId });
   if (prep.existing) {
-    return { linkId: prep.existing._id, shortCode: prep.existing.shortCode, trackingCode: prep.existing.trackingCode, existed: true };
+    const reactivated = prep.existing.status !== "ACTIVE";
+    if (reactivated) await ctx.runMutation(internal.links.reactivateIssued, { userId, linkId: prep.existing._id });
+    return { linkId: prep.existing._id, shortCode: prep.existing.shortCode, trackingCode: prep.existing.trackingCode, existed: true, reactivated };
   }
   if ((process.env.ATTRANGS_MODE ?? "mock").toLowerCase() !== "mock") {
     return await ctx.runMutation(internal.links.allocateFromPool, { userId, productId });
@@ -31,7 +33,13 @@ export async function issueLinkFor(ctx: ActionCtx, userId: Id<"users">, productI
   } catch (e) {
     fail("ATTRANGS_LINK_UNAVAILABLE", `아뜨랑스 링크 발급에 실패했습니다: ${(e as Error).message}`);
   }
-  const saved = await ctx.runMutation(internal.links.saveIssued, { userId, productId, trackingCode: issued.trackingCode, targetUrl: issued.landingUrl });
+  const saved = await ctx.runMutation(internal.links.saveIssued, {
+    userId,
+    productId,
+    trackingCode: issued.trackingCode,
+    targetUrl: issued.landingUrl,
+    origin: "MOCK",
+  });
   return { ...saved, existed: false };
 }
 
@@ -63,10 +71,46 @@ export const allocateFromPool = internalMutation({
       if (!(await ctx.db.query("marketingLinks").withIndex("by_shortCode", (q) => q.eq("shortCode", candidate)).unique())) { shortCode = candidate; break; }
     }
     if (!shortCode) fail("CONFLICT", "단축 코드 생성에 실패했습니다.");
-    const linkId = await ctx.db.insert("marketingLinks", { userId: args.userId, productId: args.productId, trackingCode: pool.trackingCode, shortCode, targetUrl: pool.targetUrl, status: "ACTIVE", issuedAt: Date.now(), clickCount: 0 });
+    const linkId = await ctx.db.insert("marketingLinks", { userId: args.userId, productId: args.productId, trackingCode: pool.trackingCode, shortCode, targetUrl: pool.targetUrl, origin: "POOL", status: "ACTIVE", issuedAt: Date.now(), clickCount: 0 });
     await ctx.db.patch(pool._id, { status: "ASSIGNED", assignedUserId: args.userId, assignedLinkId: linkId });
     await audit(ctx, { actorUserId: args.userId, action: "link.issueFromPool", metadata: { linkId, poolId: pool._id, productId: args.productId } });
     return { linkId, shortCode, trackingCode: pool.trackingCode, existed: false };
+  },
+});
+
+/** 콘텐츠 제작 워크플로: 선택한 상품의 마케팅 링크를 한 번에 발급한다. */
+export const issueMany = action({
+  args: { productIds: v.array(v.id("products")) },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) fail("UNAUTHENTICATED", "로그인이 필요합니다.");
+    if (args.productIds.length === 0) fail("INVALID_ARGUMENT", "상품을 하나 이상 선택하세요.");
+    if (args.productIds.length > 10) fail("INVALID_ARGUMENT", "한 번에 상품을 최대 10개까지 선택할 수 있습니다.");
+    const productIds = args.productIds.filter((id, index) => args.productIds.indexOf(id) === index);
+    const links = [];
+    for (const productId of productIds) {
+      links.push({ productId, ...(await issueLinkFor(ctx, userId, productId)) });
+    }
+    return {
+      total: links.length,
+      issued: links.filter((link) => !link.existed).length,
+      existed: links.filter((link) => link.existed).length,
+      reactivated: links.filter((link) => link.reactivated).length,
+      links,
+    };
+  },
+});
+
+/** 명시적인 재발급 요청은 기존에 중지한 상품 링크를 새 코드 생성 없이 다시 활성화한다. */
+export const reactivateIssued = internalMutation({
+  args: { userId: v.id("users"), linkId: v.id("marketingLinks") },
+  handler: async (ctx, args) => {
+    const link = await ctx.db.get(args.linkId);
+    if (!link || link.userId !== args.userId) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
+    if (link.status !== "ACTIVE") {
+      await ctx.db.patch(link._id, { status: "ACTIVE" });
+      await audit(ctx, { actorUserId: args.userId, action: "link.reactivate", metadata: { linkId: link._id, productId: link.productId } });
+    }
   },
 });
 
@@ -87,7 +131,13 @@ export const prepareIssue = internalQuery({
 });
 
 export const saveIssued = internalMutation({
-  args: { userId: v.id("users"), productId: v.id("products"), trackingCode: v.string(), targetUrl: v.string() },
+  args: {
+    userId: v.id("users"),
+    productId: v.id("products"),
+    trackingCode: v.string(),
+    targetUrl: v.string(),
+    origin: v.union(v.literal("MOCK"), v.literal("API"), v.literal("DEMO")),
+  },
   handler: async (ctx, args) => {
     const dup = await ctx.db
       .query("marketingLinks")
@@ -113,11 +163,12 @@ export const saveIssued = internalMutation({
       trackingCode: args.trackingCode,
       shortCode,
       targetUrl: args.targetUrl,
+      origin: args.origin,
       status: "ACTIVE",
       issuedAt: Date.now(),
       clickCount: 0,
     });
-    await audit(ctx, { actorUserId: args.userId, action: "link.issue", metadata: { linkId, productId: args.productId } });
+    await audit(ctx, { actorUserId: args.userId, action: "link.issue", metadata: { linkId, productId: args.productId, origin: args.origin } });
     return { linkId, shortCode, trackingCode: args.trackingCode };
   },
 });
@@ -135,6 +186,8 @@ export async function listLinksFor(ctx: QueryCtx, user: Doc<"users">) {
       _id: l._id,
       shortCode: l.shortCode,
       trackingCode: l.trackingCode,
+      targetUrl: l.targetUrl,
+      origin: l.origin ?? null,
       status: l.status,
       issuedAt: l.issuedAt,
       clickCount: l.clickCount,

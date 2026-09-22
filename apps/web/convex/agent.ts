@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { APPROVAL_TTL_MS, JOB_LEASE_MS, kstDayKey } from "@automoney/shared";
+import { APPROVAL_TTL_MS, CHANNEL_PLATFORM, JOB_LEASE_MS, kstDayKey, type PublishPayload } from "@automoney/shared";
 import { internal } from "./_generated/api";
 import { ingestGeneratedJob } from "./content";
 import { ingestReadbackJob, recordPublishedPost } from "./analytics";
@@ -199,13 +199,20 @@ export const preflightJob = internalMutation({
     const space = j.spaceId ? await ctx.db.get(j.spaceId) : null;
     if (!space || space.userId !== j.userId) return deny("SPACE_NOT_FOUND", "스페이스를 찾을 수 없습니다.");
     if (!["HEALTHY", "RUNNING"].includes(space.sessionState)) return deny("SPACE_NOT_READY", "스페이스가 게시 가능한 상태가 아닙니다.");
+    const payload = j.payload as PublishPayload;
+    const piece = payload.pieceId ? await ctx.db.get(payload.pieceId as Id<"contentPieces">) : null;
+    if (payload.pieceId && (!piece || piece.status !== "APPROVED")) return deny("CONTENT_UNAVAILABLE", "승인된 콘텐츠를 찾을 수 없습니다.");
+    if (piece && CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) return deny("CONTENT_PLATFORM_MISMATCH", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
+    const link = payload.linkId ? await ctx.db.get(payload.linkId as Id<"marketingLinks">) : null;
+    if (payload.linkId && (!link || link.userId !== j.userId)) return deny("LINK_NOT_FOUND", "마케팅 링크를 찾을 수 없습니다.");
+    if (link?.status !== undefined && link.status !== "ACTIVE") return deny("LINK_INACTIVE", "비활성 마케팅 링크는 게시할 수 없습니다.");
+    if (piece?.productId && link && piece.productId !== link.productId) return deny("CONTENT_LINK_PRODUCT_MISMATCH", "콘텐츠 상품과 마케팅 링크 상품이 일치하지 않습니다.");
     const currentHash = await sha256Hex(canonicalJson({ jobType: j.jobType, payload: j.payload }));
     if (j.payloadHash && currentHash !== j.payloadHash) return deny("STALE_APPROVAL", "발행 내용이 변경되었습니다.");
     if (j.approvalRequired !== false) {
       if (!j.approval || j.approval.payloadHash !== currentHash) return deny("APPROVAL_REQUIRED", "현재 발행 내용의 승인이 필요합니다.");
       if (now - j.approval.approvedAt > APPROVAL_TTL_MS) return deny("APPROVAL_EXPIRED", "발행 승인이 만료되었습니다.");
     }
-    const payload = j.payload as { dryRun?: boolean };
     if (payload.dryRun) return { ok: true as const, dryRun: true, publishIntentId: null };
     const rootJobId = j.rootJobId ?? j._id;
     const existing = await ctx.db.query("publishReservations").withIndex("by_root", (q) => q.eq("rootJobId", rootJobId)).unique();

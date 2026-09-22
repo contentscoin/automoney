@@ -12,6 +12,7 @@ const NAV = {
   USER: [
     { href: "/dashboard/start", label: "시작하기" },
     { href: "/dashboard", label: "성과 대시보드" },
+    { href: "/dashboard/workflow", label: "콘텐츠 제작실" },
     { href: "/dashboard/content", label: "콘텐츠 찾기" },
     { href: "/dashboard/content/mine", label: "내 콘텐츠" },
     { href: "/dashboard/publish", label: "게시하기" },
