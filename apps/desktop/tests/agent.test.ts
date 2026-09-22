@@ -7,7 +7,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "automoney-agent-"));
 process.env.AUTOMONEY_USER_DATA = tmp;
 process.env.AUTOMONEY_HEARTBEAT_MS = "50";
 
-import { loadConfig, saveConfig, isPaired } from "../src/agent/config";
+import { DEFAULT_CONVEX_SITE_URL, DEFAULT_SITE_URL, loadConfig, saveConfig, isPaired } from "../src/agent/config";
 import { AgentApi, ApiError } from "../src/agent/api";
 import { AgentLoop, type Handler } from "../src/agent/loop";
 import { acquireLock } from "../src/agent/spaces/lock";
@@ -41,6 +41,12 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("config", () => {
+  it("uses the live service endpoints by default", () => {
+    expect(DEFAULT_CONVEX_SITE_URL).toBe("https://wry-ermine-412.convex.site");
+    expect(DEFAULT_SITE_URL).toBe("https://automoney-eight.vercel.app");
+    expect(loadConfig()).toMatchObject({ convexSiteUrl: DEFAULT_CONVEX_SITE_URL, siteUrl: DEFAULT_SITE_URL });
+  });
+
   it("round-trips and reports pairing", () => {
     expect(isPaired(loadConfig())).toBe(false);
     saveConfig({ ...loadConfig(), deviceId: "d1", deviceToken: TOKEN });

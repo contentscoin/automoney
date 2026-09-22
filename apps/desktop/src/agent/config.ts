@@ -20,9 +20,12 @@ export interface AgentConfig {
   updateFeedUrl?: string;
 }
 
+export const DEFAULT_CONVEX_SITE_URL = "https://wry-ermine-412.convex.site";
+export const DEFAULT_SITE_URL = "https://automoney-eight.vercel.app";
+
 export const DEFAULT_CONFIG: AgentConfig = {
-  convexSiteUrl: process.env.AUTOMONEY_CONVEX_SITE_URL ?? "http://127.0.0.1:3211",
-  siteUrl: process.env.AUTOMONEY_SITE_URL ?? "http://localhost:3000",
+  convexSiteUrl: process.env.AUTOMONEY_CONVEX_SITE_URL ?? DEFAULT_CONVEX_SITE_URL,
+  siteUrl: process.env.AUTOMONEY_SITE_URL ?? DEFAULT_SITE_URL,
   deviceName: process.env.AUTOMONEY_DEVICE_NAME ?? `${process.platform}-${require("node:os").hostname()}`,
   pollIntervalMs: 5000,
   browserChannel: process.env.AUTOMONEY_BROWSER_CHANNEL,
