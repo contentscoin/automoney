@@ -32,6 +32,9 @@ export async function codexGenerateText(prompt: string, opts: { model?: string; 
           reject(e);
         }
       });
+      // `codex exec` appends piped stdin to an argument prompt. execFile creates a
+      // stdin pipe by default, so explicitly send EOF or the CLI waits for more input.
+      child.stdin?.end();
       child.on("error", reject);
     });
     return { ok: true, text };

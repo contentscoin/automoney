@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildGenerationPrompt, evaluatePiece, extractAtoms, extractMagazine, isAutoApprovable, parseGeneratedPieces, templateGenerate, CHANNELS } from "./index";
+import { buildGenerationPrompt, evaluatePiece, extractAtoms, extractMagazine, isAutoApprovable, parseGeneratedPieces, templateGenerate, CHANNELS, CHANNEL_SPEC } from "./index";
 
 const HTML = `<!doctype html><html><head><title>fallback</title>
 <meta property="og:title" content="가을 하객룩, 이렇게 입으면 실패 없어요" />
@@ -79,6 +79,16 @@ describe("templateGenerate + prompt/parse", () => {
       expect(r.violations.filter((v) => v.severity === "block"), p.channel).toEqual([]);
       if (p.channel === "TIKTOK" || p.channel === "INSTAGRAM_REEL") expect(p.script).toBeTruthy();
     }
+  });
+  it("includes ad disclosure in every template and meets each channel's hashtag range", () => {
+    const pieces = templateGenerate({ channels: [...CHANNELS], atoms: [], products });
+    for (const piece of pieces) {
+      const [min, max] = CHANNEL_SPEC[piece.channel].hashtags;
+      expect(piece.hashtags, piece.channel).toContain("광고");
+      expect(piece.hashtags.length, piece.channel).toBeGreaterThanOrEqual(min);
+      expect(piece.hashtags.length, piece.channel).toBeLessThanOrEqual(max);
+    }
+    expect(pieces.find((piece) => piece.channel === "INSTAGRAM_FEED")?.hashtags.length).toBeGreaterThanOrEqual(10);
   });
   it("builds a prompt and parses model output", () => {
     const prompt = buildGenerationPrompt({ channels: ["X", "THREADS"], atoms: [], products, magazineTitle: "t" });

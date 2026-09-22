@@ -11,7 +11,7 @@ import { renderSnapshot } from "./snapshot";
  * Codex CLI(`codex exec`) 를 플래너로 사용. 유저 구독 로그인 토큰은 ~/.codex 에만 존재(ADR-0005).
  * 읽기 전용 샌드박스, 네트워크 없음, 마지막 메시지를 파일로 받아 JSON 액션으로 파싱한다.
  */
-export function createCodexPlanner(opts: { model?: string; timeoutMs?: number } = {}): Planner {
+export function createCodexPlanner(opts: { model?: string; timeoutMs?: number; exec?: typeof execFile } = {}): Planner {
   const bin = findCodexExecutable();
   return {
     name: "codex",
@@ -34,7 +34,7 @@ export function createCodexPlanner(opts: { model?: string; timeoutMs?: number } 
       if (opts.model ?? process.env.AUTOMONEY_CODEX_MODEL) args.push("-m", (opts.model ?? process.env.AUTOMONEY_CODEX_MODEL)!);
       args.push(prompt);
       const output = await new Promise<string>((resolve, reject) => {
-        const child = execFile(bin, args, { timeout: opts.timeoutMs ?? 90_000, env: { ...process.env, OTEL_SDK_DISABLED: "true" }, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+        const child = (opts.exec ?? execFile)(bin, args, { timeout: opts.timeoutMs ?? 90_000, env: { ...process.env, OTEL_SDK_DISABLED: "true" }, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
           if (err && !fs.existsSync(outFile)) return reject(err);
           try {
             resolve(fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : String(stdout));
@@ -42,6 +42,9 @@ export function createCodexPlanner(opts: { model?: string; timeoutMs?: number } 
             reject(e);
           }
         });
+        // `codex exec` treats piped stdin as additional prompt input. Signal EOF
+        // immediately so the pipe created by execFile cannot stall the planner.
+        child.stdin?.end();
         child.on("error", reject);
       }).finally(() => fs.rmSync(dir, { recursive: true, force: true }));
       return parseAction(output) ?? { type: "fail", reason: `unparseable planner output: ${output.slice(0, 120)}` };

@@ -252,11 +252,25 @@ export function templateGenerate(input: GenerationInput): GeneratedPiece[] {
   const points = input.atoms.filter((a) => a.atomType === "PRODUCT_POINT" || a.atomType === "STYLE_TIP").slice(0, 3).map((a) => a.text);
   const tip = input.atoms.find((a) => a.atomType === "TREND_TIE_IN")?.text ?? null;
   const priceLine = product ? `${product.name} · ${product.salePrice ? `${won(product.salePrice)} (정가 ${won(product.price)})` : won(product.price)}` : null;
-  const base = [brand, product?.category?.replace(/\s/g, "") ?? "데일리룩", "코디", "여성의류", "패션스타그램", "오오티디", "쇼핑", "스타일링"].filter(Boolean);
+  const base = [
+    brand,
+    product?.category?.replace(/\s/g, "") ?? "데일리룩",
+    "코디",
+    "여성의류",
+    "패션스타그램",
+    "오오티디",
+    "쇼핑",
+    "스타일링",
+    "데일리코디",
+    "오늘의코디",
+    "패션",
+    "룩북",
+  ].filter(Boolean);
   const out: GeneratedPiece[] = [];
   for (const channel of input.channels) {
     const spec = CHANNEL_SPEC[channel];
-    const tags = base.slice(0, Math.max(spec.hashtags[0], Math.min(spec.hashtags[1], 8)));
+    const tagCount = Math.max(1, Math.min(spec.hashtags[1], Math.max(spec.hashtags[0], 8)));
+    const tags = [...new Set(base)].slice(0, tagCount - 1).concat("광고");
     let caption: string;
     let script: string | null = null;
     switch (channel) {
