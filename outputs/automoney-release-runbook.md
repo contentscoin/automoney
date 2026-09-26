@@ -22,7 +22,7 @@
 
 ## 2. 스키마 및 애플리케이션 배포 순서
 
-> **현재 환경 주의(2026-09-22)**: 공개 웹과 데스크톱 기본값은 `wry-ermine-412` Convex 배포를 가리킨다. 로컬 `convex deploy`가 선택하는 별도 production(`resilient-cheetah-311`)은 인증·암호화 환경변수와 운영 데이터 이관이 완료되지 않았으므로 현재 공개 웹과 연결하면 안 된다. 이관 전 백엔드 릴리스는 기존 공개 대상에 `convex dev --once`로 적용하고, production 전환은 환경변수·데이터 백업/이관·웹 URL·데스크톱 기본 URL을 한 변경 창에서 함께 검증한다.
+> **운영 환경 전환 완료(2026-09-26)**: 공개 웹과 데스크톱 0.1.14의 기본값은 정식 production `resilient-cheetah-311`을 가리킨다. 기존 공개 대상 `wry-ermine-412`와 production의 사전 snapshot을 각각 보관한 뒤 인증·암호화 환경변수를 hash 대조해 복제하고, 987개 문서를 `--replace-all` snapshot import로 이관했다. 이관 후 production snapshot의 모든 테이블 문서 수가 원본과 일치함을 확인했으며 `LIVE_PUBLISH_ENABLED=false`를 명시했다. 백업 위치는 로컬 `Documents/Codex/automoney-backups/20260926-113226`이고 Convex Dashboard snapshot도 양쪽 배포에 남아 있다.
 
 1. optional 필드, sweep용 복합 인덱스, `contentReviewEvents`를 포함한 Convex 스키마/함수를 먼저 배포한다. 인덱스 backfill과 함수 배포가 끝난 뒤 웹·데스크톱을 진행한다.
 2. 기존 데이터는 fallback reader로 계속 읽되, `runId`가 없고 `generatedBy !== manual`인 이전 자동 생성물은 게시·공유·복사하지 않는다. 현재 품질 계약으로 새로 생성해야 하며 수퍼어드민 우회도 허용하지 않는다.

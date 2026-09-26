@@ -44,7 +44,7 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("config", () => {
   it("uses the live service endpoints by default", () => {
-    expect(DEFAULT_CONVEX_SITE_URL).toBe("https://wry-ermine-412.convex.site");
+    expect(DEFAULT_CONVEX_SITE_URL).toBe("https://resilient-cheetah-311.convex.site");
     expect(DEFAULT_SITE_URL).toBe("https://automoney-eight.vercel.app");
     expect(loadConfig()).toMatchObject({ convexSiteUrl: DEFAULT_CONVEX_SITE_URL, siteUrl: DEFAULT_SITE_URL });
   });

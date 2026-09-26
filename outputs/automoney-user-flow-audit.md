@@ -30,7 +30,7 @@
 3. 운영 제공 콘텐츠: `content.listLibraryFor`는 다른 사람의 콘텐츠 중 `SHARED + APPROVED`만 반환한다. SUPER_ADMIN의 매거진·콘텐츠 화면에서 승인 후 공유 전환이 필요하다.
 4. 매거진: 운영자가 등록해야 한다. 매거진 등록은 소재 추출이지 모든 사용자에게 완성 게시물을 자동 생성하는 동작이 아니다.
 5. 상품: 생성 선택기는 활성 상품을 반환한다. 실제 등록/활성 상태를 확인해야 한다.
-6. 환경: `.env.production`에는 `wry-ermine-412`가 지정되어 있고 이전 운영 배포는 `resilient-cheetah-311`이었다. Vercel의 실제 빌드 환경변수를 확인하여 사용자·콘텐츠·에이전트가 같은 배포를 보는지 대조해야 한다. 주소만 일괄 변경하면 기존 데이터가 사라진 것처럼 보일 수 있으므로 데이터 위치 확인이 선행되어야 한다.
+6. 환경: 2026-09-26에 `wry-ermine-412`의 환경변수와 987개 문서를 백업·검증 후 `resilient-cheetah-311`으로 이관했다. `.env.production`, Vercel Production의 두 공개 Convex URL, 데스크톱 기본 site URL을 모두 production으로 통일했고 `LIVE_PUBLISH_ENABLED=false`를 유지한다.
 
 ## 콘텐츠 종류별 공급 방식
 

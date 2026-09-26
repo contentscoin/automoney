@@ -48,7 +48,7 @@ export class AgentLoop {
   cfg: AgentConfig;
   api: AgentApi;
 
-  constructor(private events: LoopEvents = {}, private appVersion = "0.1.13", private fetchImpl: typeof fetch = fetch, private handlers: Record<JobType, Handler> = HANDLERS) {
+  constructor(private events: LoopEvents = {}, private appVersion = "0.1.14", private fetchImpl: typeof fetch = fetch, private handlers: Record<JobType, Handler> = HANDLERS) {
     this.cfg = loadConfig();
     this.api = new AgentApi(this.cfg, this.fetchImpl, this.appVersion);
     this.status.paired = isPaired(this.cfg);

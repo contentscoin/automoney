@@ -12,7 +12,7 @@ import { listLocalSpaces } from "./agent/spaces/manager";
 
 async function main() {
   const [cmd = "run", ...rest] = process.argv.slice(2);
-  const loop = new AgentLoop({ onUserAttention: (m) => console.log(`[attention] ${m}`) }, process.env.AUTOMONEY_APP_VERSION ?? "0.1.13");
+  const loop = new AgentLoop({ onUserAttention: (m) => console.log(`[attention] ${m}`) }, process.env.AUTOMONEY_APP_VERSION ?? "0.1.14");
   if (cmd === "pair") {
     const code = rest[0];
     if (!code) throw new Error("usage: pair <code>");

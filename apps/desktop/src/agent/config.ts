@@ -20,7 +20,7 @@ export interface AgentConfig {
   updateFeedUrl?: string;
 }
 
-export const DEFAULT_CONVEX_SITE_URL = "https://wry-ermine-412.convex.site";
+export const DEFAULT_CONVEX_SITE_URL = "https://resilient-cheetah-311.convex.site";
 export const DEFAULT_SITE_URL = "https://automoney-eight.vercel.app";
 
 export const DEFAULT_CONFIG: AgentConfig = {
