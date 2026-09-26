@@ -22,6 +22,7 @@ export interface AgentConfig {
 
 export const DEFAULT_CONVEX_SITE_URL = "https://resilient-cheetah-311.convex.site";
 export const DEFAULT_SITE_URL = "https://automoney-eight.vercel.app";
+const LEGACY_CONVEX_SITE_URLS = new Set(["https://wry-ermine-412.convex.site", "https://wry-ermine-412.convex.site/"]);
 
 export const DEFAULT_CONFIG: AgentConfig = {
   convexSiteUrl: process.env.AUTOMONEY_CONVEX_SITE_URL ?? DEFAULT_CONVEX_SITE_URL,
@@ -39,7 +40,13 @@ export function loadConfig(): AgentConfig {
   try {
     const raw = fs.readFileSync(configPath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<AgentConfig>;
-    return { ...DEFAULT_CONFIG, ...parsed };
+    const merged = { ...DEFAULT_CONFIG, ...parsed };
+    // 기존 설치는 config.json의 구 운영 주소가 새 기본값을 덮어쓴다. 명시적인 env override는
+    // DEFAULT_CONFIG에 남기되, 저장된 구 공개 주소만 현재 운영 배포로 자동 승격한다.
+    if (LEGACY_CONVEX_SITE_URLS.has(merged.convexSiteUrl) && merged.convexSiteUrl !== DEFAULT_CONFIG.convexSiteUrl) {
+      merged.convexSiteUrl = DEFAULT_CONFIG.convexSiteUrl;
+    }
+    return merged;
   } catch {
     return { ...DEFAULT_CONFIG };
   }

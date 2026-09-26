@@ -55,6 +55,11 @@ describe("config", () => {
     expect(isPaired(loadConfig())).toBe(true);
     expect(loadConfig().deviceToken).toBe(TOKEN);
   });
+
+  it("migrates the persisted legacy Convex endpoint without dropping pairing", () => {
+    saveConfig({ ...loadConfig(), convexSiteUrl: "https://wry-ermine-412.convex.site", deviceId: "d1", deviceToken: TOKEN });
+    expect(loadConfig()).toMatchObject({ convexSiteUrl: DEFAULT_CONVEX_SITE_URL, deviceId: "d1", deviceToken: TOKEN });
+  });
 });
 
 describe("api client", () => {
