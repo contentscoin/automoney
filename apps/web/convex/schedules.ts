@@ -5,8 +5,8 @@ import { internal } from "./_generated/api";
 import { internalMutation, mutation, query, type QueryCtx, type MutationCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
-import { requireUser, roleOf } from "./lib/rbac";
-import { consumePiece, contentPieceEvidenceRunId, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, workflowReviewEvidence } from "./lib/pieces";
+import { requireUser } from "./lib/rbac";
+import { consumePiece, contentPieceEvidenceRunId, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
 import { livePublishEnabled } from "./lib/publishPolicy";
 import { marketingRedirectUrl } from "./lib/publicUrl";
 import { canonicalJson, enqueueJob, validateExecutorPublishContract } from "./jobs";
@@ -77,7 +77,7 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
   let contentChannel: PublishPayload["contentChannel"] = args.contentChannel;
   let workflowPiece: Awaited<ReturnType<typeof consumePiece>> | null = null;
   if (args.pieceId) {
-    const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
+    const piece = await consumePiece(ctx, user._id, args.pieceId);
     if (args.contentChannel && args.contentChannel !== piece.channel) fail("CONFLICT", "명시한 게시 형식과 콘텐츠 채널이 일치하지 않습니다.");
     if (CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) fail("INVALID_ARGUMENT", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
     contentProductId = piece.productId;
@@ -242,15 +242,17 @@ export const tick = internalMutation({
       }
       const piece = s.pieceId ? await ctx.db.get(s.pieceId) : null;
       const pieceEvidenceRunId = piece ? contentPieceEvidenceRunId(piece) : undefined;
+      const pieceProductAvailable = piece ? await contentPieceProductAvailable(ctx, piece) : true;
       const link = s.linkId ? await ctx.db.get(s.linkId) : null;
       const invalidAssociation =
         (s.pieceId && (!piece || piece.status !== "APPROVED")) ? "CONTENT_UNAVAILABLE"
           : piece && CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform ? "CONTENT_PLATFORM_MISMATCH"
-            : s.linkId && (!link || link.userId !== s.userId) ? "LINK_NOT_FOUND"
-              : link && link.status !== "ACTIVE" ? "LINK_INACTIVE"
-                : pieceEvidenceRunId && piece?.productId && !link ? "CONTENT_LINK_REQUIRED"
-                  : piece?.productId && link && piece.productId !== link.productId ? "CONTENT_LINK_PRODUCT_MISMATCH"
-                  : null;
+            : !pieceProductAvailable ? "CONTENT_PRODUCT_INACTIVE"
+              : s.linkId && (!link || link.userId !== s.userId) ? "LINK_NOT_FOUND"
+                : link && link.status !== "ACTIVE" ? "LINK_INACTIVE"
+                  : pieceEvidenceRunId && piece?.productId && !link ? "CONTENT_LINK_REQUIRED"
+                    : piece?.productId && link && piece.productId !== link.productId ? "CONTENT_LINK_PRODUCT_MISMATCH"
+                    : null;
       if (invalidAssociation) {
         await ctx.db.patch(s._id, {
           nextRunAt: next,
@@ -294,9 +296,12 @@ export const tick = internalMutation({
         const outputHash = await contentPiecePublishOutputHash(piece);
         const standardPassed = !pieceEvidenceRunId || (piece.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
         const review = pieceEvidenceRunId ? await workflowReviewEvidence(ctx, piece) : { ok: true as const };
+        const supplyAvailable = await operatorSupplySourceAvailable(ctx, piece);
         const canonicalText = contentPieceText(piece);
         const currentSnapshot = outputHash ? await hashPiecePublishSnapshot({ pieceId: s.pieceId, outputHash, text: canonicalText, mediaUrls: piece.mediaUrls, linkId: s.linkId, linkUrl }) : null;
-        const staleReason = !standardPassed || (pieceEvidenceRunId && run?.status !== "COMPLETED") || !review.ok
+        const staleReason = !supplyAvailable
+          ? "CONTENT_UNAVAILABLE"
+          : !standardPassed || (pieceEvidenceRunId && !contentPieceHasOperatorSupplyLineage(piece) && run?.status !== "COMPLETED") || !review.ok
           ? "CONTENT_REVIEW_REQUIRED"
           : !s.pieceOutputHash || !s.pieceSnapshotHash
             ? "CONTENT_SNAPSHOT_MISSING"

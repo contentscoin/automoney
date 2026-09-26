@@ -15,6 +15,8 @@ export function setupEnv() {
   process.env.META_MODE = "mock";
   process.env.META_ALLOW_MOCK_LIVE_TESTS = "true";
   process.env.ATTRANGS_WEBHOOK_SECRET = "webhook-secret";
+  // convex-test intentionally omits _storage.contentType; production must never set this flag.
+  process.env.AUTOMONEY_TEST_ALLOW_DECLARED_STORAGE_MIME = "true";
   // 32 bytes base64
   process.env.KYC_ENC_KEY = Buffer.from(new Uint8Array(32).fill(7)).toString("base64");
 }

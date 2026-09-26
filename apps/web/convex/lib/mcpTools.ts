@@ -52,7 +52,7 @@ async function publishPreviewBase(
   let mediaUrls = input.mediaUrls;
   let contentChannel = input.contentChannel;
   if (input.pieceId) {
-    const piece = await consumePiece(ctx, user._id, input.pieceId, roleOf(user));
+    const piece = await consumePiece(ctx, user._id, input.pieceId);
     if (input.contentChannel && input.contentChannel !== piece.channel) fail("CONFLICT", "명시한 게시 형식과 콘텐츠 채널이 일치하지 않습니다.");
     contentChannel = piece.channel as Channel;
     if (piece.runId) {

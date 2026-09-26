@@ -35,7 +35,7 @@ export default function SuperMagazinesPage() {
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-xl font-bold">매거진 · 콘텐츠 운영</h1>
-        <p className="text-sm text-stone-500">아뜨랑스 매거진을 URL 로 등록하면 본문·이미지·상품 링크(index_no)를 추출해 소재로 만듭니다. 승인된 조각을 전체 공유하면 모든 유저의 라이브러리에 노출됩니다.</p>
+        <p className="text-sm text-stone-500">아뜨랑스 매거진을 URL 로 등록하면 본문·이미지·상품 링크(index_no)를 추출해 소재로 만듭니다. 사용자 공급용 콘텐츠는 콘텐츠 공급실에서 자료·권리를 확인한 뒤 묶음 단위로 공개합니다.</p>
       </div>
 
       <section className="card">
@@ -120,7 +120,7 @@ export default function SuperMagazinesPage() {
               onApprove={async (reviewChecklist) => { try { await approve({ pieceId: p._id, ...(p.productionMeta?.outputHash ? { expectedOutputHash: p.productionMeta.outputHash } : {}), reviewChecklist }); } catch (err) { setMsg(errorMessage(err)); } }}
               onReject={async (reason) => { try { await reject({ pieceId: p._id, reason }); } catch (err) { setMsg(errorMessage(err)); } }}
               onEdit={async (v) => { try { await edit({ pieceId: p._id, ...v }); return true; } catch (err) { setMsg(errorMessage(err)); return false; } }}
-              onShare={async (shared) => { try { await setVisibility({ pieceId: p._id, visibility: shared ? "SHARED" : "PRIVATE" }); } catch (err) { setMsg(errorMessage(err)); } }} />
+              onShare={p.visibility === "SHARED" ? async () => { try { await setVisibility({ pieceId: p._id, visibility: "PRIVATE" }); } catch (err) { setMsg(errorMessage(err)); } } : undefined} />
           ))}
         </div>
       </section>

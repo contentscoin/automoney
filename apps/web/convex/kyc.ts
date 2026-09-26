@@ -29,12 +29,19 @@ export const bindUpload = mutation({
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     const intent = await ctx.db.get(args.intentId);
-    if (!intent || intent.userId !== user._id) fail("NOT_FOUND", "업로드 요청을 찾을 수 없습니다.");
+    if (!intent || intent.userId !== user._id || intent.purpose !== "KYC_BANKBOOK")
+      fail("NOT_FOUND", "업로드 요청을 찾을 수 없습니다.");
     if (intent.state !== "PENDING" || intent.expiresAt < Date.now()) {
       if (intent.expiresAt < Date.now()) await ctx.db.patch(intent._id, { state: "EXPIRED" });
       fail("CONFLICT", "업로드 요청이 만료되었거나 이미 사용되었습니다.");
     }
     if (!(await ctx.db.system.get(args.storageId))) fail("INVALID_ARGUMENT", "통장사본 파일을 찾을 수 없습니다.");
+    const existing = await ctx.db
+      .query("uploadIntents")
+      .withIndex("by_storage", (q) => q.eq("storageId", args.storageId))
+      .first();
+    if (existing && existing._id !== intent._id)
+      fail("CONFLICT", "이미 다른 업로드 요청에 연결된 파일입니다.");
     await ctx.db.patch(intent._id, { storageId: args.storageId, state: "BOUND" });
     return { ok: true as const };
   },
@@ -121,7 +128,8 @@ export const saveSubmission = internalMutation({
   },
   handler: async (ctx, args) => {
     const intent = await ctx.db.get(args.uploadIntentId);
-    if (!intent || intent.userId !== args.userId) fail("NOT_FOUND", "업로드 요청을 찾을 수 없습니다.");
+    if (!intent || intent.userId !== args.userId || intent.purpose !== "KYC_BANKBOOK")
+      fail("NOT_FOUND", "업로드 요청을 찾을 수 없습니다.");
     if (intent.state !== "BOUND" || !intent.storageId || intent.expiresAt < Date.now()) fail("CONFLICT", "업로드 요청이 만료되었거나 사용할 수 없습니다.");
     const bankbookStorageId = intent.storageId;
     const file = await ctx.db.system.get(bankbookStorageId);

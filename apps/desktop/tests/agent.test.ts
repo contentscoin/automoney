@@ -356,6 +356,23 @@ describe("media fetch policy", () => {
     }
   });
 
+  it("downloads a rights-cleared QuickTime video using the publishable MOV extension", async () => {
+    process.env.AUTOMONEY_ALLOW_PRIVATE_MEDIA = "1";
+    let files: string[] = [];
+    try {
+      const fake = vi.fn(async () => new Response("mov", {
+        status: 200,
+        headers: { "content-type": "video/quicktime", "content-length": "3" },
+      })) as unknown as typeof fetch;
+      files = await downloadMedia(["http://127.0.0.1/video.mov"], fake);
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/\.mov$/);
+    } finally {
+      if (files[0]) fs.rmSync(path.dirname(files[0]), { recursive: true, force: true });
+      delete process.env.AUTOMONEY_ALLOW_PRIVATE_MEDIA;
+    }
+  });
+
   it("journals a successful result when delivery is lost and resends without executing twice", async () => {
     saveConfig({ ...loadConfig(), deviceId: "d1", deviceToken: TOKEN });
     const job = { id: "lost-success", jobType: "space.verify", payload: {}, spaceId: null, space: null, leaseMs: 1000, protocolVersion: 2, attemptNo: 1, leaseToken: "lease", leaseExpiresAt: Date.now() + 1000 };

@@ -4,7 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
-import { requireUser, roleOf } from "./lib/rbac";
+import { requireUser } from "./lib/rbac";
 import { consumePiece, hashPiecePublishSnapshot } from "./lib/pieces";
 import { livePublishEnabled } from "./lib/publishPolicy";
 import { marketingRedirectUrl } from "./lib/publicUrl";
@@ -182,7 +182,7 @@ export async function enqueuePublishFor(ctx: MutationCtx, user: Doc<"users">, ar
   let contentChannel: PublishPayload["contentChannel"] = args.contentChannel;
   let workflowPiece: Awaited<ReturnType<typeof consumePiece>> | null = null;
   if (args.pieceId) {
-    const piece = await consumePiece(ctx, user._id, args.pieceId, roleOf(user));
+    const piece = await consumePiece(ctx, user._id, args.pieceId);
     if (args.contentChannel && args.contentChannel !== piece.channel) fail("CONFLICT", "명시한 게시 형식과 콘텐츠 채널이 일치하지 않습니다.");
     if (CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) fail("INVALID_ARGUMENT", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
     contentProductId = piece.productId;

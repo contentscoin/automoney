@@ -11,15 +11,18 @@ import { sha256Hex } from "./crypto";
 import { metaLivePublishAvailable } from "./meta";
 import {
   contentPieceEvidenceRunId,
+  contentPieceHasOperatorSupplyLineage,
+  contentPieceProductAvailable,
   contentPiecePublishOutputHash,
   contentPieceText,
   hashPiecePublishSnapshot,
+  operatorSupplySourceAvailable,
   workflowReviewEvidence,
 } from "./pieces";
 import { livePublishEnabled } from "./publishPolicy";
 import { marketingRedirectUrl } from "./publicUrl";
 import { publicationIdentity } from "./publishIdentity";
-import { roleOf } from "./rbac";
+import { isActiveSuperAdmin } from "./rbac";
 
 export type PublishAttemptPolicyResult =
   | { ok: true; currentHash: string }
@@ -83,7 +86,9 @@ export async function validatePublishAttemptPolicy(
   const piece = payload.pieceId ? await ctx.db.get(payload.pieceId as Id<"contentPieces">) : null;
   if (payload.pieceId && (!piece || piece.status !== "APPROVED")) return deny("CONTENT_UNAVAILABLE");
   if (piece) {
-    const accessible = piece.ownerUserId === job.userId || piece.visibility === "SHARED" || roleOf(user) === "SUPER_ADMIN";
+    if (!(await operatorSupplySourceAvailable(ctx, piece))) return deny("CONTENT_UNAVAILABLE");
+    if (!(await contentPieceProductAvailable(ctx, piece))) return deny("CONTENT_PRODUCT_INACTIVE");
+    const accessible = piece.ownerUserId === job.userId || piece.visibility === "SHARED" || isActiveSuperAdmin(user);
     if (!accessible) return deny("CONTENT_UNAVAILABLE");
     if (payload.contentChannel && payload.contentChannel !== piece.channel) return deny("CONTENT_CHANNEL_MISMATCH");
     if (CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) return deny("CONTENT_PLATFORM_MISMATCH");
@@ -94,7 +99,7 @@ export async function validatePublishAttemptPolicy(
   if (piece && evidenceRunId) {
     const run = await ctx.db.get(evidenceRunId);
     const standardPassed = (piece.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
-    if (!standardPassed || run?.status !== "COMPLETED") return deny("CONTENT_REVIEW_REQUIRED");
+    if (!standardPassed || (!contentPieceHasOperatorSupplyLineage(piece) && run?.status !== "COMPLETED")) return deny("CONTENT_REVIEW_REQUIRED");
     const review = await workflowReviewEvidence(ctx, piece);
     if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED");
   }

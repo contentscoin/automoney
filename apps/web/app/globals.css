@@ -47,7 +47,7 @@ body { font-family: "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", system-
   .btn-primary:hover { filter: brightness(0.95); }
   .btn-ghost { @apply border border-stone-200 bg-white; }
   .btn-ghost:hover { @apply bg-stone-100; }
-  .input { @apply w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm; }
+  .input { @apply w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-base sm:text-sm; }
   .label { @apply mb-1 block text-xs font-medium text-stone-600; }
   .badge { @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium; }
   .table { @apply w-full text-sm; }

@@ -32,6 +32,10 @@ export type PieceLike = {
   mine: boolean;
   magazineTitle: string | null;
   productName: string | null;
+  collectionTitle?: string | null;
+  collectionSummary?: string | null;
+  collectionTags?: string[];
+  collectionStatus?: string | null;
   productId?: string | null;
   legacyBlocked?: boolean;
   productEvidence?: {
@@ -44,6 +48,7 @@ export type PieceLike = {
     frozen: boolean;
   } | null;
   runId?: string | null;
+  collectionId?: string | null;
   productionMeta?: {
     standardId?: string | null;
     standardVersion?: string | null;
@@ -72,7 +77,7 @@ export function pieceText(p: PieceLike): string {
   return p.hashtags.length ? `${caption}\n\n${p.hashtags.map((h) => `#${h}`).join(" ")}` : caption;
 }
 
-export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, publishHref, publishingDisabledReason }: { p: PieceLike; onApprove?: (reviewChecklist: ReviewChecklist) => Promise<unknown>; onReject?: (reason: string) => Promise<unknown>; onEdit?: (v: { caption: string; hashtags: string[]; script?: string; mediaUrls: string[] }) => Promise<unknown>; onShare?: (shared: boolean) => Promise<unknown>; onCopy?: () => Promise<unknown>; publishHref?: string; publishingDisabledReason?: string }) {
+export function PieceCard({ p, onApprove, onReject, onEdit, onRemove, onShare, onCopy, publishHref, publishingDisabledReason }: { p: PieceLike; onApprove?: (reviewChecklist: ReviewChecklist) => Promise<unknown>; onReject?: (reason: string) => Promise<unknown>; onEdit?: (v: { caption: string; hashtags: string[]; script?: string; mediaUrls: string[] }) => Promise<unknown>; onRemove?: () => Promise<unknown>; onShare?: (shared: boolean) => Promise<unknown>; onCopy?: () => Promise<unknown>; publishHref?: string; publishingDisabledReason?: string }) {
   const fieldId = useId();
   const displayCaption = stripMatchingTrailingHashtagBlock(p.caption, p.hashtags);
   const reviewRevision = p.productionMeta?.outputHash ?? JSON.stringify([p.caption, p.hashtags, p.script, p.mediaUrls]);
@@ -87,7 +92,7 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, pub
   const [approving, setApproving] = useState(false);
   const [reviewState, setReviewState] = useState(() => ({ revision: reviewRevision, checklist: emptyReviewChecklist() }));
   const reviewChecklist = reviewState.revision === reviewRevision ? reviewState.checklist : emptyReviewChecklist();
-  const requiresStructuredReview = !!p.runId && p.mine && p.status === "DRAFT" && !!onApprove;
+  const requiresStructuredReview = !!(p.runId || p.collectionId) && p.mine && p.status === "DRAFT" && !!onApprove;
   const reviewCount = checkedReviewCount(reviewChecklist);
   const reviewComplete = isReviewChecklistComplete(reviewChecklist);
   const editedMediaUrls = media.split(/\s+/).filter(Boolean);
@@ -108,9 +113,12 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, pub
     editing ? "수정 내용을 저장하거나 취소한 뒤 승인하세요." : null,
   ].filter((reason): reason is string => !!reason);
   const approvalBlocked = approvalDisabledReasons.length > 0;
+  const collectionPublishingDisabledReason = p.collectionId && p.collectionStatus !== "PUBLISHED"
+    ? "운영 묶음이 사용자 공개 상태가 아닙니다"
+    : undefined;
   const effectivePublishingDisabledReason = runStandardBlocked
     ? "실행 콘텐츠의 고정 제작 기준을 통과해야 합니다"
-    : publishingDisabledReason;
+    : publishingDisabledReason ?? collectionPublishingDisabledReason;
   const hiddenMediaCount = Math.max(0, p.mediaUrls.length - 4);
   const visibleMedia = showAllMedia ? p.mediaUrls : p.mediaUrls.slice(0, 4);
   const copyMessage = copyStatus === "copied"
@@ -140,8 +148,14 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, pub
         <Badge value={PIECE_STATUS_TONE[p.status] ?? "PENDING"} label={PIECE_STATUS_LABEL[p.status] ?? p.status} />
         <span className={qualityPassed ? "text-emerald-700" : "text-amber-700"}>품질 {p.qualityScore}점</span>
         <span className="text-stone-500">{productionLabel}{p.visibility === "SHARED" ? " · 공유" : ""}{!p.mine ? " · 운영 제공" : ""} · 사용 {p.usageCount}회</span>
-        {(p.magazineTitle || p.productName) && <span className="text-stone-500">· {p.magazineTitle ?? p.productName}</span>}
+        {(p.collectionTitle || p.magazineTitle || p.productName) && <span className="text-stone-500">· {p.collectionTitle ?? p.magazineTitle ?? p.productName}</span>}
       </div>
+      {(p.collectionSummary || (p.collectionTags?.length ?? 0) > 0) && (
+        <div className="rounded-lg bg-stone-50 p-3 text-xs text-stone-700">
+          {p.collectionSummary && <p>{p.collectionSummary}</p>}
+          {!!p.collectionTags?.length && <p className={p.collectionSummary ? "mt-1 text-sky-700" : "text-sky-700"}>{p.collectionTags.map((tag) => `#${tag}`).join(" ")}</p>}
+        </div>
+      )}
       {p.productEvidence && (
         <section className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-950" aria-labelledby={`${fieldId}-product-evidence-title`}>
           <div className="flex flex-wrap items-center gap-2">
@@ -169,7 +183,7 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, pub
             {shortForm && <p id={`${fieldId}-shortform-media-help`} className="mt-1 text-xs font-medium text-amber-800">Reels·TikTok은 기존 정적 상품 이미지를 모두 지우고 HTTPS 영상 URL 1개로 교체해야 합니다.</p>}
             {mediaEditError && <p id={`${fieldId}-media-error`} className="mt-1 text-xs text-rose-700">{mediaEditError}</p>}
           </div>
-          {p.runId && <p className="text-xs text-stone-500">수정 저장 시 새 출력으로 다시 평가되며 이전 사람 검토 체크는 초기화됩니다.</p>}
+          {(p.runId || p.collectionId) && <p className="text-xs text-stone-500">수정 저장 시 새 출력으로 다시 평가되며 이전 사람 검토 체크는 초기화됩니다.</p>}
           <div className="flex flex-wrap gap-2"><button className="btn-primary" type="button" aria-describedby={mediaEditError ? `${fieldId}-media-error` : undefined} onClick={async () => {
             if (mediaEditError) {
               document.getElementById(`${fieldId}-media-edit`)?.focus();
@@ -237,10 +251,10 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, pub
             setCopyStatus("failed");
           }
         }}>{copyStatus === "copied" ? "복사됨" : copyStatus === "failed" ? "다시 복사" : "콘텐츠 복사"}</button>
-        {p.status === "APPROVED" && !p.legacyBlocked && !effectivePublishingDisabledReason && <Link className="btn-ghost" href={publishHref ?? `/dashboard/publish?piece=${p._id}`}>이 콘텐츠로 게시</Link>}
+        {p.status === "APPROVED" && !p.legacyBlocked && !effectivePublishingDisabledReason && <Link className={!p.mine ? "btn-primary" : "btn-ghost"} href={publishHref ?? `/dashboard/publish?piece=${p._id}`}>이 콘텐츠로 게시</Link>}
         {p.status === "APPROVED" && !p.legacyBlocked && !effectivePublishingDisabledReason && <Link className="btn-ghost" href={`/dashboard/schedules?piece=${p._id}`}>예약</Link>}
         {p.status === "APPROVED" && !p.legacyBlocked && effectivePublishingDisabledReason && <span className="text-amber-800">게시·예약 대기: {effectivePublishingDisabledReason}</span>}
-        {!p.mine && !p.legacyBlocked && onCopy && <button className="btn-primary" type="button" onClick={onCopy}>내 콘텐츠로 가져오기</button>}
+        {!p.mine && !p.legacyBlocked && onCopy && <button className="btn-ghost" type="button" onClick={onCopy}>복사해서 편집</button>}
         {p.mine && p.status === "DRAFT" && !p.legacyBlocked && onApprove && <button className={`btn-primary ${approvalBlocked && !approving ? "cursor-not-allowed opacity-50" : ""}`} type="button" disabled={approving} aria-disabled={!approving && approvalBlocked ? true : undefined} aria-busy={approving} aria-describedby={approvalBlocked ? `${fieldId}-approval-disabled` : undefined} onClick={async () => {
           if (approvalBlocked || approving) return;
           setApproving(true);
@@ -250,7 +264,8 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onShare, onCopy, pub
             setApproving(false);
           }
         }}>{approving ? "콘텐츠 승인 중…" : "콘텐츠 승인"}</button>}
-        {p.mine && p.status !== "RETIRED" && onEdit && !editing && <button className="btn-ghost" type="button" onClick={() => { setCaption(displayCaption); setTags(p.hashtags.join(" ")); setScript(p.script ?? ""); setMedia(p.mediaUrls.join("\n")); setEditing(true); }}>콘텐츠 수정</button>}
+        {p.mine && (p.status !== "RETIRED" || !!p.collectionId) && onEdit && !editing && <button className="btn-ghost" type="button" onClick={() => { setCaption(displayCaption); setTags(p.hashtags.join(" ")); setScript(p.script ?? ""); setMedia(p.mediaUrls.join("\n")); setEditing(true); }}>{p.status === "RETIRED" ? "수정해서 복구" : "콘텐츠 수정"}</button>}
+        {p.mine && p.collectionId && onRemove && !editing && <button className="btn-ghost" type="button" onClick={onRemove}>묶음에서 제거</button>}
         {onShare && p.status === "APPROVED" && !p.legacyBlocked && <button className="btn-ghost" type="button" onClick={() => onShare(p.visibility !== "SHARED")}>{p.visibility === "SHARED" ? "공유 해제" : "전체 공유"}</button>}
         {p.mine && p.status !== "RETIRED" && onReject && (
           <span className="ml-auto flex flex-wrap items-center gap-1"><label className="sr-only" htmlFor={`${fieldId}-reject-reason`}>콘텐츠 거절 사유</label><input id={`${fieldId}-reject-reason`} className="input w-auto min-w-36 py-1 text-xs" placeholder="거절 사유 입력" value={reason} onChange={(e) => setReason(e.target.value)} /><button className="btn-ghost" type="button" disabled={!reason.trim()} onClick={() => onReject(reason.trim())}>콘텐츠 거절</button></span>

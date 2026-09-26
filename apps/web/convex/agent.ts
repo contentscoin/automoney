@@ -7,14 +7,14 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { httpAction, internalMutation, internalQuery, type ActionCtx } from "./_generated/server";
 import { sha256Hex } from "./lib/crypto";
 import { canonicalJson } from "./jobs";
-import { contentPieceEvidenceRunId, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, workflowReviewEvidence } from "./lib/pieces";
+import { contentPieceEvidenceRunId, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
 import { livePublishEnabled, PUBLISH_PROTOCOL_VERSION } from "./lib/publishPolicy";
 import { marketingRedirectUrl } from "./lib/publicUrl";
 import { publishReceiptUrl } from "./lib/publishReceipt";
 import { publicationIdentity } from "./lib/publishIdentity";
 import { validatePublishAttemptPolicy } from "./lib/publishAttempt";
 import { metaLivePublishAvailable } from "./lib/meta";
-import { roleOf } from "./lib/rbac";
+import { isActiveSuperAdmin } from "./lib/rbac";
 
 /** 데스크톱 에이전트 HTTP 계약 (blogautomcp remote-agent 계승). 인증: Authorization: Bearer <deviceToken>. */
 
@@ -331,7 +331,9 @@ export const preflightJob = internalMutation({
     const piece = payload.pieceId ? await ctx.db.get(payload.pieceId as Id<"contentPieces">) : null;
     if (payload.pieceId && (!piece || piece.status !== "APPROVED")) return deny("CONTENT_UNAVAILABLE", "승인된 콘텐츠를 찾을 수 없습니다.");
     if (piece) {
-      const accessible = piece.ownerUserId === j.userId || piece.visibility === "SHARED" || roleOf(user) === "SUPER_ADMIN";
+      if (!(await operatorSupplySourceAvailable(ctx, piece))) return deny("CONTENT_UNAVAILABLE", "운영 콘텐츠 공개가 종료되었습니다.");
+      if (!(await contentPieceProductAvailable(ctx, piece))) return deny("CONTENT_PRODUCT_INACTIVE", "연결된 상품이 현재 판매 중이 아닙니다.");
+      const accessible = piece.ownerUserId === j.userId || piece.visibility === "SHARED" || isActiveSuperAdmin(user);
       if (!accessible) return deny("CONTENT_UNAVAILABLE", "승인된 콘텐츠에 더 이상 접근할 수 없습니다.");
       if (payload.contentChannel && payload.contentChannel !== piece.channel)
         return deny("CONTENT_CHANNEL_MISMATCH", "작업의 콘텐츠 채널이 승인된 콘텐츠와 일치하지 않습니다.");
@@ -342,7 +344,7 @@ export const preflightJob = internalMutation({
     if (piece && pieceEvidenceRunId) {
       const run = await ctx.db.get(pieceEvidenceRunId);
       const standardPassed = (piece.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
-      if (!standardPassed || run?.status !== "COMPLETED")
+      if (!standardPassed || (!contentPieceHasOperatorSupplyLineage(piece) && run?.status !== "COMPLETED"))
         return deny("CONTENT_REVIEW_REQUIRED", "전체 제작 실행의 품질 검수와 사람 승인이 완료되지 않았습니다.");
       const review = await workflowReviewEvidence(ctx, piece);
       if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED", review.reason);

@@ -50,7 +50,42 @@ export const attrangsWebhook = httpAction(async (ctx, request) => {
   return json({ success: true, data: { duplicate: result.duplicate } });
 });
 
+/** Immutable operator-supplied assets. IDs and file names are both checked by the internal query. */
+export const contentAsset = httpAction(async (ctx, request) => {
+  const prefix = "/content-assets/";
+  const pathname = new URL(request.url).pathname;
+  if (!pathname.startsWith(prefix)) return new Response("Not found", { status: 404 });
+  let parts: string[];
+  try {
+    parts = pathname
+      .slice(prefix.length)
+      .split("/")
+      .map((part) => decodeURIComponent(part));
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return new Response("Not found", { status: 404 });
+  const material = await ctx.runQuery(internal.adminContent.publicMaterial, {
+    materialId: parts[0],
+    fileName: parts[1],
+  });
+  if (!material) return new Response("Not found", { status: 404 });
+  const etag = `"${material.contentHash}"`;
+  const headers = {
+    "content-type": material.mimeType,
+    "cache-control": "public, max-age=31536000, immutable",
+    "content-disposition": `inline; filename="${material.fileName}"`,
+    "x-content-type-options": "nosniff",
+    etag,
+  };
+  if (request.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers });
+  const blob = await ctx.storage.get(material.storageId);
+  if (!blob) return new Response("Not found", { status: 404 });
+  return new Response(blob, { status: 200, headers: { ...headers, "content-length": String(blob.size) } });
+});
+
 http.route({ path: "/partner/attrangs/webhook", method: "POST", handler: attrangsWebhook });
+http.route({ pathPrefix: "/content-assets/", method: "GET", handler: contentAsset });
 
 // 데스크톱 에이전트 (Bearer 디바이스 토큰)
 http.route({ path: "/agent/claim", method: "POST", handler: claim });

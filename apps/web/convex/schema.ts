@@ -79,12 +79,15 @@ export default defineSchema({
 
   uploadIntents: defineTable({
     userId: v.id("users"),
-    purpose: v.literal("KYC_BANKBOOK"),
+    purpose: v.union(v.literal("KYC_BANKBOOK"), v.literal("CONTENT_MATERIAL")),
     expiresAt: v.number(),
     storageId: v.optional(v.id("_storage")),
     state: v.union(v.literal("PENDING"), v.literal("BOUND"), v.literal("CONSUMED"), v.literal("EXPIRED")),
     createdAt: v.number(),
-  }).index("by_user", ["userId", "createdAt"]),
+  })
+    .index("by_user", ["userId", "createdAt"])
+    .index("by_storage", ["storageId"])
+    .index("by_state_expiry", ["state", "expiresAt"]),
 
   products: defineTable({
     attrangsProductId: v.number(),
@@ -590,6 +593,9 @@ export default defineSchema({
   contentRuns: defineTable({
     userId: v.id("users"),
     batchKey: v.string(),
+    collectionId: v.optional(v.id("contentCollections")),
+    adminMaterialSnapshot: v.optional(v.any()),
+    quarantineReason: v.optional(v.string()),
     productIds: v.array(v.id("products")),
     /** Immutable catalog evidence used by this run, retained even after products change. */
     productSnapshots: v.array(v.object({
@@ -636,11 +642,15 @@ export default defineSchema({
     .index("by_user", ["userId", "createdAt"])
     .index("by_user_status", ["userId", "status", "updatedAt"])
     .index("by_batchKey", ["batchKey"])
+    .index("by_collection", ["collectionId", "createdAt"])
     .index("by_inputHash", ["inputHash"]),
 
   contentPieces: defineTable({
     ownerUserId: v.optional(v.id("users")),
     visibility: v.union(v.literal("PRIVATE"), v.literal("SHARED")),
+    /** Operator supply collection. User copies retain lineage but are detached from its lifecycle. */
+    collectionId: v.optional(v.id("contentCollections")),
+    sourceMaterialIds: v.optional(v.array(v.id("contentSourceMaterials"))),
     magazineId: v.optional(v.id("magazines")),
     productId: v.optional(v.id("products")),
     channel: v.union(
@@ -675,12 +685,72 @@ export default defineSchema({
     productionMeta: v.optional(v.any()),
     jobId: v.optional(v.id("agentJobs")),
     usageCount: v.number(),
+    libraryPublishedAt: v.optional(v.number()),
+    libraryPublishedBy: v.optional(v.id("users")),
+    libraryWithdrawnAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_owner", ["ownerUserId", "createdAt"])
     .index("by_visibility", ["visibility", "status", "createdAt"])
+    .index("by_collection", ["collectionId", "createdAt"])
+    .index("by_copiedFrom", ["copiedFromPieceId", "createdAt"])
     .index("by_job", ["jobId"])
     .index("by_run", ["runId"]),
+
+  /** Immutable operator inputs used to author the shared content library. */
+  contentSourceMaterials: defineTable({
+    kind: v.union(v.literal("FILE"), v.literal("TEXT"), v.literal("LINK")),
+    title: v.string(),
+    bodyText: v.optional(v.string()),
+    externalUrl: v.optional(v.string()),
+    storageId: v.optional(v.id("_storage")),
+    fileName: v.optional(v.string()),
+    mimeType: v.optional(v.string()),
+    sizeBytes: v.optional(v.number()),
+    contentHash: v.optional(v.string()),
+    productId: v.optional(v.id("products")),
+    rightsStatus: v.union(v.literal("OWNED"), v.literal("LICENSED"), v.literal("LINK_ONLY")),
+    rightsNote: v.string(),
+    status: v.union(v.literal("DRAFT"), v.literal("READY"), v.literal("ARCHIVED")),
+    /** Set only after the operator completed the first rights/integrity review. */
+    readyAt: v.optional(v.number()),
+    createdBy: v.id("users"),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_status", ["status", "updatedAt"])
+    .index("by_creator", ["createdBy", "updatedAt"])
+    .index("by_creator_status", ["createdBy", "status", "updatedAt"]),
+
+  /** Editorial publication unit. Generation state remains authoritative in contentRuns. */
+  contentCollections: defineTable({
+    title: v.string(),
+    summary: v.optional(v.string()),
+    tags: v.array(v.string()),
+    sourceMaterialIds: v.array(v.id("contentSourceMaterials")),
+    pieceIds: v.array(v.id("contentPieces")),
+    status: v.union(
+      v.literal("DRAFT"),
+      v.literal("IN_REVIEW"),
+      v.literal("PUBLISHED"),
+      v.literal("WITHDRAWN"),
+    ),
+    createdBy: v.id("users"),
+    reviewedBy: v.optional(v.id("users")),
+    reviewedByIds: v.optional(v.array(v.id("users"))),
+    submittedAt: v.optional(v.number()),
+    reviewedAt: v.optional(v.number()),
+    publishedBy: v.optional(v.id("users")),
+    publishedAt: v.optional(v.number()),
+    withdrawnBy: v.optional(v.id("users")),
+    withdrawnAt: v.optional(v.number()),
+    revision: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_status", ["status", "updatedAt"])
+    .index("by_creator", ["createdBy", "updatedAt"])
+    .index("by_creator_status", ["createdBy", "status", "updatedAt"]),
 
   curationItems: defineTable({
     kind: v.union(

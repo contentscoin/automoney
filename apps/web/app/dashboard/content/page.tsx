@@ -33,11 +33,23 @@ export default function ContentPage() {
   const [busy, setBusy] = useState(false);
   const [showJobsLink, setShowJobsLink] = useState(false);
   const [scope, setScope] = useState<"SHARED" | "MINE">("SHARED");
+  const [librarySearch, setLibrarySearch] = useState("");
   const activeDevice = devices?.find((d) => d.status === "ACTIVE");
   const hasDevice = !!activeDevice;
   const deviceOnline = !!activeDevice?.online;
   const codexReady = !!(activeDevice?.snapshot as { codexLoggedIn?: boolean } | null | undefined)?.codexLoggedIn;
-  const visibleLibrary = library?.filter((piece) => scope === "MINE" ? piece.mine : !piece.mine) ?? [];
+  const normalizedSearch = librarySearch.trim().toLocaleLowerCase("ko-KR");
+  const visibleLibrary = library?.filter((piece) => scope === "MINE"
+    ? piece.mine
+    : piece.visibility === "SHARED" && piece.collectionStatus === "PUBLISHED")
+    .filter((piece) => !normalizedSearch || [
+      piece.collectionTitle,
+      piece.collectionSummary,
+      piece.productName,
+      piece.caption,
+      ...piece.hashtags,
+      ...piece.collectionTags,
+    ].filter(Boolean).join(" ").toLocaleLowerCase("ko-KR").includes(normalizedSearch)) ?? [];
   const selectedMagazine = useQuery(api.magazines.get, f.magazineId ? { magazineId: f.magazineId as Id<"magazines"> } : "skip");
 
   const toggle = (c: Channel) => setF({ ...f, channels: f.channels.includes(c) ? f.channels.filter((x) => x !== c) : [...f.channels, c] });
@@ -66,11 +78,12 @@ export default function ContentPage() {
             setMsg("생성 작업을 등록했습니다. 에이전트가 완료하면 아래 라이브러리에 나타납니다(작업 페이지에서 진행 상황 확인).");
           } catch (err) { setShowJobsLink(false); setMsg(errorMessage(err)); } finally { setBusy(false); }
         }}>
-          <div><label className="label">매거진</label><select className="input" value={f.magazineId} onChange={(e) => setF({ ...f, magazineId: e.target.value })}><option value="">선택 안 함</option>{magazines?.map((m) => <option key={m._id} value={m._id}>{m.title} ({m.atomCount}소재·{m.productCount}상품)</option>)}</select></div>
-          <div><label className="label">상품</label><select className="input" value={f.productId} onChange={(e) => setF({ ...f, productId: e.target.value })}><option value="">선택 안 함</option>{(f.magazineId && selectedMagazine ? selectedMagazine.products : products ?? []).map((p) => <option key={p._id} value={p._id}>{p.name}</option>)}</select></div>
-          <div className="sm:col-span-2 flex flex-wrap gap-3 text-sm">
+          <div><label className="label" htmlFor="content-magazine">매거진</label><select id="content-magazine" className="input" value={f.magazineId} onChange={(e) => setF({ ...f, magazineId: e.target.value })}><option value="">선택 안 함</option>{magazines?.map((m) => <option key={m._id} value={m._id}>{m.title} ({m.atomCount}소재·{m.productCount}상품)</option>)}</select></div>
+          <div><label className="label" htmlFor="content-product">상품</label><select id="content-product" className="input" value={f.productId} onChange={(e) => setF({ ...f, productId: e.target.value })}><option value="">선택 안 함</option>{(f.magazineId && selectedMagazine ? selectedMagazine.products : products ?? []).map((p) => <option key={p._id} value={p._id}>{p.name}</option>)}</select></div>
+          <fieldset className="sm:col-span-2 flex flex-wrap gap-3 text-sm">
+            <legend className="label w-full">제작 채널</legend>
             {CHANNEL_ORDER.map((c) => <label key={c} className="flex items-center gap-1"><input type="checkbox" checked={f.channels.includes(c)} onChange={() => toggle(c)} />{CHANNEL_LABEL[c]}</label>)}
-          </div>
+          </fieldset>
           <div className="sm:col-span-2 flex items-center gap-3">
             <button className="btn-primary" disabled={busy || !deviceOnline || f.channels.length === 0 || (!f.magazineId && !f.productId)}>AI 초안 생성 요청</button>
             {f.productId && <button type="button" className="btn-ghost" onClick={async () => { try { const r = await buildFacts({ productId: f.productId as Id<"products"> }); setMsg(`제품 정보 ${r.inserted + r.updated}건 갱신`); } catch (err) { setMsg(errorMessage(err)); } }}>제품 정보 팩 만들기</button>}
@@ -96,7 +109,7 @@ export default function ContentPage() {
                 <div className="truncate font-medium">{m.title}</div>
                 <div className="truncate text-xs text-stone-500">{m.description ?? ""}</div>
                 <div className="text-xs text-stone-500">{dateTime(m.ingestedAt)} · 소재 {m.atomCount} · 상품 {m.productCount}</div>
-                <button className="mt-1 text-xs underline" onClick={() => { setF({ ...f, magazineId: m._id, productId: "" }); window.scrollTo({ top: 0, behavior: "smooth" }); }}>이 매거진으로 생성</button>
+                <button type="button" className="mt-1 text-xs underline" onClick={() => { setF({ ...f, magazineId: m._id, productId: "" }); window.scrollTo({ top: 0 }); }}>이 매거진으로 생성</button>
               </div>
             </li>
           ))}
@@ -104,16 +117,21 @@ export default function ContentPage() {
       </section>
 
       <section className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-2">
+        <div>
+          <h2 className="font-semibold">콘텐츠 라이브러리</h2>
+          <p className="text-sm text-stone-500">운영팀이 검토해 공개한 콘텐츠를 그대로 게시하거나 내 콘텐츠로 복사해 편집할 수 있습니다.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2" aria-label="콘텐츠 자료 종류">
           {(["PIECES", "OUTFIT", "MEME", "TREND", "PRODUCT_FACT", "CELEB_MATCH"] as Tab[]).map((k) => (
-            <button key={k} className={`rounded-lg px-3 py-1.5 text-sm ${tab === k ? "bg-orange-50 font-medium text-orange-800" : "text-stone-700 hover:bg-stone-100"}`} onClick={() => setTab(k)}>{k === "PIECES" ? "콘텐츠 라이브러리" : CURATION_KIND_LABEL[k]}</button>
+            <button key={k} type="button" aria-pressed={tab === k} className={`rounded-lg px-3 py-1.5 text-sm ${tab === k ? "bg-orange-50 font-medium text-orange-800" : "text-stone-700 hover:bg-stone-100"}`} onClick={() => setTab(k)}>{k === "PIECES" ? "게시 콘텐츠" : CURATION_KIND_LABEL[k]}</button>
           ))}
-          {tab === "PIECES" && <select className="input ml-auto w-auto py-1 text-sm" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as "" | "DRAFT" | "APPROVED")}><option value="">전체</option><option value="APPROVED">승인</option><option value="DRAFT">검토 필요</option></select>}
+          {tab === "PIECES" && <><label className="sr-only" htmlFor="content-status-filter">콘텐츠 상태</label><select id="content-status-filter" className="input ml-auto w-auto py-1" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as "" | "DRAFT" | "APPROVED")}><option value="">전체 상태</option><option value="APPROVED">승인</option>{scope === "MINE" && <option value="DRAFT">검토 필요</option>}</select></>}
         </div>
         {tab === "PIECES" ? (
           <div className="grid gap-3 lg:grid-cols-2">
-            <div className="flex gap-2 lg:col-span-2"><button className={scope === "SHARED" ? "btn-primary" : "btn-ghost"} onClick={() => setScope("SHARED")}>운영 제공 콘텐츠</button><button className={scope === "MINE" ? "btn-primary" : "btn-ghost"} onClick={() => setScope("MINE")}>내 콘텐츠</button></div>
-            {visibleLibrary.length === 0 && <div className="card lg:col-span-2"><p className="text-sm text-stone-500">{scope === "SHARED" ? "현재 운영자가 공개한 콘텐츠가 없습니다. 직접 작성하거나 위에서 AI 초안을 생성할 수 있습니다." : "아직 내 콘텐츠가 없습니다."}</p>{scope === "MINE" && <Link className="btn-ghost mt-3" href="/dashboard/content/mine">직접 작성</Link>}</div>}
+            <div className="flex flex-wrap gap-2 lg:col-span-2" aria-label="콘텐츠 소유 범위"><button type="button" aria-pressed={scope === "SHARED"} className={scope === "SHARED" ? "btn-primary" : "btn-ghost"} onClick={() => { setScope("SHARED"); if (statusFilter === "DRAFT") setStatusFilter(""); }}>운영 제공 콘텐츠</button><button type="button" aria-pressed={scope === "MINE"} className={scope === "MINE" ? "btn-primary" : "btn-ghost"} onClick={() => setScope("MINE")}>내 콘텐츠</button></div>
+            <div className="lg:col-span-2"><label className="label" htmlFor="content-library-search">콘텐츠 검색</label><input id="content-library-search" className="input" type="search" value={librarySearch} onChange={(event) => setLibrarySearch(event.target.value)} placeholder="묶음, 상품, 본문, 해시태그로 검색" /></div>
+            {visibleLibrary.length === 0 && <div className="card lg:col-span-2"><p className="text-sm text-stone-500">{normalizedSearch ? "검색 조건에 맞는 콘텐츠가 없습니다." : scope === "SHARED" ? "현재 운영자가 공개한 콘텐츠가 없습니다. 직접 작성하거나 위에서 AI 초안을 생성할 수 있습니다." : "아직 내 콘텐츠가 없습니다."}</p>{scope === "MINE" && !normalizedSearch && <Link className="btn-ghost mt-3" href="/dashboard/content/mine">직접 작성</Link>}</div>}
             {visibleLibrary.map((p) => (
               <PieceCard key={p._id} p={p}
                 onApprove={async (reviewChecklist) => { try { await approve({ pieceId: p._id, ...(p.productionMeta?.outputHash ? { expectedOutputHash: p.productionMeta.outputHash } : {}), reviewChecklist }); } catch (err) { setMsg(errorMessage(err)); } }}

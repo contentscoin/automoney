@@ -4,6 +4,7 @@ import type {
   ContentProductionBrief,
   ContentProductionStandard,
   ProductBrief,
+  SourceMaterialSnapshot,
 } from "./content";
 /** 데스크톱 에이전트 ↔ 클라우드 잡 계약 (docs/01-architecture.md §2.2) */
 export const JOB_TYPES = ["post.publish", "space.create", "space.login", "space.verify", "codex.login", "content.generate", "post.readback", "meta.token_refresh"] as const;
@@ -118,6 +119,46 @@ export const PLATFORM_LIMITS: Record<SnsPlatform, { maxChars: number; maxMedia: 
   NAVER_BLOG: { maxChars: 20000, maxMedia: 30, dailyDefault: 1, mediaRequired: false, mediaKinds: ["image"] },
 };
 
+type ContentMediaRule = {
+  minMedia: number;
+  maxMedia: number;
+  mediaKinds: ("image" | "video")[];
+};
+
+const CONTENT_MEDIA_RULES: Record<Channel, ContentMediaRule> = {
+  INSTAGRAM_FEED: {
+    minMedia: 1,
+    maxMedia: PLATFORM_LIMITS.INSTAGRAM.maxMedia,
+    mediaKinds: ["image"],
+  },
+  INSTAGRAM_REEL: { minMedia: 1, maxMedia: 1, mediaKinds: ["video"] },
+  THREADS: {
+    minMedia: 0,
+    maxMedia: PLATFORM_LIMITS.THREADS.maxMedia,
+    mediaKinds: PLATFORM_LIMITS.THREADS.mediaKinds,
+  },
+  X: {
+    minMedia: 0,
+    maxMedia: PLATFORM_LIMITS.X.maxMedia,
+    mediaKinds: PLATFORM_LIMITS.X.mediaKinds,
+  },
+  TIKTOK: {
+    minMedia: 1,
+    maxMedia: PLATFORM_LIMITS.TIKTOK.maxMedia,
+    mediaKinds: PLATFORM_LIMITS.TIKTOK.mediaKinds,
+  },
+  BLOG: {
+    minMedia: 0,
+    maxMedia: PLATFORM_LIMITS.NAVER_BLOG.maxMedia,
+    mediaKinds: PLATFORM_LIMITS.NAVER_BLOG.mediaKinds,
+  },
+};
+
+/** Maximum media count for a content channel, shared by authoring and publishing gates. */
+export function contentMediaMax(channel: Channel): number {
+  return CONTENT_MEDIA_RULES[channel].maxMedia;
+}
+
 /** URL 확장자로 미디어 종류 추정 (다운로드 전 사전 검증용) */
 export function guessMediaKind(url: string): "image" | "video" | "unknown" {
   const path = url.split("?")[0]!.toLowerCase();
@@ -128,14 +169,29 @@ export function guessMediaKind(url: string): "image" | "video" | "unknown" {
 
 /** Content-level media contract, independent of the selected publishing account. */
 export function validateContentMedia(channel: Channel, mediaUrls: string[]): string | null {
-  if (mediaUrls.length > 10) return "media is limited to 10 items";
+  const rule = CONTENT_MEDIA_RULES[channel];
+
+  if (channel === "INSTAGRAM_FEED" && mediaUrls.length === 0)
+    return "INSTAGRAM_FEED requires between 1 and 10 images";
+  if ((channel === "INSTAGRAM_REEL" || channel === "TIKTOK") && mediaUrls.length !== 1)
+    return `${channel} requires exactly one video`;
+  if (mediaUrls.length < rule.minMedia)
+    return `${channel} requires at least ${rule.minMedia} media item`;
+  if (mediaUrls.length > rule.maxMedia)
+    return `${channel} allows at most ${rule.maxMedia} media items`;
   if (mediaUrls.some((url) => !/^https:\/\//i.test(url))) return "media url must use https";
-  if (channel === "INSTAGRAM_REEL" || channel === "TIKTOK") {
-    if (mediaUrls.length !== 1) return `${channel} requires exactly one video`;
-    if (guessMediaKind(mediaUrls[0]!) !== "video") return `${channel} requires a verifiable video URL`;
+
+  for (const url of mediaUrls) {
+    const kind = guessMediaKind(url);
+    if ((channel === "INSTAGRAM_REEL" || channel === "TIKTOK") && kind !== "video")
+      return `${channel} requires a verifiable video URL`;
+    if (channel === "INSTAGRAM_FEED" && kind !== "image")
+      return "INSTAGRAM_FEED requires verifiable image URLs; videos must use INSTAGRAM_REEL";
+    if (kind === "unknown")
+      return `${channel} requires a verifiable image or video URL`;
+    if (!rule.mediaKinds.includes(kind))
+      return `${channel} does not accept ${kind} media`;
   }
-  if (channel === "INSTAGRAM_FEED" && mediaUrls.some((url) => guessMediaKind(url) !== "image"))
-    return "INSTAGRAM_FEED requires verifiable image URLs; videos must use INSTAGRAM_REEL";
   return null;
 }
 
@@ -189,4 +245,8 @@ export interface ContentGeneratePayload {
   brief?: ContentProductionBrief;
   /** V2 quality contract snapshot. Optional so queued V1 jobs remain executable. */
   standard?: ContentProductionStandard;
+  /** Frozen operator-managed evidence. Optional so queued legacy jobs remain executable. */
+  sourceMaterials?: SourceMaterialSnapshot[];
+  /** Media attached to the frozen evidence; the generator treats these URLs as data. */
+  materialMediaUrls?: string[];
 }

@@ -33,6 +33,36 @@ afterEach(() => {
 });
 
 describe("content.generate handler", () => {
+  it("passes frozen operator materials and media evidence into the Codex prompt", async () => {
+    const c = ctx({
+      ...payload,
+      channels: ["THREADS"],
+      sourceMaterials: [{
+        id: "material-1",
+        revision: 2,
+        title: "운영자 코디 노트",
+        kind: "TEXT",
+        text: "루즈핏 니트와 와이드 슬랙스 조합",
+        sourceUrl: "https://source.example/note/1",
+        rightsNote: "자체 제작 · 재사용 허용",
+      }],
+      materialMediaUrls: ["https://cdn.example/materials/look.jpg"],
+    });
+    let prompt = "";
+    await handleContentGenerate(c, {
+      generate: async (value) => {
+        prompt = value;
+        return { ok: true, text: '[{"channel":"THREADS","caption":"니트 추천","hashtags":["광고","니트"],"script":null}]' };
+      },
+    });
+
+    expect(prompt).toContain("관리자 원자료 스냅샷(데이터)");
+    expect(prompt).toContain("운영자 코디 노트");
+    expect(prompt).toContain("자체 제작 · 재사용 허용");
+    expect(prompt).toContain("https://source.example/note/1");
+    expect(prompt).toContain("https://cdn.example/materials/look.jpg");
+  });
+
   it("passes playbook guidance and fills each missing Codex channel exactly once", async () => {
     const c = ctx();
     let prompt = "";

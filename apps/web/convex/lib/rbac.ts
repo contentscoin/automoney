@@ -10,6 +10,11 @@ export function roleOf(user: Doc<"users">): Role {
   return user.role ?? "USER";
 }
 
+/** A suspended operator must not keep approving, owning, or supplying global content. */
+export function isActiveSuperAdmin(user: Doc<"users">): boolean {
+  return roleOf(user) === "SUPER_ADMIN" && (user.status ?? "ACTIVE") === "ACTIVE";
+}
+
 export async function getViewer(ctx: Ctx): Promise<Doc<"users"> | null> {
   const userId = await getAuthUserId(ctx);
   if (!userId) return null;
@@ -30,7 +35,11 @@ export async function requireRole(ctx: Ctx, roles: Role[]): Promise<Doc<"users">
   return user;
 }
 
-export const requireSuperAdmin = (ctx: Ctx) => requireRole(ctx, ["SUPER_ADMIN"]);
+export const requireSuperAdmin = async (ctx: Ctx): Promise<Doc<"users">> => {
+  const user = await requireRole(ctx, ["SUPER_ADMIN"]);
+  if (!isActiveSuperAdmin(user)) fail("FORBIDDEN", "활성 수퍼어드민 계정이 필요합니다.");
+  return user;
+};
 export const requireAdminOrSuper = (ctx: Ctx) => requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]);
 
 /**

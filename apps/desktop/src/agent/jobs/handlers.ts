@@ -122,12 +122,12 @@ export async function downloadMedia(urls: string[], fetchImpl: typeof fetch = fe
     }
     if (!res?.ok) throw new JobError("MEDIA_DOWNLOAD_FAILED", `media download failed (${res?.status ?? 0})`);
     const mime = (res.headers.get("content-type") ?? "").split(";")[0]!.toLowerCase();
-    if (!/^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm))$/.test(mime)) throw new JobError("MEDIA_TYPE_UNSUPPORTED", `unsupported media type: ${mime || "unknown"}`);
+    if (!/^(image\/(jpeg|png|webp|gif)|video\/(mp4|quicktime|webm))$/.test(mime)) throw new JobError("MEDIA_TYPE_UNSUPPORTED", `unsupported media type: ${mime || "unknown"}`);
     const declared = Number(res.headers.get("content-length") ?? 0);
     if (declared > 20 * 1024 * 1024) throw new JobError("MEDIA_TOO_LARGE", "media exceeds 20MB");
     const bytes = Buffer.from(await res.arrayBuffer());
     if (bytes.length > 20 * 1024 * 1024) throw new JobError("MEDIA_TOO_LARGE", "media exceeds 20MB");
-    const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : mime === "video/mp4" ? "mp4" : mime === "video/webm" ? "webm" : "jpg";
+    const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : mime === "video/mp4" ? "mp4" : mime === "video/quicktime" ? "mov" : mime === "video/webm" ? "webm" : "jpg";
     const p = path.join(dir, `media-${i}.${ext}`);
     fs.writeFileSync(p, bytes);
     out.push(p);
@@ -360,6 +360,8 @@ export async function handleContentGenerate(ctx: JobContext, deps: { generate?: 
     runId: p.runId,
     brief: p.brief,
     standard: p.standard,
+    sourceMaterials: p.sourceMaterials,
+    materialMediaUrls: p.materialMediaUrls,
   };
   await ctx.checkpoint("preparing", 10);
   let pieces: GeneratedPiece[] = [];

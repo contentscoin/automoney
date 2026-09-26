@@ -33,10 +33,11 @@ const NAV = {
   ],
   SUPER_ADMIN: [
     { href: "/super", label: "운영 대시보드" },
+    { href: "/super/content", label: "콘텐츠 공급실" },
     { href: "/super/users", label: "유저·권한" },
     { href: "/super/kyc", label: "KYC 검수" },
     { href: "/super/products", label: "상품" },
-    { href: "/super/magazines", label: "매거진·콘텐츠" },
+    { href: "/super/magazines", label: "매거진·큐레이션" },
     { href: "/super/analytics", label: "실험·플레이북" },
     { href: "/super/orders", label: "주문 원장" },
     { href: "/super/settlements", label: "정산 관리" },

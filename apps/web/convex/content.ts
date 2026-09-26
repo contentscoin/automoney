@@ -1,6 +1,7 @@
 import { v, type ObjectType } from "convex/values";
 import {
   CHANNELS,
+  contentMediaMax,
   DEFAULT_CONTENT_STANDARD,
   evaluatePiece,
   isAutoApprovable,
@@ -13,6 +14,7 @@ import {
   type ContentProductionStandard,
   type GeneratedPiece,
   type ProductBrief,
+  type SourceMaterialSnapshot,
 } from "@automoney/shared";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
@@ -25,10 +27,16 @@ import {
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { sha256Hex } from "./lib/crypto";
-import { requireSuperAdmin, requireUser, roleOf } from "./lib/rbac";
+import { isActiveSuperAdmin, requireSuperAdmin, requireUser } from "./lib/rbac";
 import { canonicalJson, enqueueJob } from "./jobs";
 import { playbookHintsFor } from "./analytics";
-import { contentPieceEvidenceRunId, workflowReviewEvidence } from "./lib/pieces";
+import {
+  completeContentReviewChecklist,
+  contentPieceEvidenceRunId,
+  libraryReviewEvidence,
+  manualContentOutputHash,
+  workflowReviewEvidence,
+} from "./lib/pieces";
 
 /** 내 거절 사유 상위 3개(생성 프롬프트 "피해야 할 것") */
 async function topRejectionReasons(ctx: MutationCtx, userId: Id<"users">): Promise<string[]> {
@@ -56,6 +64,16 @@ const reviewChecklistValidator = v.object({
   finalCopy: v.boolean(),
 });
 export const MIN_CONTENT_DESKTOP_VERSION = "0.1.11";
+export const MIN_ADMIN_MATERIAL_DESKTOP_VERSION = "0.1.16";
+const MAX_ADMIN_COLLECTION_PIECES = 100;
+export type AdminMaterialSnapshot = {
+  collectionId: Id<"contentCollections">;
+  revision: number;
+  sourceMaterialIds: Id<"contentSourceMaterials">[];
+  sourceMaterials: SourceMaterialSnapshot[];
+  materialMediaUrls: string[];
+  requestedProductId?: Id<"products"> | null;
+};
 
 export function versionAtLeast(actual: string, required: string): boolean {
   const parse = (value: string) => {
@@ -164,6 +182,7 @@ async function createContentRun(
     standard: ContentProductionStandard;
     expectedOutputs: number;
     batchKey?: string;
+    adminMaterialSnapshot?: AdminMaterialSnapshot;
   },
 ): Promise<Id<"contentRuns">> {
   const productIds = input.productIds.filter((id, index) => input.productIds.indexOf(id) === index);
@@ -191,11 +210,16 @@ async function createContentRun(
     channels,
     brief: input.brief,
     standard: input.standard,
+    ...(input.adminMaterialSnapshot ? { adminMaterialSnapshot: input.adminMaterialSnapshot } : {}),
   }));
   const now = Date.now();
   return await ctx.db.insert("contentRuns", {
     userId: input.userId,
     batchKey: input.batchKey ?? `content:${inputHash.slice(0, 16)}:${now}`,
+    ...(input.adminMaterialSnapshot ? {
+      collectionId: input.adminMaterialSnapshot.collectionId,
+      adminMaterialSnapshot: input.adminMaterialSnapshot,
+    } : {}),
     productIds,
     productSnapshots,
     channels,
@@ -224,12 +248,14 @@ const requestGenerateArgs = {
 
 type RequestGenerateForArgs = ObjectType<typeof requestGenerateArgs> & {
   runId?: Id<"contentRuns">;
+  adminMaterialSnapshot?: AdminMaterialSnapshot;
+  batchKey?: string;
 };
 
 export async function requestGenerateFor(ctx: MutationCtx, user: Doc<"users">, args: RequestGenerateForArgs, source: "WEB" | "MCP" = "WEB") {
   if (args.channels.length === 0)
     fail("INVALID_ARGUMENT", "채널을 하나 이상 선택하세요.");
-  if (!args.magazineId && !args.productId)
+  if (!args.magazineId && !args.productId && !args.adminMaterialSnapshot)
     fail("INVALID_ARGUMENT", "매거진 또는 상품을 선택하세요.");
   const device = (
     await ctx.db
@@ -246,6 +272,13 @@ export async function requestGenerateFor(ctx: MutationCtx, user: Doc<"users">, a
     );
   if (!device.lastSeenAt || Date.now() - device.lastSeenAt >= 90_000)
     fail("CONFLICT", "데스크톱 에이전트가 오프라인입니다. PC 앱을 실행한 뒤 다시 요청하세요.");
+  if (args.adminMaterialSnapshot) {
+    if (!isActiveSuperAdmin(user)) fail("FORBIDDEN", "운영 자료 생성은 활성 수퍼어드민만 사용할 수 있습니다.");
+    if (!versionAtLeast(device.appVersion, MIN_ADMIN_MATERIAL_DESKTOP_VERSION))
+      fail("CONFLICT", `운영 자료 생성에는 PC 앱 ${MIN_ADMIN_MATERIAL_DESKTOP_VERSION} 이상이 필요합니다.`);
+    if (!(device.snapshot as { codexLoggedIn?: boolean } | undefined)?.codexLoggedIn)
+      fail("CONFLICT", "PC 앱의 Codex 로그인을 확인한 뒤 생성하세요.");
+  }
   if (!versionAtLeast(device.appVersion, MIN_CONTENT_DESKTOP_VERSION))
     fail(
       "CONFLICT",
@@ -321,6 +354,8 @@ export async function requestGenerateFor(ctx: MutationCtx, user: Doc<"users">, a
       brief,
       standard,
       expectedOutputs: channels.length,
+      batchKey: args.batchKey,
+      adminMaterialSnapshot: args.adminMaterialSnapshot,
     });
   }
   const payload: ContentGeneratePayload = {
@@ -335,6 +370,11 @@ export async function requestGenerateFor(ctx: MutationCtx, user: Doc<"users">, a
     runId,
     brief,
     standard,
+    ...(args.adminMaterialSnapshot ? {
+      sourceMaterials: args.adminMaterialSnapshot.sourceMaterials,
+      materialMediaUrls: args.adminMaterialSnapshot.materialMediaUrls,
+      adminMaterialSnapshot: args.adminMaterialSnapshot,
+    } : {}),
   };
   const jobId = await enqueueJob(ctx, {
     userId: user._id,
@@ -444,13 +484,11 @@ async function contentRunView(ctx: QueryCtx, run: Doc<"contentRuns">) {
     .withIndex("by_run", (q) => q.eq("runId", run._id))
     .collect();
   let completedJobs = 0;
-  let failedJobs = 0;
   let runningJobs = 0;
   for (const jobId of run.jobIds) {
     const job = await ctx.db.get(jobId);
     if (!job) continue;
     if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status)) completedJobs++;
-    if (job.status === "FAILED" || job.status === "CANCELLED") failedJobs++;
     if (job.status === "RUNNING") runningJobs++;
   }
   const savedOutputs = pieces.length;
@@ -461,10 +499,11 @@ async function contentRunView(ctx: QueryCtx, run: Doc<"contentRuns">) {
   let status: Doc<"contentRuns">["status"] = run.status;
   if (run.jobIds.length === 0) status = "QUEUED";
   else if (completedJobs === run.jobIds.length) {
-    if (failedJobs === run.jobIds.length && savedOutputs === 0) status = "FAILED";
+    if (savedOutputs === 0) status = "FAILED";
     else status = approvedOutputs === run.expectedOutputs ? "COMPLETED" : "REVIEW_REQUIRED";
   } else if (completedJobs > 0 || runningJobs > 0) status = "RUNNING";
   else status = "QUEUED";
+  if (run.quarantineReason) status = "FAILED";
   return {
     _id: run._id,
     batchKey: run.batchKey,
@@ -537,17 +576,16 @@ function productBrief(p: Doc<"products">): ProductBrief {
 async function refreshContentRun(ctx: MutationCtx, runId: Id<"contentRuns">): Promise<void> {
   const run = await ctx.db.get(runId);
   if (!run) return;
+  if (run.quarantineReason) return;
   const pieces = await ctx.db
     .query("contentPieces")
     .withIndex("by_run", (q) => q.eq("runId", run._id))
     .collect();
   let completedJobs = 0;
-  let failedJobs = 0;
   for (const jobId of run.jobIds) {
     const job = await ctx.db.get(jobId);
     if (!job) continue;
     if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status)) completedJobs++;
-    if (job.status === "FAILED" || job.status === "CANCELLED") failedJobs++;
   }
   const approvedOutputs = pieces.filter((piece) =>
     piece.status === "APPROVED"
@@ -555,7 +593,7 @@ async function refreshContentRun(ctx: MutationCtx, runId: Id<"contentRuns">): Pr
   ).length;
   const finished = run.jobIds.length > 0 && completedJobs === run.jobIds.length;
   const status: Doc<"contentRuns">["status"] = finished
-    ? failedJobs === run.jobIds.length && pieces.length === 0
+    ? pieces.length === 0
       ? "FAILED"
       : approvedOutputs === run.expectedOutputs
         ? "COMPLETED"
@@ -620,6 +658,25 @@ export async function ingestGeneratedJob(
   const runId = typeof payload.runId === "string" ? payload.runId as Id<"contentRuns"> : undefined;
   const run = runId ? await ctx.db.get(runId) : null;
   const ownedRun = run?.userId === job.userId ? run : null;
+  if ((job.payload as { adminMaterialSnapshot?: unknown }).adminMaterialSnapshot && !ownedRun) {
+    await audit(ctx, { actorUserId: job.userId, action: "adminContent.resultQuarantined", metadata: { jobId, reason: "운영 자료 제작 실행의 소유권을 확인할 수 없습니다." } });
+    return { saved: 0, approved: 0 };
+  }
+  const adminSnapshot = ownedRun?.adminMaterialSnapshot as AdminMaterialSnapshot | undefined;
+  const adminCollection = adminSnapshot ? await ctx.db.get(adminSnapshot.collectionId) : null;
+  if (adminSnapshot) {
+    const actor = await ctx.db.get(job.userId);
+    const snapshotMatches = canonicalJson((job.payload as { adminMaterialSnapshot?: unknown }).adminMaterialSnapshot)
+      === canonicalJson(adminSnapshot);
+    if (!adminCollection || adminCollection.status !== "DRAFT"
+      || adminCollection.revision !== adminSnapshot.revision
+      || !actor || !isActiveSuperAdmin(actor) || !snapshotMatches) {
+      const reason = "운영 컬렉션의 상태 또는 revision이 변경되어 늦게 도착한 결과를 연결하지 않았습니다.";
+      await ctx.db.patch(ownedRun!._id, { quarantineReason: reason, status: "FAILED", updatedAt: Date.now() });
+      await audit(ctx, { actorUserId: job.userId, action: "adminContent.resultQuarantined", metadata: { runId: ownedRun!._id, jobId, reason } });
+      return { saved: 0, approved: 0 };
+    }
+  }
   const productionBrief = normalizeContentBrief(
     (payload.brief ?? ownedRun?.briefSnapshot) as Partial<ContentProductionBrief> | null | undefined,
   );
@@ -650,8 +707,10 @@ export async function ingestGeneratedJob(
     : null;
   let saved = 0;
   let approved = 0;
+  const attachedPieceIds: Id<"contentPieces">[] = [];
   const seenChannels = new Set<Channel>();
   for (const rawValue of pieces) {
+    if (adminCollection && adminCollection.pieceIds.length + attachedPieceIds.length >= MAX_ADMIN_COLLECTION_PIECES) break;
     if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) continue;
     const raw = rawValue as Partial<GeneratedPiece>;
     if (typeof raw.channel !== "string" || !CHANNELS.includes(raw.channel as Channel)) continue;
@@ -701,8 +760,11 @@ export async function ingestGeneratedJob(
     if (!schemaValid) appendBlock("INVALID_OUTPUT_SCHEMA", "생성 결과의 본문·해시태그·대본 형식이 올바르지 않습니다.");
     if (strictRun && !provenanceComplete)
       appendBlock("PROVENANCE_MISSING", "V2 결과에는 조각별 생성 출처가 필요합니다. 데스크톱 앱을 업데이트해 다시 생성하세요.");
-    const mediaUrls = frozenProduct?.imageUrls.slice(0, 4)
-      ?? (legacyMagazine?.imageUrls.length ? legacyMagazine.imageUrls.slice(0, 4) : legacyProduct?.imageUrls.slice(0, 4) ?? []);
+    const mediaUrls = adminSnapshot ? adminSnapshot.materialMediaUrls.filter((url) => {
+      const video = /\.(mp4|mov|webm)(?:[?#]|$)/i.test(url);
+      return channel === "INSTAGRAM_REEL" || channel === "TIKTOK" ? video : !video;
+    }).slice(0, contentMediaMax(channel)) : frozenProduct?.imageUrls.slice(0, contentMediaMax(channel))
+      ?? (legacyMagazine?.imageUrls.length ? legacyMagazine.imageUrls.slice(0, contentMediaMax(channel)) : legacyProduct?.imageUrls.slice(0, contentMediaMax(channel)) ?? []);
     const mediaContractPassed = validateContentMedia(channel, mediaUrls) === null;
     const standardPassed = (standard
       ? isAutoApprovable(report) && passesContentStandard(report, provider, standard)
@@ -717,7 +779,7 @@ export async function ingestGeneratedJob(
       attemptNo,
     }));
     const status = strictRun ? "DRAFT" as const : standardPassed ? "APPROVED" as const : "DRAFT" as const;
-    await ctx.db.insert("contentPieces", {
+    const pieceId = await ctx.db.insert("contentPieces", {
       ownerUserId: job.userId,
       visibility: "PRIVATE",
       magazineId: ownedRun && payload.magazineId ? payload.magazineId as Id<"magazines"> : legacyMagazine?._id,
@@ -732,6 +794,7 @@ export async function ingestGeneratedJob(
       status,
       generatedBy: provider,
       runId: ownedRun?._id,
+      ...(adminSnapshot ? { collectionId: adminSnapshot.collectionId, sourceMaterialIds: adminSnapshot.sourceMaterialIds } : {}),
       productionMeta: standard ? {
         workflowVersion: standard.workflowVersion,
         promptVersion: standard.promptVersion,
@@ -756,9 +819,13 @@ export async function ingestGeneratedJob(
       usageCount: 0,
       createdAt: Date.now(),
     });
+    if (adminSnapshot) attachedPieceIds.push(pieceId);
     saved++;
     if (status === "APPROVED") approved++;
   }
+  if (adminCollection && attachedPieceIds.length) await ctx.db.patch(adminCollection._id, {
+    pieceIds: [...adminCollection.pieceIds, ...attachedPieceIds], updatedAt: Date.now(),
+  });
   if (ownedRun) await refreshContentRun(ctx, ownedRun._id);
   return { saved, approved };
 }
@@ -777,6 +844,10 @@ const pieceView = (
       source: string;
       frozen: boolean;
     } | null;
+    collectionTitle?: string | null;
+    collectionSummary?: string | null;
+    collectionTags?: string[];
+    collectionStatus?: Doc<"contentCollections">["status"] | null;
   },
 ) => ({
   _id: p._id,
@@ -803,9 +874,15 @@ const pieceView = (
   productName: extra.productName ?? null,
   productId: p.productId ?? null,
   productEvidence: extra.productEvidence ?? null,
+  collectionId: p.collectionId ?? null,
+  collectionTitle: extra.collectionTitle ?? null,
+  collectionSummary: extra.collectionSummary ?? null,
+  collectionTags: extra.collectionTags ?? [],
+  collectionStatus: extra.collectionStatus ?? null,
+  sourceMaterialIds: p.sourceMaterialIds ?? [],
 });
 
-async function decorate(
+export async function decorate(
   ctx: QueryCtx | MutationCtx,
   rows: Doc<"contentPieces">[],
   viewerId: Id<"users">,
@@ -814,6 +891,7 @@ async function decorate(
   for (const p of rows) {
     const m = p.magazineId ? await ctx.db.get(p.magazineId) : null;
     const pr = p.productId ? await ctx.db.get(p.productId) : null;
+    const collection = p.collectionId ? await ctx.db.get(p.collectionId) : null;
     const evidenceRunId = contentPieceEvidenceRunId(p);
     const run = evidenceRunId ? await ctx.db.get(evidenceRunId) : null;
     const frozenProduct = p.productId
@@ -845,6 +923,10 @@ async function decorate(
         magazineTitle: m?.title ?? null,
         productName: pr?.name ?? null,
         productEvidence,
+        collectionTitle: collection?.title ?? null,
+        collectionSummary: collection?.summary ?? null,
+        collectionTags: collection?.tags ?? [],
+        collectionStatus: collection?.status ?? null,
       }),
       mine: p.ownerUserId === viewerId,
     });
@@ -872,9 +954,27 @@ export async function listLibraryFor(ctx: QueryCtx, user: Doc<"users">, args: Ob
     )
     .order("desc")
     .take(200);
+  const publishedShared = [];
+  for (const piece of shared) {
+    const owner = piece.ownerUserId ? await ctx.db.get(piece.ownerUserId) : null;
+    if (!owner || !isActiveSuperAdmin(owner)) continue;
+    if (piece.productId && (await ctx.db.get(piece.productId))?.status !== "ACTIVE") continue;
+    if (!(await libraryReviewEvidence(ctx, piece)).ok) continue;
+    if (piece.collectionId) {
+      const collection = await ctx.db.get(piece.collectionId);
+      if (
+        collection?.status !== "PUBLISHED"
+        || piece.libraryPublishedAt === undefined
+        || collection.publishedAt !== piece.libraryPublishedAt
+        || collection.publishedBy !== piece.ownerUserId
+        || piece.libraryPublishedBy !== piece.ownerUserId
+      ) continue;
+    }
+    publishedShared.push(piece);
+  }
   const merged = [
     ...mine,
-    ...shared.filter((s) => s.ownerUserId !== user._id),
+    ...publishedShared.filter((s) => s.ownerUserId !== user._id),
   ]
     .filter((p) => p.status !== "RETIRED")
     .filter((p) => !args.channel || p.channel === args.channel)
@@ -896,10 +996,29 @@ const getPieceArgs = { pieceId: v.id("contentPieces") };
 export async function getPieceFor(ctx: QueryCtx, user: Doc<"users">, args: ObjectType<typeof getPieceArgs>) {
   const p = await ctx.db.get(args.pieceId);
   if (!p) fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+  const collection = p.collectionId ? await ctx.db.get(p.collectionId) : null;
+  const sourceOwner = p.ownerUserId ? await ctx.db.get(p.ownerUserId) : null;
+  const activeProduct = !p.productId || (await ctx.db.get(p.productId))?.status === "ACTIVE";
+  const sourceReview = p.visibility === "SHARED" ? await libraryReviewEvidence(ctx, p) : null;
+  const publishedCollectionSource = !p.collectionId || (
+    collection?.status === "PUBLISHED"
+    && p.libraryPublishedAt !== undefined
+    && collection.publishedAt === p.libraryPublishedAt
+    && collection.publishedBy === p.ownerUserId
+    && p.libraryPublishedBy === p.ownerUserId
+  );
   if (
     p.ownerUserId !== user._id &&
-    !(p.visibility === "SHARED" && p.status === "APPROVED") &&
-    roleOf(user) !== "SUPER_ADMIN"
+    !(
+      p.visibility === "SHARED"
+      && p.status === "APPROVED"
+      && publishedCollectionSource
+      && sourceOwner
+      && isActiveSuperAdmin(sourceOwner)
+      && activeProduct
+      && sourceReview?.ok === true
+    ) &&
+    !isActiveSuperAdmin(user)
   )
     fail("FORBIDDEN", "접근할 수 없는 콘텐츠입니다.");
   return (await decorate(ctx, [p], user._id))[0]!;
@@ -926,7 +1045,8 @@ export const createManual = mutation({
     const user = await requireUser(ctx);
     if (args.productId && !(await ctx.db.get(args.productId))) fail("NOT_FOUND", "상품을 찾을 수 없습니다.");
     if (!args.caption.trim()) fail("INVALID_ARGUMENT", "본문을 입력하세요.");
-    if (args.mediaUrls.length > 10) fail("INVALID_ARGUMENT", "미디어는 최대 10개까지 추가할 수 있습니다.");
+    const maxMedia = contentMediaMax(args.channel);
+    if (args.mediaUrls.length > maxMedia) fail("INVALID_ARGUMENT", `이 채널에는 미디어를 최대 ${maxMedia}개까지 추가할 수 있습니다.`);
     if (args.mediaUrls.some((url) => !/^https:\/\//i.test(url))) fail("INVALID_ARGUMENT", "미디어 URL은 HTTPS 주소만 사용할 수 있습니다.");
     const report = evaluatePiece({ channel: args.channel, caption: args.caption, hashtags: args.hashtags, script: args.script }, { linkExpected: true });
     const autoApproved = isAutoApprovable(report) && validateContentMedia(args.channel, args.mediaUrls) === null;
@@ -958,13 +1078,32 @@ export const copyToMine = mutation({
     const user = await requireUser(ctx);
     const source = await ctx.db.get(args.pieceId);
     if (!source || source.visibility !== "SHARED" || source.status !== "APPROVED") fail("NOT_FOUND", "공유 콘텐츠를 찾을 수 없습니다.");
+    if (!source.ownerUserId) fail("CONFLICT", "공유 콘텐츠의 운영 소유자를 확인할 수 없습니다.");
+    const sourceOwner = await ctx.db.get(source.ownerUserId);
+    if (!sourceOwner || !isActiveSuperAdmin(sourceOwner))
+      fail("CONFLICT", "운영사가 소유한 공유 콘텐츠만 가져올 수 있습니다.");
+    if (source.collectionId) {
+      const collection = await ctx.db.get(source.collectionId);
+      if (
+        !collection
+        || collection.status !== "PUBLISHED"
+        || collection.publishedBy !== source.ownerUserId
+        || source.libraryPublishedBy !== source.ownerUserId
+        || source.libraryPublishedAt === undefined
+        || collection.publishedAt !== source.libraryPublishedAt
+      ) fail("NOT_FOUND", "현재 공개 중인 운영 콘텐츠를 찾을 수 없습니다.");
+    }
+    if (source.productId && (await ctx.db.get(source.productId))?.status !== "ACTIVE")
+      fail("CONFLICT", "판매 중이 아닌 상품의 운영 콘텐츠는 가져올 수 없습니다.");
+    const sourceReview = await libraryReviewEvidence(ctx, source);
+    if (!sourceReview.ok) fail("CONFLICT", sourceReview.reason);
     const sourceEvidenceRunId = contentPieceEvidenceRunId(source);
     if (!sourceEvidenceRunId && source.generatedBy !== "manual")
       fail("CONFLICT", "이전 품질 계약으로 생성된 콘텐츠는 가져올 수 없습니다. 운영자가 새 워크플로로 다시 생성해야 합니다.");
     if (sourceEvidenceRunId) {
       const run = await ctx.db.get(sourceEvidenceRunId);
       const standardPassed = (source.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
-      if (!standardPassed || run?.status !== "COMPLETED")
+      if (!standardPassed || (!source.collectionId && run?.status !== "COMPLETED"))
         fail("CONFLICT", "전체 제작 실행의 검수·승인이 완료되지 않은 콘텐츠는 가져올 수 없습니다.");
       const review = await workflowReviewEvidence(ctx, source);
       if (!review.ok) fail("CONFLICT", `${review.reason} 새 워크플로로 다시 검토하세요.`);
@@ -972,6 +1111,7 @@ export const copyToMine = mutation({
     const pieceId = await ctx.db.insert("contentPieces", {
       ownerUserId: user._id,
       visibility: "PRIVATE",
+      sourceMaterialIds: source.sourceMaterialIds,
       magazineId: source.magazineId,
       productId: source.productId,
       channel: source.channel,
@@ -992,6 +1132,8 @@ export const copyToMine = mutation({
           approvedByUserId: null,
           reviewChecklist: null,
           copiedFromPieceId: source._id,
+          sourceCollectionId: source.collectionId ?? null,
+          sourceMaterialIds: source.sourceMaterialIds ?? [],
           copiedAt: Date.now(),
         },
       } : {}),
@@ -1040,8 +1182,16 @@ export const approve = mutation({
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     const p = await ctx.db.get(args.pieceId);
-    if (!p || (p.ownerUserId !== user._id && roleOf(user) !== "SUPER_ADMIN"))
+    if (!p || (p.ownerUserId !== user._id && !isActiveSuperAdmin(user)))
       fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+    if (p.collectionId) {
+      const collection = await ctx.db.get(p.collectionId);
+      if (
+        !isActiveSuperAdmin(user)
+        || !collection
+        || collection.status !== "IN_REVIEW"
+      ) fail("FORBIDDEN", "검수 요청 상태의 운영 컬렉션만 수퍼어드민이 승인할 수 있습니다.");
+    }
     if (p.status !== "DRAFT")
       fail("CONFLICT", "검토 대기 초안만 승인할 수 있습니다. 폐기된 콘텐츠는 수정해 새 revision으로 만든 뒤 다시 검토하세요.");
     if (!contentPieceEvidenceRunId(p) && p.generatedBy !== "manual")
@@ -1049,6 +1199,23 @@ export const approve = mutation({
     const mediaContractError = validateContentMedia(p.channel as Channel, p.mediaUrls);
     if (mediaContractError)
       fail("CONFLICT", "채널 미디어 요건을 충족하지 못했습니다. Reels·TikTok은 검증 가능한 HTTPS 동영상 URL 1개가 필요합니다.");
+    let collectionManualReport: ReturnType<typeof evaluatePiece> | null = null;
+    if (p.collectionId && p.generatedBy === "manual") {
+      const product = p.productId ? await ctx.db.get(p.productId) : null;
+      if (p.productId && (!product || product.status !== "ACTIVE"))
+        fail("CONFLICT", "판매 중인 상품의 콘텐츠만 승인할 수 있습니다.");
+      collectionManualReport = evaluatePiece({
+        channel: p.channel as Channel,
+        caption: p.caption,
+        hashtags: p.hashtags,
+        script: p.script ?? null,
+      }, {
+        linkExpected: !!product,
+        products: product ? [productBrief(product)] : [],
+      });
+      if (!isAutoApprovable(collectionManualReport))
+        fail("CONFLICT", "운영 제공 콘텐츠는 90점 이상의 수동 콘텐츠 품질 기준을 통과해야 합니다.");
+    }
     const production = await productionContextForPiece(ctx, p);
     if (production) {
       const report = evaluatePiece({
@@ -1130,21 +1297,55 @@ export const approve = mutation({
       await refreshContentRun(ctx, production.run._id);
       return;
     }
-    const blocks = (
+    const blocks = (collectionManualReport?.violations ?? (
       (p.qualityReport as { violations?: { severity: string }[] })
         ?.violations ?? []
-    ).filter((v) => v.severity === "block");
+    )).filter((v) => v.severity === "block");
     if (blocks.length > 0)
       fail("CONFLICT", "금칙 위반이 있는 콘텐츠는 수정 후 승인할 수 있습니다.");
-    const outputHash = await sha256Hex(canonicalJson({
-      channel: p.channel,
-      caption: p.caption,
-      hashtags: p.hashtags,
-      script: p.script ?? null,
-      mediaUrls: p.mediaUrls,
-    }));
+    const outputHash = p.generatedBy === "manual"
+      ? await manualContentOutputHash(collectionManualReport ? {
+          channel: p.channel,
+          caption: collectionManualReport.caption,
+          hashtags: collectionManualReport.hashtags,
+          script: p.script,
+          mediaUrls: p.mediaUrls,
+        } : p)
+      : await sha256Hex(canonicalJson({
+          channel: p.channel,
+          caption: p.caption,
+          hashtags: p.hashtags,
+          script: p.script ?? null,
+          mediaUrls: p.mediaUrls,
+        }));
+    if (p.collectionId) {
+      if (!args.expectedOutputHash || args.expectedOutputHash !== outputHash)
+        fail("CONFLICT", "검토 후 콘텐츠가 변경되었습니다. 최신 내용을 다시 확인한 뒤 승인하세요.");
+      if (!completeContentReviewChecklist(args.reviewChecklist))
+        fail("CONFLICT", "상품 사실·광고 표기·미디어 사용권·최종 문구를 모두 확인한 뒤 승인하세요.");
+    }
     const approvedAt = Date.now();
-    await ctx.db.patch(p._id, { status: "APPROVED" });
+    await ctx.db.patch(p._id, {
+      ...(collectionManualReport ? {
+        caption: collectionManualReport.caption,
+        hashtags: collectionManualReport.hashtags,
+        qualityScore: collectionManualReport.score,
+        qualityReport: { violations: collectionManualReport.violations, fixed: collectionManualReport.fixed },
+      } : {}),
+      status: "APPROVED",
+      ...(p.collectionId ? {
+        productionMeta: {
+          ...(p.productionMeta as Record<string, unknown> | undefined),
+          provider: "manual",
+          standardPassed: true,
+          outputHash,
+          humanApprovedAt: approvedAt,
+          approvedByUserId: user._id,
+          reviewChecklist: args.reviewChecklist,
+          evaluatedAt: approvedAt,
+        },
+      } : {}),
+    });
     await ctx.db.insert("contentReviewEvents", {
       pieceId: p._id,
       actorUserId: user._id,
@@ -1152,17 +1353,63 @@ export const approve = mutation({
       outputHash,
       snapshot: {
         channel: p.channel,
-        caption: p.caption,
-        hashtags: p.hashtags,
+        caption: collectionManualReport?.caption ?? p.caption,
+        hashtags: collectionManualReport?.hashtags ?? p.hashtags,
         script: p.script ?? null,
         mediaUrls: p.mediaUrls,
-        qualityScore: p.qualityScore,
+        qualityScore: collectionManualReport?.score ?? p.qualityScore,
       },
+      ...(p.collectionId ? { reviewChecklist: args.reviewChecklist } : {}),
       createdAt: approvedAt,
     });
     await audit(ctx, { actorUserId: user._id, action: "content.approve", metadata: { pieceId: p._id, outputHash } });
   },
 });
+
+async function reopenSupplyCollectionAfterPieceChange(
+  ctx: MutationCtx,
+  actor: Doc<"users">,
+  piece: Doc<"contentPieces">,
+  reason: "edit" | "reject",
+) {
+  if (!piece.collectionId) return;
+  const collection = await ctx.db.get(piece.collectionId);
+  if (
+    !isActiveSuperAdmin(actor)
+    || !collection
+  ) fail("FORBIDDEN", "운영 컬렉션 소유자만 콘텐츠를 변경할 수 있습니다.");
+  if (!collection.pieceIds.includes(piece._id))
+    fail("CONFLICT", "컬렉션에서 제거된 콘텐츠는 원본 컬렉션을 변경할 수 없습니다.");
+  if (collection.status === "DRAFT") return;
+  const now = Date.now();
+  for (const pieceId of collection.pieceIds) {
+    const sibling = await ctx.db.get(pieceId);
+    if (sibling?.collectionId === collection._id) {
+      await ctx.db.patch(sibling._id, {
+        visibility: "PRIVATE",
+        ...(sibling.visibility === "SHARED" ? { libraryWithdrawnAt: now } : {}),
+      });
+    }
+  }
+  await ctx.db.patch(collection._id, {
+    status: "DRAFT",
+    revision: collection.revision + 1,
+    reviewedBy: undefined,
+    reviewedByIds: undefined,
+    reviewedAt: undefined,
+    submittedAt: undefined,
+    publishedBy: undefined,
+    publishedAt: undefined,
+    withdrawnBy: collection.status === "PUBLISHED" ? actor._id : collection.withdrawnBy,
+    withdrawnAt: collection.status === "PUBLISHED" ? now : collection.withdrawnAt,
+    updatedAt: now,
+  });
+  await audit(ctx, {
+    actorUserId: actor._id,
+    action: "adminContent.collectionReopen",
+    metadata: { collectionId: collection._id, from: collection.status, revision: collection.revision + 1, reason: `piece.${reason}` },
+  });
+}
 
 export const edit = mutation({
   args: {
@@ -1175,12 +1422,14 @@ export const edit = mutation({
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     const p = await ctx.db.get(args.pieceId);
-    if (!p || (p.ownerUserId !== user._id && roleOf(user) !== "SUPER_ADMIN"))
+    if (!p || (p.ownerUserId !== user._id && !isActiveSuperAdmin(user)))
       fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+    await reopenSupplyCollectionAfterPieceChange(ctx, user, p, "edit");
     if (!contentPieceEvidenceRunId(p) && p.generatedBy !== "manual")
       fail("CONFLICT", "이전 품질 계약으로 생성된 콘텐츠는 편집해 게시할 수 없습니다. 새 제작 워크플로로 다시 생성하세요.");
     const mediaUrls = args.mediaUrls ?? p.mediaUrls;
-    if (mediaUrls.length > 10) fail("INVALID_ARGUMENT", "미디어는 최대 10개까지 추가할 수 있습니다.");
+    const maxMedia = contentMediaMax(p.channel as Channel);
+    if (mediaUrls.length > maxMedia) fail("INVALID_ARGUMENT", `이 채널에는 미디어를 최대 ${maxMedia}개까지 추가할 수 있습니다.`);
     if (mediaUrls.some((url) => !/^https:\/\//i.test(url))) fail("INVALID_ARGUMENT", "미디어 URL은 HTTPS 주소만 사용할 수 있습니다.");
     const production = await productionContextForPiece(ctx, p);
     const report = evaluatePiece(
@@ -1213,8 +1462,16 @@ export const edit = mutation({
           provider: production.provider,
           attemptNo: (p.productionMeta as { attemptNo?: number } | undefined)?.attemptNo ?? 1,
         }))
-      : undefined;
-    const nextStatus = production ? "DRAFT" as const : standardPassed ? "APPROVED" as const : "DRAFT" as const;
+      : p.collectionId && p.generatedBy === "manual"
+        ? await manualContentOutputHash({
+            channel: p.channel,
+            caption: report.caption,
+            hashtags: report.hashtags,
+            script: args.script,
+            mediaUrls,
+          })
+        : undefined;
+    const nextStatus = production || p.collectionId ? "DRAFT" as const : standardPassed ? "APPROVED" as const : "DRAFT" as const;
     await ctx.db.patch(p._id, {
       visibility: "PRIVATE",
       caption: report.caption,
@@ -1225,10 +1482,10 @@ export const edit = mutation({
       qualityReport: { violations: report.violations, fixed: report.fixed },
       status: nextStatus,
       generatedBy: production ? p.generatedBy : "manual",
-      ...(production ? {
+      ...(production || p.collectionId ? {
         productionMeta: {
           ...(p.productionMeta as Record<string, unknown> | undefined),
-          provider: production.provider,
+          provider: production?.provider ?? "manual",
           standardPassed,
           outputHash,
           evaluatedAt: Date.now(),
@@ -1236,8 +1493,10 @@ export const edit = mutation({
           editedByUserId: user._id,
           humanApprovedAt: null,
           approvedByUserId: null,
+          reviewChecklist: null,
         },
       } : {}),
+      ...(p.visibility === "SHARED" ? { libraryWithdrawnAt: Date.now() } : {}),
     });
     await audit(ctx, {
       actorUserId: user._id,
@@ -1259,8 +1518,9 @@ export const reject = mutation({
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     const p = await ctx.db.get(args.pieceId);
-    if (!p || (p.ownerUserId !== user._id && roleOf(user) !== "SUPER_ADMIN"))
+    if (!p || (p.ownerUserId !== user._id && !isActiveSuperAdmin(user)))
       fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
+    await reopenSupplyCollectionAfterPieceChange(ctx, user, p, "reject");
     if (p.status === "RETIRED") fail("CONFLICT", "이미 폐기된 콘텐츠입니다.");
     const reason = args.reason.trim();
     if (!reason) fail("INVALID_ARGUMENT", "폐기 사유를 입력하세요.");
@@ -1315,19 +1575,10 @@ export const setVisibility = mutation({
     const actor = await requireSuperAdmin(ctx);
     const p = await ctx.db.get(args.pieceId);
     if (!p) fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
-    if (args.visibility === "SHARED" && p.status !== "APPROVED")
-      fail("CONFLICT", "승인된 콘텐츠만 공유할 수 있습니다.");
-    const evidenceRunId = contentPieceEvidenceRunId(p);
-    if (args.visibility === "SHARED" && !evidenceRunId && p.generatedBy !== "manual")
-      fail("CONFLICT", "이전 품질 계약으로 생성된 자동 콘텐츠는 공유할 수 없습니다. 새 제작 워크플로로 다시 생성하세요.");
-    if (args.visibility === "SHARED" && evidenceRunId) {
-      const run = await ctx.db.get(evidenceRunId);
-      const standardPassed = (p.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
-      if (!standardPassed || run?.status !== "COMPLETED")
-        fail("CONFLICT", "전체 실행의 검수·승인이 완료된 콘텐츠만 공유할 수 있습니다.");
-      const review = await workflowReviewEvidence(ctx, p);
-      if (!review.ok) fail("CONFLICT", `${review.reason} 콘텐츠를 다시 검토·승인하세요.`);
-    }
+    if (p.collectionId)
+      fail("CONFLICT", "운영 컬렉션 콘텐츠는 컬렉션 공개·철회 기능으로 관리하세요.");
+    if (args.visibility === "SHARED")
+      fail("CONFLICT", "전체 사용자 공급은 콘텐츠 공급실에서 자료·권리 검수 후 컬렉션 단위로 공개하세요.");
     await ctx.db.patch(p._id, { visibility: args.visibility });
     await audit(ctx, {
       actorUserId: actor._id,

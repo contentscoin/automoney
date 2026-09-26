@@ -19,4 +19,7 @@ crons.interval("analytics readback tick", { hours: 1 }, internal.analytics.tick,
 // Meta 장기 토큰 갱신(만료 7일 전)
 crons.daily("meta token refresh", { hourUTC: 19, minuteUTC: 30 }, internal.meta.scheduleRefreshes, {});
 
+// 등록되지 않은 KYC·콘텐츠 파일을 bounded batch로 정리한다.
+crons.interval("sweep expired uploads", { hours: 1 }, internal.adminContent.sweepExpiredUploads, {});
+
 export default crons;
