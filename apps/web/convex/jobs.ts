@@ -5,7 +5,7 @@ import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } fr
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
-import { consumePiece, hashPiecePublishSnapshot } from "./lib/pieces";
+import { consumePiece, hashPiecePublishSnapshot, mediaManifestsMatch } from "./lib/pieces";
 import { livePublishEnabled } from "./lib/publishPolicy";
 import { marketingRedirectUrl } from "./lib/publicUrl";
 import { publishReceiptUrl } from "./lib/publishReceipt";
@@ -14,6 +14,7 @@ import { internal } from "./_generated/api";
 import { sha256Hex } from "./lib/crypto";
 import { metaLivePublishAvailable } from "./lib/meta";
 import { DEMO_LINK_PUBLISH_MESSAGE, isDemoMarketingLink } from "./lib/marketingLinkPolicy";
+import { resolveMediaIntegrity } from "./lib/mediaIntegrity";
 
 const MAX_EXECUTION_ATTEMPTS = 3;
 const MAX_QUEUE_AGE_MS = 24 * 60 * 60_000;
@@ -103,6 +104,24 @@ export async function enqueueJob(ctx: MutationCtx, input: EnqueueInput): Promise
     if (err) fail("INVALID_ARGUMENT", `발행 내용 오류: ${err}`);
     const executorError = validateExecutorPublishContract(publishSpace, publishPayload);
     if (executorError) fail("INVALID_ARGUMENT", executorError);
+    if (!dryRun && publishPayload.mediaUrls.length > 0) {
+      if (!publishPayload.pieceId) fail("CONFLICT", "미디어를 실제 게시하려면 콘텐츠에 저장하고 원본 고정·사용권 검수를 완료하세요. 직접 입력은 테스트 실행만 가능합니다.");
+      const piece = await consumePiece(ctx, input.userId, publishPayload.pieceId as Id<"contentPieces">);
+      if (piece.text !== publishPayload.text || canonicalJson(piece.mediaUrls) !== canonicalJson(publishPayload.mediaUrls)
+        || piece.outputHash !== publishPayload.pieceOutputHash)
+        fail("CONFLICT", "게시 미디어와 본문이 승인된 콘텐츠와 일치하지 않습니다.");
+      const snapshotHash = await hashPiecePublishSnapshot({
+        pieceId: publishPayload.pieceId as Id<"contentPieces">, outputHash: piece.outputHash,
+        text: piece.text, mediaUrls: piece.mediaUrls,
+        linkId: publishPayload.linkId as Id<"marketingLinks"> | undefined, linkUrl: publishPayload.linkUrl ?? null,
+      });
+      if (publishPayload.pieceSnapshotHash !== snapshotHash) fail("CONFLICT", "승인된 콘텐츠 게시 snapshot이 필요합니다.");
+      const integrity = await resolveMediaIntegrity(ctx, publishPayload.mediaUrls);
+      if (!integrity.ok) fail("CONFLICT", integrity.reason);
+      if (publishPayload.mediaIntegrity !== undefined && !mediaManifestsMatch(publishPayload.mediaIntegrity, integrity.manifest))
+        fail("CONFLICT", "미디어 파일 명세가 승인된 원본과 다릅니다. 게시 작업을 다시 등록하세요.");
+      publishPayload.mediaIntegrity = integrity.manifest;
+    }
   }
   const requestKey = input.requestKey ?? input.idempotencyKey;
   const payloadHash = await hashJobPayload(input.jobType, payload);
@@ -188,7 +207,7 @@ export async function enqueuePublishFor(ctx: MutationCtx, user: Doc<"users">, ar
   let contentChannel: PublishPayload["contentChannel"] = args.contentChannel;
   let workflowPiece: Awaited<ReturnType<typeof consumePiece>> | null = null;
   if (args.pieceId) {
-    const piece = await consumePiece(ctx, user._id, args.pieceId);
+    const piece = await consumePiece(ctx, user._id, args.pieceId, { allowUnfrozenMedia: args.dryRun === true });
     if (args.contentChannel && args.contentChannel !== piece.channel) fail("CONFLICT", "명시한 게시 형식과 콘텐츠 채널이 일치하지 않습니다.");
     if (CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) fail("INVALID_ARGUMENT", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
     contentProductId = piece.productId;
@@ -329,6 +348,19 @@ export async function approveJobFor(
         const identity = await publicationIdentity(ctx, space);
         if (!payload.targetPublicationKey || !identity || payload.targetPublicationKey !== identity.publicationKey)
           fail("CONFLICT", "게시 대상 계정이 등록 이후 변경되었습니다. 새 게시 작업을 등록하세요.");
+        if (payload.mediaUrls.length > 0) {
+          if (!payload.pieceId) fail("CONFLICT", "원본 고정·사용권 검수를 완료한 콘텐츠로 게시 작업을 다시 등록하세요.");
+          const piece = await consumePiece(ctx, user._id, payload.pieceId as Id<"contentPieces">);
+          const integrity = await resolveMediaIntegrity(ctx, piece.mediaUrls);
+          if (!integrity.ok) fail("CONFLICT", integrity.reason);
+          if (payload.text !== piece.text || canonicalJson(payload.mediaUrls) !== canonicalJson(piece.mediaUrls)
+            || payload.pieceOutputHash !== piece.outputHash || !mediaManifestsMatch(payload.mediaIntegrity, integrity.manifest))
+            fail("CONFLICT", "콘텐츠 또는 미디어 명세가 변경되었습니다. 게시 작업을 다시 등록하세요.");
+          const snapshotHash = await hashPiecePublishSnapshot({ pieceId: payload.pieceId as Id<"contentPieces">,
+            outputHash: piece.outputHash, text: piece.text, mediaUrls: piece.mediaUrls,
+            linkId: payload.linkId as Id<"marketingLinks"> | undefined, linkUrl: payload.linkUrl ?? null });
+          if (payload.pieceSnapshotHash !== snapshotHash) fail("CONFLICT", "콘텐츠 게시 snapshot이 변경되었습니다. 게시 작업을 다시 등록하세요.");
+        }
       }
     }
     const payloadHash = await hashJobPayload(j.jobType, j.payload as Record<string, unknown>);

@@ -21,5 +21,6 @@ crons.daily("meta token refresh", { hourUTC: 19, minuteUTC: 30 }, internal.meta.
 
 // 등록되지 않은 KYC·콘텐츠 파일을 bounded batch로 정리한다.
 crons.interval("sweep expired uploads", { hours: 1 }, internal.adminContent.sweepExpiredUploads, {});
+crons.interval("sweep expired media captures", { minutes: 15 }, internal.media.sweep, {});
 
 export default crons;

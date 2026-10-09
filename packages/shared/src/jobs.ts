@@ -53,6 +53,10 @@ export const AGENT_ERROR_CODES = [
   "PUBLISH_RECEIPT_MISSING",
   "LOCAL_DRY_RUN_OVERRIDE",
   "APP_UPDATE_REQUIRED",
+  "MEDIA_INTEGRITY_REQUIRED",
+  "MEDIA_INTEGRITY_INVALID",
+  "MEDIA_INTEGRITY_MISMATCH",
+  "MEDIA_DOWNLOAD_TIMEOUT",
   "JOB_CANCELLED",
   "INTERNAL",
 ] as const;
@@ -84,6 +88,41 @@ export function errorResult(jobType: JobType, errorCode: AgentErrorCode, summary
   return { schema: "automoney.job-result/v1", jobType, kind: "error", summary, data, warnings: [], nextAction, errorCode };
 }
 
+/** Server-owned description of the exact reviewed bytes at an immutable delivery URL. */
+export interface MediaIntegrity {
+  url: string;
+  sha256: string;
+  sizeBytes: number;
+  mimeType: string;
+}
+
+export const MAX_PUBLISH_MEDIA_BYTES = 20 * 1024 * 1024;
+export const PUBLISH_MEDIA_MIME_TYPES = [
+  "image/jpeg", "image/png", "image/webp", "image/gif",
+  "video/mp4", "video/quicktime", "video/webm",
+] as const;
+
+/** Validate an optional legacy-compatible manifest; execution gates require it for live media. */
+export function validateMediaIntegrity(urls: string[], integrity: unknown): string | null {
+  if (integrity === undefined) return null;
+  if (!Array.isArray(integrity) || integrity.length !== urls.length)
+    return "media integrity must match media URL count and order";
+  for (const [index, item] of integrity.entries()) {
+    if (!item || typeof item !== "object" || item.url !== urls[index])
+      return "media integrity must match media URL count and order";
+    if (typeof item.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(item.sha256))
+      return "media integrity requires a SHA-256 hash";
+    if (!Number.isSafeInteger(item.sizeBytes) || item.sizeBytes <= 0 || item.sizeBytes > MAX_PUBLISH_MEDIA_BYTES)
+      return "media integrity size must be between 1 byte and 20MB";
+    if (!(PUBLISH_MEDIA_MIME_TYPES as readonly unknown[]).includes(item.mimeType))
+      return "media integrity requires a supported MIME type";
+    const kind = guessMediaKind(item.url);
+    if (kind !== "unknown" && !item.mimeType.startsWith(`${kind}/`))
+      return "media integrity MIME type does not match the media URL";
+  }
+  return null;
+}
+
 /** 발행 잡 페이로드 */
 export interface PublishPayload {
   spaceId: string;
@@ -98,6 +137,8 @@ export interface PublishPayload {
   contentChannel?: Channel;
   text: string;
   mediaUrls: string[];
+  /** Exact, ordered media bytes authorized by the server; required for live media execution. */
+  mediaIntegrity?: MediaIntegrity[];
   linkUrl?: string | null;
   /** 서버가 실행 직전 링크 상태·상품 연결을 재검증하기 위한 내부 참조 */
   linkId?: string;
@@ -198,6 +239,8 @@ export function validateContentMedia(channel: Channel, mediaUrls: string[]): str
 export function validatePublishPayload(p: PublishPayload): string | null {
   const lim = PLATFORM_LIMITS[p.platform];
   if (!lim) return "unsupported platform";
+  const integrityError = validateMediaIntegrity(p.mediaUrls, p.mediaIntegrity);
+  if (integrityError) return integrityError;
   const text = (p.text ?? "").trim();
   if (!text && p.mediaUrls.length === 0) return "text or media required";
   if (p.linkUrl) {

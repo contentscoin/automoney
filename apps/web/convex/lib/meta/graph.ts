@@ -88,7 +88,7 @@ export function createGraphAdapter(cfg: { appId: string; appSecret: string }): M
       const text = input.linkUrl && !input.text.includes(input.linkUrl) ? `${input.text}\n${input.linkUrl}` : input.text;
       if (input.platform === "THREADS") {
         const media = input.mediaUrls[0];
-        const kind = media ? (/\.(mp4|mov)(\?|$)/i.test(media) ? "VIDEO" : "IMAGE") : "TEXT";
+        const kind = media ? (/\.(mp4|mov|m4v|webm)(\?|$)/i.test(media) ? "VIDEO" : "IMAGE") : "TEXT";
         const params: Record<string, string> = { media_type: kind, text, access_token: accessToken };
         if (kind === "IMAGE") params.image_url = media!;
         if (kind === "VIDEO") params.video_url = media!;

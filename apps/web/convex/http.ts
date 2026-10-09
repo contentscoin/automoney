@@ -84,6 +84,19 @@ export const contentAsset = httpAction(async (ctx, request) => {
   return new Response(blob, { status: 200, headers: { ...headers, "content-length": String(blob.size) } });
 });
 
+export const mediaAsset = httpAction(async (ctx, request) => {
+  const parts = new URL(request.url).pathname.split("/");
+  if (parts.length !== 4 || parts[1] !== "media-assets" || !parts[2] || !parts[3]) return new Response("Not found", { status: 404 });
+  const asset = await ctx.runQuery(internal.media.publicAsset, { assetId: parts[2], fileName: parts[3] });
+  if (!asset) return new Response("Not found", { status: 404 });
+  const headers = { "content-type": asset.mimeType, "cache-control": "public, max-age=31536000, immutable", "x-content-type-options": "nosniff", etag: `"${asset.contentHash}"` };
+  if (request.headers.get("if-none-match") === headers.etag) return new Response(null, { status: 304, headers });
+  const blob = await ctx.storage.get(asset.storageId);
+  if (!blob) return new Response("Not found", { status: 404 });
+  return new Response(blob, { headers: { ...headers, "content-length": String(blob.size) } });
+});
+
+http.route({ pathPrefix: "/media-assets/", method: "GET", handler: mediaAsset });
 http.route({ path: "/partner/attrangs/webhook", method: "POST", handler: attrangsWebhook });
 http.route({ pathPrefix: "/content-assets/", method: "GET", handler: contentAsset });
 

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
+import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import {
   buildGenerationPrompt,
@@ -9,15 +10,19 @@ import {
   DEFAULT_CONTENT_STANDARD,
   evaluatePiece,
   isAutoApprovable,
+  MAX_PUBLISH_MEDIA_BYTES,
   okResult,
   parseGeneratedPieces,
   passesContentStandard,
+  PUBLISH_MEDIA_MIME_TYPES,
   templateGenerate,
+  validateMediaIntegrity,
   type Channel,
   type ContentGeneratePayload,
   type ContentRepairFailure,
   type GeneratedPiece,
   type GenerationInput,
+  type MediaIntegrity,
   type PublishPayload,
   type QualityReport,
   type ReadbackPayload,
@@ -105,34 +110,84 @@ async function assertPublicMediaUrl(raw: string): Promise<URL> {
   return url;
 }
 
-export async function downloadMedia(urls: string[], fetchImpl: typeof fetch = fetch): Promise<string[]> {
+export async function downloadMedia(urls: string[], fetchImpl: typeof fetch = fetch, expected?: MediaIntegrity[]): Promise<string[]> {
+  const integrityError = validateMediaIntegrity(urls, expected);
+  if (integrityError) throw new JobError("MEDIA_INTEGRITY_INVALID", integrityError);
+  if (urls.length === 0) return [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "automoney-media-"));
   const out: string[] = [];
-  for (const [i, raw] of urls.entries()) {
-    let url = await assertPublicMediaUrl(raw);
-    let res: Response | null = null;
-    for (let redirects = 0; redirects <= 3; redirects++) {
+  try {
+    for (const [i, raw] of urls.entries()) {
+      const snapshot = expected?.[i];
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 20_000);
-      try { res = await fetchImpl(url, { redirect: "manual", signal: controller.signal }); } finally { clearTimeout(timer); }
-      if (![301, 302, 303, 307, 308].includes(res.status)) break;
-      const location = res.headers.get("location");
-      if (!location || redirects === 3) throw new JobError("MEDIA_REDIRECT", "media redirect limit exceeded");
-      url = await assertPublicMediaUrl(new URL(location, url).toString());
+      let timer: ReturnType<typeof setTimeout>;
+      // The deadline includes redirects and body streaming, not just response headers.
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new JobError("MEDIA_DOWNLOAD_TIMEOUT", "첨부파일 다운로드 시간이 초과되었습니다. 잠시 후 다시 실행하세요."));
+          controller.abort();
+        }, 20_000);
+      });
+      let res: Response | null = null;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      try {
+        let url = await Promise.race([assertPublicMediaUrl(raw), deadline]);
+        for (let redirects = 0; redirects <= 3; redirects++) {
+          res = await Promise.race([fetchImpl(url, { redirect: "manual", signal: controller.signal }), deadline]);
+          if (![301, 302, 303, 307, 308].includes(res.status)) break;
+          void res.body?.cancel().catch(() => {});
+          const location = res.headers.get("location");
+          if (!location || redirects === 3) throw new JobError("MEDIA_REDIRECT", "media redirect limit exceeded");
+          url = await Promise.race([assertPublicMediaUrl(new URL(location, url).toString()), deadline]);
+        }
+        if (!res?.ok) throw new JobError("MEDIA_DOWNLOAD_FAILED", `media download failed (${res?.status ?? 0})`);
+        const mime = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+        if (!(PUBLISH_MEDIA_MIME_TYPES as readonly string[]).includes(mime)) throw new JobError("MEDIA_TYPE_UNSUPPORTED", `unsupported media type: ${mime || "unknown"}`);
+        if (snapshot && snapshot.mimeType !== mime) throw new JobError("MEDIA_INTEGRITY_MISMATCH", "첨부파일 형식이 승인된 자료와 다릅니다. 콘텐츠를 다시 검토하세요.");
+        const declaredHeader = res.headers.get("content-length");
+        const declared = declaredHeader === null ? null : Number(declaredHeader);
+        if (declared !== null && (!Number.isSafeInteger(declared) || declared < 0)) throw new JobError("MEDIA_DOWNLOAD_FAILED", "invalid media content length");
+        if (declared !== null && declared > MAX_PUBLISH_MEDIA_BYTES) throw new JobError("MEDIA_TOO_LARGE", "media exceeds 20MB");
+        if (snapshot && declared !== null && declared !== snapshot.sizeBytes) throw new JobError("MEDIA_INTEGRITY_MISMATCH", "첨부파일 크기가 승인된 자료와 다릅니다. 콘텐츠를 다시 검토하세요.");
+        if (!res.body) throw new JobError("MEDIA_DOWNLOAD_FAILED", "media response body is missing");
+        reader = res.body.getReader();
+        // Bound both bytes and per-chunk allocation overhead for hostile tiny chunks.
+        const collected = Buffer.allocUnsafe(snapshot?.sizeBytes ?? MAX_PUBLISH_MEDIA_BYTES);
+        const hash = createHash("sha256");
+        let size = 0;
+        while (true) {
+          const { done, value } = await Promise.race([reader.read(), deadline]);
+          if (done) break;
+          size += value.byteLength;
+          if (size > MAX_PUBLISH_MEDIA_BYTES) throw new JobError("MEDIA_TOO_LARGE", "media exceeds 20MB");
+          if (snapshot && size > snapshot.sizeBytes) throw new JobError("MEDIA_INTEGRITY_MISMATCH", "첨부파일 크기가 승인된 자료와 다릅니다. 콘텐츠를 다시 검토하세요.");
+          hash.update(value);
+          collected.set(value, size - value.byteLength);
+        }
+        if (snapshot && (size !== snapshot.sizeBytes || hash.digest("hex") !== snapshot.sha256.toLowerCase()))
+          throw new JobError("MEDIA_INTEGRITY_MISMATCH", "첨부파일 내용이 승인된 자료와 다릅니다. 콘텐츠를 다시 검토하세요.");
+        if (size === 0) throw new JobError("MEDIA_DOWNLOAD_FAILED", "media response body is empty");
+        const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : mime === "video/mp4" ? "mp4" : mime === "video/quicktime" ? "mov" : mime === "video/webm" ? "webm" : "jpg";
+        const p = path.join(dir, `media-${i}.${ext}`);
+        fs.writeFileSync(p, collected.subarray(0, size));
+        out.push(p);
+      } finally {
+        clearTimeout(timer!);
+        controller.abort();
+        if (reader) {
+          void reader.cancel().catch(() => {});
+          reader.releaseLock();
+        } else {
+          void res?.body?.cancel().catch(() => {});
+        }
+      }
     }
-    if (!res?.ok) throw new JobError("MEDIA_DOWNLOAD_FAILED", `media download failed (${res?.status ?? 0})`);
-    const mime = (res.headers.get("content-type") ?? "").split(";")[0]!.toLowerCase();
-    if (!/^(image\/(jpeg|png|webp|gif)|video\/(mp4|quicktime|webm))$/.test(mime)) throw new JobError("MEDIA_TYPE_UNSUPPORTED", `unsupported media type: ${mime || "unknown"}`);
-    const declared = Number(res.headers.get("content-length") ?? 0);
-    if (declared > 20 * 1024 * 1024) throw new JobError("MEDIA_TOO_LARGE", "media exceeds 20MB");
-    const bytes = Buffer.from(await res.arrayBuffer());
-    if (bytes.length > 20 * 1024 * 1024) throw new JobError("MEDIA_TOO_LARGE", "media exceeds 20MB");
-    const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : mime === "image/gif" ? "gif" : mime === "video/mp4" ? "mp4" : mime === "video/quicktime" ? "mov" : mime === "video/webm" ? "webm" : "jpg";
-    const p = path.join(dir, `media-${i}.${ext}`);
-    fs.writeFileSync(p, bytes);
-    out.push(p);
+    return out;
+  } catch (error) {
+    // Only this freshly-created, privately owned directory is removed.
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
   }
-  return out;
 }
 
 export async function handleSpaceCreate(ctx: JobContext): Promise<JobOutcome> {
@@ -193,13 +248,19 @@ export async function handleSpaceVerify(ctx: JobContext): Promise<JobOutcome> {
 export async function handlePublish(ctx: JobContext): Promise<JobOutcome> {
   const p = ctx.job.payload as unknown as PublishPayload;
   const dryRun = resolvePublishDryRun(p.dryRun);
+  const integrityError = validateMediaIntegrity(p.mediaUrls, p.mediaIntegrity);
+  if (integrityError) throw new JobError("MEDIA_INTEGRITY_INVALID", integrityError);
+  if (!dryRun && p.mediaUrls.length > 0 && !p.mediaIntegrity)
+    throw new JobError("MEDIA_INTEGRITY_REQUIRED", "첨부파일의 승인된 원본 정보가 없습니다. 앱을 업데이트하고 콘텐츠를 다시 검토해 새 게시 작업을 등록하세요.");
   const recipe = getRecipe(p.platform);
   if (!recipe) throw new JobError("RECIPE_UNSUPPORTED", `${p.platform} 은 아직 브라우저 레시피가 없습니다.`);
   const text = p.linkUrl ? `${p.text.trim()}\n${p.linkUrl}` : p.text.trim();
   await ctx.checkpoint("preparing", 5);
-  const mediaPaths = p.mediaUrls.length ? await downloadMedia(p.mediaUrls) : [];
-  const space = await openSpace(ctx.cfg, p.spaceId, { visible: false, purpose: "publish", waitLockMs: 30_000 });
+  const mediaPaths = p.mediaUrls.length ? await downloadMedia(p.mediaUrls, fetch, p.mediaIntegrity) : [];
+  let openedSpace: Awaited<ReturnType<typeof openSpace>> | undefined;
   try {
+    const space = await openSpace(ctx.cfg, p.spaceId, { visible: false, purpose: "publish", waitLockMs: 30_000 });
+    openedSpace = space;
     const session = await recipe.checkSession(space.page);
     if (session.state === "RESTRICTED") throw new JobError("SPACE_ACCOUNT_RESTRICTED", "계정 제한 안내가 감지되었습니다.", { sessionState: "RESTRICTED" });
     if (session.state !== "HEALTHY") throw new JobError("SPACE_SESSION_EXPIRED", "세션이 만료되었습니다. 스페이스에서 다시 로그인하세요.", { sessionState: "EXPIRED" });
@@ -300,8 +361,12 @@ export async function handlePublish(ctx: JobContext): Promise<JobOutcome> {
       spaceUpdate: { sessionState: "HEALTHY", ...(session.handle ? { handle: session.handle } : {}) },
     };
   } finally {
-    await space.close();
-    for (const m of mediaPaths) fs.rmSync(m, { force: true });
+    try {
+      await openedSpace?.close();
+    } finally {
+      for (const m of mediaPaths) fs.rmSync(m, { force: true });
+      if (mediaPaths[0]) fs.rmdirSync(path.dirname(mediaPaths[0]));
+    }
   }
 }
 

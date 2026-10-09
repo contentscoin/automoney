@@ -2,7 +2,7 @@ import { DEVICE_ONLINE_MS } from "@automoney/shared";
 import { v } from "convex/values";
 import { query } from "./_generated/server";
 import { MIN_ADMIN_MATERIAL_DESKTOP_VERSION, MIN_CONTENT_DESKTOP_VERSION, versionAtLeast } from "./content";
-import { MIN_PUBLISH_DESKTOP_VERSION } from "./agent";
+import { MIN_MEDIA_PUBLISH_DESKTOP_VERSION, MIN_PUBLISH_DESKTOP_VERSION } from "./agent";
 import { isDemoMarketingLink, partnerLinkMode } from "./lib/marketingLinkPolicy";
 import { metaLivePublishAvailable } from "./lib/meta";
 import { publicSiteOrigin } from "./lib/publicUrl";
@@ -19,6 +19,7 @@ function publicFlags() {
     publicSiteConfigured: publicSiteOrigin() !== null,
     metaConfigured: metaLivePublishAvailable(),
     minimumDesktopVersion: MIN_ADMIN_MATERIAL_DESKTOP_VERSION,
+    minimumMediaPublishDesktopVersion: MIN_MEDIA_PUBLISH_DESKTOP_VERSION,
   };
 }
 
@@ -59,6 +60,8 @@ export const getMine = query({
     else if (!device.codexLoggedIn) issues.push(issue("CODEX_LOGIN_REQUIRED", "PC의 Codex 로그인을 완료하세요.", "/dashboard/connections#ai", "ai"));
     const readySpaces = await Promise.all(spaces.map(async (space) => {
       const problems: ReadinessIssue[] = [];
+      const mediaPc = devices.find((candidate) => candidate._id === space.deviceId);
+      const mediaVersionCompatible = space.authMode === "META_API" || (!!mediaPc && versionAtLeast(mediaPc.appVersion, MIN_MEDIA_PUBLISH_DESKTOP_VERSION));
       if ((user.status ?? "ACTIVE") !== "ACTIVE") problems.push(issue("ACCOUNT_PENDING", "계정 승인을 기다리고 있습니다."));
       if (space.sessionState !== "HEALTHY") problems.push(issue(`SPACE_${space.sessionState}`, "게시 계정 로그인과 상태 확인을 완료하세요.", "/dashboard/connections#sns"));
       if (space.lockJobId) problems.push(issue("SPACE_BUSY", "이 계정에서 실행 중인 작업이 끝나면 다시 확인하세요.", "/dashboard/jobs"));
@@ -75,7 +78,9 @@ export const getMine = query({
       }
       const readyForTest = problems.every((problem) => problem.scope === "live");
       if (!flags.livePublishEnabled) problems.push(issue("LIVE_PUBLISH_DISABLED", "현재 테스트 실행만 사용할 수 있습니다.", "/dashboard/publish?dryRun=1", "live"));
-      return { id: space._id, name: space.name, platform: space.platform, authMode: space.authMode ?? "BROWSER", readyForTest, readyForLive: readyForTest && problems.length === 0, issues: problems };
+      const readyForLive = readyForTest && problems.length === 0;
+      return { id: space._id, name: space.name, platform: space.platform, authMode: space.authMode ?? "BROWSER", readyForTest, readyForLive,
+        mediaVersionCompatible, readyForMediaLive: readyForLive && mediaVersionCompatible, issues: problems };
     }));
     const activeLinks = links.filter((link) => link.status === "ACTIVE");
     return {

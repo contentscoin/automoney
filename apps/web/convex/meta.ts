@@ -355,6 +355,17 @@ export const completeCloudJob = internalMutation({
   },
 });
 
+/** Authorize provider media reads before any remote container is created. */
+export const validateCloudPreparation = internalMutation({
+  args: { jobId: v.id("agentJobs") },
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    if (!job || job.executor !== "CLOUD") return { ok: false as const, reason: "JOB_NOT_ACTIVE" };
+    if ((job.leaseUntil ?? 0) < Date.now()) return { ok: false as const, reason: "LEASE_EXPIRED" };
+    return await validatePublishAttemptPolicy(ctx, job, Date.now(), { preparation: true });
+  },
+});
+
 export const runCloudJob = internalAction({
   args: { jobId: v.id("agentJobs") },
   handler: async (ctx, args) => {
@@ -373,6 +384,14 @@ export const runCloudJob = internalAction({
       const preflight = await ctx.runMutation(internal.agent.preflightJob, { jobId: job._id });
       if (!preflight.ok) {
         await finish({ status: "FAILED", errorCode: preflight.reason, errorMessage: preflight.message, result: errorResult(job.jobType, preflight.reason as never, preflight.message) });
+        return;
+      }
+    }
+    if (job.jobType === "post.publish" && (job.payload as PublishPayload).dryRun !== true) {
+      const preparation = await ctx.runMutation(internal.meta.validateCloudPreparation, { jobId: job._id });
+      if (!preparation.ok) {
+        const message = "게시 준비 단계에서 계정·콘텐츠·미디어 검수가 유효하지 않습니다. 다시 검토한 뒤 새 작업을 등록하세요.";
+        await finish({ status: "FAILED", errorCode: preparation.reason, errorMessage: message, result: errorResult(job.jobType, preparation.reason as never, message) });
         return;
       }
     }

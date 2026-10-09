@@ -7,7 +7,7 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { pieceText } from "@/components/PieceCard";
-import { inspectPublishMedia } from "@/components/publish-media";
+import { inspectPublishMedia, mediaLivePublishIssue } from "@/components/publish-media";
 import { publishRequestAttempt, type PublishRequestAttempt } from "@/components/publish-request";
 import { CHANNEL_LABEL } from "@/lib/content-format";
 import { PLATFORM_LABEL } from "@/lib/agent-format";
@@ -56,6 +56,9 @@ function PublishPageInner() {
   if (pieceId && selectedPiece === undefined) issues.push("선택한 콘텐츠의 검토·공개 상태를 확인하고 있습니다.");
   if (pieceId && selectedPiece === null) issues.push("선택한 콘텐츠를 사용할 수 없습니다. 공개·승인 상태와 상품 정보를 확인하거나 다른 콘텐츠를 선택하세요.");
   const readinessSpace = readiness?.spaces.find((space) => space.id === spaceId);
+  const mediaLiveIssue = mediaLivePublishIssue({ mediaCount: mediaUrls.length, hasPiece: !!piece, mediaReady: piece?.mediaIntegrity?.ready, mediaApprovalReady: piece?.mediaApprovalReady, dryRun,
+    browserSpace: !!selectedSpace && selectedSpace.authMode !== "META_API", mediaVersionCompatible: readinessSpace?.mediaVersionCompatible, minimumMediaVersion: readiness?.minimumMediaPublishDesktopVersion });
+  if (mediaLiveIssue) issues.push(mediaLiveIssue);
   const readinessIssues = [
     ...(readiness?.issues.filter((issue) => issue.scope === "all" || (!dryRun && issue.scope === "live" && (issue.code !== "PUBLIC_SITE_URL_INVALID" || !!effectiveLinkId))) ?? []),
     ...(readinessSpace?.issues.filter((issue) => issue.scope === "all" || (!dryRun && issue.scope === "live")) ?? []),
@@ -168,7 +171,8 @@ function PublishPageInner() {
           <label className="label" htmlFor="publish-media">HTTPS 이미지·영상 URL</label>
           <input id="publish-media" className="input" value={media} readOnly={!!pieceId} inputMode="url" aria-invalid={mediaInputInvalid} aria-describedby={`publish-content-help publish-media-help${requiresVideo ? " publish-video-help" : ""}`} onChange={(e) => setMediaOverride(e.target.value)} placeholder="여러 개는 공백으로 구분" />
           <p id="publish-content-help" className="mt-1 text-xs text-stone-500">본문과 미디어 중 하나 이상이 필요하며, Instagram·TikTok은 미디어가 필수입니다.</p>
-          <p id="publish-media-help" className="mt-1 text-xs text-stone-500">여러 URL은 공백으로 구분하세요.</p>
+          <p id="publish-media-help" className="mt-1 text-xs text-stone-500">직접 입력한 주소는 테스트 실행에만 사용할 수 있습니다. 실제 게시에는 <Link className="underline" href="/dashboard/content/mine">내 콘텐츠에서 미디어를 고정하고 승인</Link>한 콘텐츠를 선택하세요.</p>
+          {mediaUrls.length > 0 && <p className="mt-1 text-xs text-stone-600">{piece?.mediaIntegrity?.ready ? "선택한 콘텐츠의 미디어 고정이 완료됐습니다." : "아직 고정되지 않은 미디어입니다. 테스트 실행은 실제 게시 없이 동작만 확인합니다."} PC를 통한 이미지·영상 실제 게시에는 앱 {readiness?.minimumMediaPublishDesktopVersion ?? "0.1.18"} 이상이 필요합니다.</p>}
           {requiresVideo && <p id="publish-video-help" className="mt-1 text-xs font-medium text-amber-800">숏폼 게시에는 영상으로 확인 가능한 HTTPS URL(.mp4/.mov/.m4v/.webm)이 필요합니다. 미리 채워진 상품 이미지만으로는 진행할 수 없습니다.</p>}
         </div>
         <div className="sm:col-span-2">
@@ -195,6 +199,7 @@ function PublishPageInner() {
         <div className="mt-4 flex flex-wrap gap-2">
           <button className="btn-primary" type="button" disabled={submitting || issues.length > 0} aria-busy={submitting} aria-describedby="publish-mode-description publish-readiness" onClick={submit}>{submitting ? "등록 중…" : dryRun ? "테스트 게시 검토 등록" : "실제 게시 검토 등록"}</button>
           <Link className="btn-ghost" href="/dashboard/jobs">작업 결과 보기</Link>
+          {mediaLiveIssue && <><Link className="btn-ghost" href="/dashboard/content/mine">미디어 고정·검수하러 가기</Link><button className="btn-ghost" type="button" onClick={() => setDryRun(true)}>테스트 실행으로 전환</button></>}
           {readinessIssues.map((issue) => issue.code === "LIVE_PUBLISH_DISABLED"
             ? <button className="btn-ghost" key={issue.code} type="button" onClick={() => setDryRun(true)}>테스트 실행으로 전환</button>
             : <Link className="btn-ghost" key={issue.code} href={issue.href}>{issue.code.includes("SITE") ? "링크 설정 확인" : "연결 상태 확인"}</Link>)}

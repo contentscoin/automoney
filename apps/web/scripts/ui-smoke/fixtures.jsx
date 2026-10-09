@@ -7,14 +7,15 @@ const material = (id, status, title) => ({ _id: id, kind: "TEXT", status, title,
 const ready = material("material-ready", "READY", "사용 준비된 상품 자료");
 const draft = material("material-draft", "DRAFT", "검토 전 자료");
 const piece = { _id: "piece-approved", channel: "THREADS", caption: "오늘의 가을 스타일링 자료입니다. 상품은 35,000원이며 자세한 정보는 링크에서 확인하세요.", hashtags: ["광고", "가을코디"], script: null, mediaUrls: [], qualityScore: 100, qualityReport: { violations: [], fixed: [] }, status: "APPROVED", visibility: "SHARED", generatedBy: "manual", usageCount: 0, mine: false, magazineTitle: null, productName: product.name, productId: product._id, collectionTitle: "가을 콘텐츠 묶음", collectionStatus: "PUBLISHED" };
+const mediaPiece = { ...piece, _id: "piece-media", caption: "고정한 파일을 확인하는 미디어 검수 예시입니다.", productId: null, productName: "미디어 검수 예시", mine: true, status: "DRAFT", visibility: "PRIVATE", collectionTitle: null, collectionStatus: null, mediaUrls: ["https://media.fixture.invalid/source.png"], mediaRevisionHash: "media-revision-1", mediaIntegrity: { ready: false, reason: "미디어 고정을 완료하세요." }, mediaFreeze: null, requiresStructuredReview: true, productionMeta: { outputHash: "output-1", standardPassed: true } };
 const collection = { _id: "collection-draft", title: "가을 콘텐츠 묶음", summary: "상품 사실과 자료 사용권을 확인하는 테스트용 묶음", tags: ["가을코디", "니트"], status: "DRAFT", sourceMaterialIds: [ready._id], pieceIds: [], materialCount: 1, pieceCount: 0, approvedPieceCount: 0, revision: 1, createdAt: now, updatedAt: now, pieces: [], runs: [{ _id: "run-failed", status: "FAILED", channels: ["THREADS"], createdAt: now, errorMessage: "PC 연결이 끊겨 생성하지 못했습니다. 연결을 확인하세요." }] };
 const space = { _id: "space-threads", name: "브랜드 Threads", platform: "THREADS", handle: "brand_demo", authMode: "BROWSER", sessionState: "HEALTHY", locked: false, dailyPostLimit: 3 };
 const liveIssue = { code: "LIVE_PUBLISH_DISABLED", message: "현재 실제 게시는 준비 중입니다. 콘텐츠 제작과 테스트 실행은 사용할 수 있습니다.", href: "/dashboard/publish?dryRun=1", scope: "live" };
 const state = {
-  materials: [draft, ready], collections: [collection], products: [product], pieces: [piece], spaces: [space],
+  materials: [draft, ready], collections: [collection], products: [product], pieces: [piece, mediaPiece], spaces: [space],
   links: [{ _id: "link-demo", product, origin: "MOCK", status: "ACTIVE", trackingCode: "mock-track", shortCode: "DEMO123", targetUrl: "https://example.invalid/product", issuedAt: now, clickCount: 12 }],
   schedules: [{ _id: "schedule-paused", spaceId: space._id, spaceName: space.name, platform: "THREADS", kind: "DAILY", timeOfDay: "10:00", daysOfWeek: [], jitterMinutes: 15, text: piece.caption, mediaUrls: [], autoApprove: false, enabled: false, nextRunAt: null, lastRunAt: null, lastSkipReason: "LIVE_PUBLISH_DISABLED", lastSkippedAt: now }],
-  readiness: { checkedAt: now, livePublishEnabled: false, partnerMode: "pool", publicSiteConfigured: true, metaConfigured: false, minimumDesktopVersion: "0.1.16", device: { id: "device-1", name: "운영 PC", online: true, appVersion: "0.1.16", compatible: true, codexInstalled: true, codexLoggedIn: true }, aiReady: true, issues: [liveIssue], spaces: [{ id: space._id, name: space.name, platform: "THREADS", authMode: "BROWSER", readyForTest: true, readyForLive: false, issues: [liveIssue] }], links: { liveCount: 0, demoCount: 1 } },
+  readiness: { checkedAt: now, livePublishEnabled: false, partnerMode: "pool", publicSiteConfigured: true, metaConfigured: false, minimumDesktopVersion: "0.1.16", minimumMediaPublishDesktopVersion: "0.1.18", device: { id: "device-1", name: "운영 PC", online: true, appVersion: "0.1.16", compatible: true, codexInstalled: true, codexLoggedIn: true }, aiReady: true, issues: [liveIssue], spaces: [{ id: space._id, name: space.name, platform: "THREADS", authMode: "BROWSER", readyForTest: true, readyForLive: false, mediaVersionCompatible: false, readyForMediaLive: false, issues: [liveIssue] }], links: { liveCount: 0, demoCount: 1 } },
 };
 let revision = 0;
 const listeners = new Set();
@@ -36,7 +37,7 @@ function query(name, args) {
       return item ? { ...item, materials: state.materials.filter((row) => item.sourceMaterialIds.includes(row._id)) } : null;
     }
     case "products:search": return state.products.filter((row) => !args?.term || row.name.includes(args.term));
-    case "content:listLibrary": return state.pieces;
+    case "content:listLibrary": return state.pieces.filter((row) => !args?.status || row.status === args.status);
     case "content:getPublishPiece": return state.pieces.find((row) => row._id === args.pieceId) ?? null;
     case "spaces:listMine": return state.spaces;
     case "links:listMine": return state.links;
@@ -84,6 +85,20 @@ async function mutate(name, args) {
     result = { linkId: real._id, shortCode: real.shortCode, existed: false };
   } else if (name === "jobs:enqueuePublish") {
     result = "mock-publish-job";
+  } else if (name === "media:requestFreeze") {
+    const current = state.pieces.find((row) => row._id === args.pieceId);
+    if (!current || current.mediaRevisionHash !== args.expectedMediaRevisionHash) throw new Error("콘텐츠가 변경되었습니다. 최신 내용을 확인하세요.");
+    if (!args.rightsConfirmed || args.rightsNote.trim().length < 3) throw new Error("사용권 확인이 필요합니다.");
+    state.pieces = state.pieces.map((row) => row._id === args.pieceId ? { ...row, mediaFreeze: { id: "freeze-1", status: "RUNNING", completedCount: 0, totalCount: row.mediaUrls.length, expiresAt: now + 1800000 } } : row);
+    result = { requestId: "freeze-1" };
+  } else if (name === "content:approve") {
+    const current = state.pieces.find((row) => row._id === args.pieceId);
+    if (!current?.mediaIntegrity.ready || Object.values(args.reviewChecklist).some((value) => value !== true)) throw new Error("미디어 준비와 검수를 완료하세요.");
+    state.pieces = state.pieces.map((row) => row._id === args.pieceId ? { ...row, status: "APPROVED", mediaApprovalReady: true, productionMeta: { ...row.productionMeta, mediaIntegrity: row.mediaIntegrity.manifest } } : row);
+  } else if (name === "content:edit") {
+    state.pieces = state.pieces.map((row) => row._id === args.pieceId ? { ...row, ...args, status: "DRAFT", mediaRevisionHash: `edited-${revision}` } : row);
+  } else if (name === "schedules:create") {
+    result = { nextRunAt: now + 86400000 };
   } else {
     throw new Error(`Unmocked mutation: ${name}`);
   }
@@ -92,4 +107,14 @@ async function mutate(name, args) {
 }
 export function useMutation(name) { return (args) => mutate(name, args); }
 export const useAction = useMutation;
-window.__uiSmoke = { calls, failNext: (name) => { nextFailure = name; }, state: () => state, mocked: true };
+window.__uiSmoke = {
+  calls, failNext: (name) => { nextFailure = name; }, state: () => state, mocked: true,
+  setLive: (mediaVersionCompatible = true) => {
+    state.readiness = { ...state.readiness, livePublishEnabled: true, issues: [], spaces: state.readiness.spaces.map((row) => ({ ...row, readyForLive: true, mediaVersionCompatible, readyForMediaLive: mediaVersionCompatible, issues: [] })) }; refresh();
+  },
+  patchMedia: (patch) => { state.pieces = state.pieces.map((row) => row._id === "piece-media" ? { ...row, ...patch } : row); refresh(); },
+  completeFreeze: () => {
+    const url = "https://media.fixture.invalid/frozen.png";
+    state.pieces = state.pieces.map((row) => row._id === "piece-media" ? { ...row, mediaUrls: [url], mediaRevisionHash: "media-revision-2", mediaIntegrity: { ready: true, manifest: [{ url, sha256: "a".repeat(64), sizeBytes: 68, mimeType: "image/png" }] }, mediaFreeze: { id: "freeze-1", status: "SUCCEEDED", completedCount: 1, totalCount: 1, expiresAt: now + 1800000 } } : row); refresh();
+  },
+};

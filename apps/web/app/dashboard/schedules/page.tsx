@@ -9,7 +9,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Badge } from "@/components/Badge";
 import { pieceText } from "@/components/PieceCard";
-import { inspectPublishMedia } from "@/components/publish-media";
+import { inspectPublishMedia, mediaLivePublishIssue } from "@/components/publish-media";
 import { useReadiness } from "@/components/use-readiness";
 import { dateTime, errorMessage } from "@/lib/format";
 import { DOW, JOB_STATUS_LABEL, PLATFORM_LABEL } from "@/lib/agent-format";
@@ -38,6 +38,11 @@ const SKIP_REASON: Record<string, string> = {
   CONTENT_REVIEW_REQUIRED: "콘텐츠를 다시 검수한 뒤 새 예약을 등록하세요.",
   CONTENT_SNAPSHOT_MISSING: "이전 방식으로 저장된 예약입니다. 콘텐츠를 확인하고 다시 등록하세요.",
   CONTENT_REVISION_CHANGED: "승인된 콘텐츠가 변경되었습니다. 최신 콘텐츠로 예약을 다시 등록하세요.",
+  MEDIA_INTEGRITY_REQUIRED: "고정된 미디어 증거가 없습니다. 내 콘텐츠에서 미디어를 고정·검수하고 새 예약을 등록하세요.",
+  MEDIA_REVIEW_REQUIRED: "미디어를 내 콘텐츠에 저장하고 고정·검수한 뒤 새 예약을 등록하세요.",
+  MEDIA_INTEGRITY_CHANGED: "고정된 미디어 파일을 확인할 수 없습니다. 내 콘텐츠에서 파일을 다시 준비하고 승인하세요.",
+  MEDIA_DESKTOP_UPDATE_REQUIRED: "미디어 게시에는 PC 앱 0.1.18 이상이 필요합니다. 연결 관리에서 업데이트를 확인하세요.",
+  DESKTOP_UPDATE_REQUIRED: "PC 앱을 최신 버전으로 업데이트하세요. 미디어 게시에는 0.1.18 이상이 필요합니다.",
   CONTENT_CHANNEL_REVIEW_REQUIRED: "Instagram 게시 형식을 선택하고 예약을 다시 등록하세요.",
   META_CONFIG_REVIEW_REQUIRED: "실제 Meta 계정 연결을 확인한 뒤 예약을 다시 등록하세요.",
   PUBLISH_PAYLOAD_REVIEW_REQUIRED: "본문과 미디어 형식을 확인한 뒤 예약을 다시 등록하세요.",
@@ -88,12 +93,15 @@ function SchedulesPageInner() {
   const contentChannel = piece?.channel ?? (selectedSpace?.platform === "INSTAGRAM" ? f.contentChannel : undefined);
   const mediaCheck = inspectPublishMedia({ mediaUrls, pieceChannel: contentChannel, platform: selectedSpace?.platform });
   const readySpace = readiness?.spaces.find((space) => space.id === f.spaceId);
+  const mediaLiveIssue = mediaLivePublishIssue({ mediaCount: mediaUrls.length, hasPiece: !!piece, mediaReady: piece?.mediaIntegrity?.ready, mediaApprovalReady: piece?.mediaApprovalReady,
+    browserSpace: !!selectedSpace && selectedSpace.authMode !== "META_API", mediaVersionCompatible: readySpace?.mediaVersionCompatible, minimumMediaVersion: readiness?.minimumMediaPublishDesktopVersion });
   const readyIssues = [
     ...(readiness?.issues.filter((issue) => issue.scope === "all" || issue.code === "LIVE_PUBLISH_DISABLED" || (f.linkId && issue.code === "PUBLIC_SITE_URL_INVALID")) ?? []),
     ...(readySpace?.issues ?? []),
   ].filter((issue, index, all) => all.findIndex((item) => item.code === issue.code) === index);
   const notices = readyIssues.filter((issue) => TRANSIENT_ISSUES.has(issue.code));
   const issues: string[] = readyIssues.filter((issue) => !TRANSIENT_ISSUES.has(issue.code)).map((issue) => issue.message);
+  if (mediaLiveIssue) issues.push(mediaLiveIssue);
   const loading = !readiness || !spaces || !links || !library || (!!pieceId && selectedPiece === undefined);
   if (loading) issues.push("예약에 필요한 정보를 확인하고 있습니다.");
   if (!selectedSpace) issues.push("정상 상태의 게시 계정을 선택하세요.");
@@ -186,7 +194,7 @@ function SchedulesPageInner() {
           {!pieceId && selectedSpace?.platform === "INSTAGRAM" && <div><label htmlFor="schedule-format" className="label">Instagram 게시 형식</label><select id="schedule-format" className="input" value={f.contentChannel} onChange={(event) => setF({ ...f, contentChannel: event.target.value as "INSTAGRAM_FEED" | "INSTAGRAM_REEL" })}><option value="INSTAGRAM_FEED">피드 이미지</option><option value="INSTAGRAM_REEL">Reel 영상</option></select></div>}
           {pieceId && <p id="schedule-piece-hint" className="text-sm text-stone-600 sm:col-span-2">승인된 본문과 미디어를 그대로 예약합니다. 수정하려면 <Link href="/dashboard/content/mine" className="underline">내 콘텐츠에서 편집하고 다시 승인하세요.</Link></p>}
           <div className="sm:col-span-2"><label htmlFor="schedule-text" className="label">본문</label><textarea id="schedule-text" className="input read-only:bg-stone-50" rows={4} readOnly={!!pieceId} aria-describedby={pieceId ? "schedule-piece-hint" : undefined} value={text} onChange={(event) => setF({ ...f, text: event.target.value })} placeholder="게시할 문안. 선택한 마케팅 링크는 본문 끝에 붙습니다." /></div>
-          <div><label htmlFor="schedule-media" className="label">이미지·영상 URL (공백 구분)</label><input id="schedule-media" className="input read-only:bg-stone-50" readOnly={!!pieceId} aria-describedby={pieceId ? "schedule-piece-hint" : undefined} value={media} onChange={(event) => setF({ ...f, media: event.target.value })} placeholder="https://…" /></div>
+          <div><label htmlFor="schedule-media" className="label">이미지·영상 URL (공백 구분)</label><input id="schedule-media" className="input read-only:bg-stone-50" readOnly={!!pieceId} aria-describedby={`schedule-media-hint${pieceId ? " schedule-piece-hint" : ""}`} value={media} onChange={(event) => setF({ ...f, media: event.target.value })} placeholder="https://…" /><p id="schedule-media-hint" className="mt-1 text-xs text-stone-600">미디어 예약은 고정·승인된 콘텐츠로만 가능합니다. <Link className="underline" href="/dashboard/content/mine">내 콘텐츠에서 미디어 고정·검수</Link>를 완료하세요. PC 미디어 게시에는 앱 {readiness?.minimumMediaPublishDesktopVersion ?? "0.1.18"} 이상이 필요합니다.</p></div>
           <div><label htmlFor="schedule-link" className="label">마케팅 링크{piece?.productId ? " (동일 상품 필수)" : ""}</label><select id="schedule-link" className="input" value={f.linkId} aria-invalid={productMismatch || undefined} aria-describedby={productMismatch ? "schedule-issues" : undefined} onChange={(event) => setF({ ...f, linkId: event.target.value })}><option value="">링크 없음</option>{links?.map((link) => <option key={link._id} value={link._id}>{link.product?.name ?? link.shortCode}{["MOCK", "DEMO"].includes(link.origin ?? "") ? " · 데모" : ""}{link.status !== "ACTIVE" ? " · 중지됨" : ""}</option>)}</select><Link href="/dashboard/links" className="mt-1 inline-block text-xs underline">실제 마케팅 링크 확인·발급</Link></div>
           {notices.length > 0 && <div className="rounded-lg bg-stone-50 p-3 text-sm text-stone-600 sm:col-span-2"><p>실행 시각 전에 준비하세요.</p>{notices.map((issue) => <p key={issue.code}>{issue.message} <Link href={issue.href} className="underline">준비 상태 확인</Link></p>)}</div>}
           {issues.length > 0 && <div id="schedule-issues" ref={issueRef} tabIndex={-1} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 sm:col-span-2"><p className="font-medium">예약 전 확인해 주세요.</p><ul className="mt-1 list-disc space-y-1 ps-5">{[...new Set(issues)].map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
@@ -212,10 +220,17 @@ function SchedulesPageInner() {
                 const lastJob = jobs?.find((job) => job._id === schedule.lastJobId);
                 const resumeReadiness = readiness?.spaces.find((space) => space.id === schedule.spaceId);
                 const scheduleLink = links?.find((link) => link._id === schedule.linkId);
+                const scheduledPiece = library?.find((item) => item._id === schedule.pieceId);
+                // Do not infer "missing" from the 200-item picker; the server validates older pieces on resume.
+                const resumeMediaProblem = schedule.mediaUrls.length > 0
+                  ? !schedule.pieceId ? "이전 주소 입력 방식의 미디어 예약입니다. 고정·승인된 콘텐츠로 새 예약을 등록하세요."
+                    : scheduledPiece && (scheduledPiece.mediaIntegrity?.ready !== true || scheduledPiece.mediaApprovalReady !== true) ? "콘텐츠의 미디어를 고정하고 다시 승인한 뒤 새 예약을 등록하세요."
+                      : resumeReadiness && resumeReadiness.authMode !== "META_API" && !resumeReadiness.mediaVersionCompatible ? `연결된 PC 앱을 ${readiness?.minimumMediaPublishDesktopVersion ?? "0.1.18"} 이상으로 업데이트하세요.` : null
+                  : null;
                 const resumeProblem = !readiness ? "게시 준비 상태를 확인하고 있습니다."
                   : !readiness.livePublishEnabled ? "실제 게시가 활성화된 뒤 재개할 수 있습니다."
                   : !resumeReadiness ? "게시 계정을 찾을 수 없습니다. 새 예약을 등록하세요."
-                  : resumeReadiness.issues.find((issue) => !TRANSIENT_ISSUES.has(issue.code))?.message
+                  : resumeMediaProblem ?? resumeReadiness.issues.find((issue) => !TRANSIENT_ISSUES.has(issue.code))?.message
                     ?? (schedule.linkId && (!scheduleLink || scheduleLink.status !== "ACTIVE") ? "활성 마케팅 링크를 선택해 예약을 다시 등록하세요."
                       : scheduleLink && ["MOCK", "DEMO"].includes(scheduleLink.origin ?? "") ? "실제 파트너 링크로 예약을 다시 등록하세요."
                         : schedule.kind === "ONE_SHOT" && Date.parse(`${schedule.runDate}T${schedule.timeOfDay}:00+09:00`) <= readiness.checkedAt ? "실행 시각이 지났습니다. 미래 시각으로 새 예약을 등록하세요."

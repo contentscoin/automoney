@@ -9,7 +9,7 @@ describe("runtime readiness", () => {
     const other = await signup(t, "other-ready@test.com");
     process.env.LIVE_PUBLISH_ENABLED = "false";
     const publicFlags = await t.query(api.readiness.getPublic, {});
-    expect(publicFlags).toEqual({ livePublishEnabled: false, partnerMode: "mock", publicSiteConfigured: true, metaConfigured: true, minimumDesktopVersion: "0.1.16" });
+    expect(publicFlags).toEqual({ livePublishEnabled: false, partnerMode: "mock", publicSiteConfigured: true, metaConfigured: true, minimumDesktopVersion: "0.1.16", minimumMediaPublishDesktopVersion: "0.1.18" });
     expect(Object.keys(publicFlags).some((key) => /secret|token|email|url/i.test(key))).toBe(false);
     await expect(t.query(api.readiness.getMine, {})).rejects.toThrow(/로그인/);
     const empty = await user.as.query(api.readiness.getMine, {});

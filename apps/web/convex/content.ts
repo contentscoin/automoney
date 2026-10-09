@@ -30,6 +30,7 @@ import { sha256Hex } from "./lib/crypto";
 import { isActiveSuperAdmin, requireSuperAdmin, requireUser } from "./lib/rbac";
 import { canonicalJson, enqueueJob } from "./jobs";
 import { playbookHintsFor } from "./analytics";
+import { mediaPreparationView, resolveMediaIntegrity } from "./lib/mediaIntegrity";
 import {
   completeContentReviewChecklist,
   consumePiece,
@@ -868,7 +869,7 @@ const pieceView = (
   generatedBy: p.generatedBy,
   runId: contentPieceEvidenceRunId(p) ?? null,
   productionMeta: p.productionMeta ?? null,
-  requiresStructuredReview: !!contentPieceEvidenceRunId(p) || contentPieceHasOperatorSupplyLineage(p),
+  requiresStructuredReview: !!contentPieceEvidenceRunId(p) || contentPieceHasOperatorSupplyLineage(p) || p.mediaUrls.length > 0,
   legacyBlocked: !contentPieceEvidenceRunId(p) && p.generatedBy !== "manual",
   usageCount: p.usageCount,
   createdAt: p.createdAt,
@@ -921,6 +922,9 @@ export async function decorate(
             frozen: false,
           }
         : null;
+    const mediaApproval = p.mediaUrls.length === 0 ? { ok: true as const }
+      : p.status !== "APPROVED" ? { ok: false as const, reason: "미디어 사용권과 최종 내용을 검수·승인하세요." }
+      : contentPieceEvidenceRunId(p) ? await workflowReviewEvidence(ctx, p) : await libraryReviewEvidence(ctx, p);
     out.push({
       ...pieceView(p, {
         magazineTitle: m?.title ?? null,
@@ -932,6 +936,9 @@ export async function decorate(
         collectionStatus: collection?.status ?? null,
       }),
       mine: p.ownerUserId === viewerId,
+      ...(await mediaPreparationView(ctx, p)),
+      mediaApprovalReady: mediaApproval.ok,
+      ...(!mediaApproval.ok ? { mediaApprovalReason: mediaApproval.reason } : {}),
     });
   }
   return out;
@@ -1042,7 +1049,7 @@ export const getPublishPiece = query({
     const normalizedId = ctx.db.normalizeId("contentPieces", pieceId);
     if (!normalizedId) return null;
     try {
-      await consumePiece(ctx, user._id, normalizedId);
+      await consumePiece(ctx, user._id, normalizedId, { allowUnfrozenMedia: true });
       return await getPieceFor(ctx, user, { pieceId: normalizedId });
     } catch (error) {
       if (error instanceof ConvexError) return null;
@@ -1074,7 +1081,7 @@ export const createManual = mutation({
       linkExpected: true,
       products: product ? [productBrief(product)] : [],
     });
-    const autoApproved = isAutoApprovable(report) && validateContentMedia(args.channel, args.mediaUrls) === null;
+    const autoApproved = args.mediaUrls.length === 0 && isAutoApprovable(report) && validateContentMedia(args.channel, args.mediaUrls) === null;
     const pieceId = await ctx.db.insert("contentPieces", {
       ownerUserId: user._id,
       visibility: "PRIVATE",
@@ -1088,6 +1095,12 @@ export const createManual = mutation({
       qualityReport: { violations: report.violations, fixed: report.fixed },
       status: autoApproved ? "APPROVED" : "DRAFT",
       generatedBy: "manual",
+      ...(args.mediaUrls.length > 0 ? { productionMeta: {
+        provider: "manual",
+        outputHash: await manualContentOutputHash({ ...args, caption: report.caption, hashtags: report.hashtags }),
+        standardPassed: isAutoApprovable(report) && validateContentMedia(args.channel, args.mediaUrls) === null,
+        humanApprovedAt: null, approvedByUserId: null, reviewChecklist: null, mediaIntegrity: null,
+      } } : {}),
       usageCount: 0,
       createdAt: Date.now(),
     });
@@ -1224,7 +1237,9 @@ export const approve = mutation({
     const mediaContractError = validateContentMedia(p.channel as Channel, p.mediaUrls);
     if (mediaContractError)
       fail("CONFLICT", "채널 미디어 요건을 충족하지 못했습니다. Reels·TikTok은 검증 가능한 HTTPS 동영상 URL 1개가 필요합니다.");
-    const requiresStructuredReview = contentPieceHasOperatorSupplyLineage(p);
+    const mediaIntegrity = await resolveMediaIntegrity(ctx, p.mediaUrls);
+    if (!mediaIntegrity.ok) fail("CONFLICT", mediaIntegrity.reason);
+    const requiresStructuredReview = contentPieceHasOperatorSupplyLineage(p) || p.mediaUrls.length > 0;
     let manualReport: ReturnType<typeof evaluatePiece> | null = null;
     if (p.generatedBy === "manual") {
       const product = p.productId ? await ctx.db.get(p.productId) : null;
@@ -1290,6 +1305,7 @@ export const approve = mutation({
           humanApprovedAt,
           approvedByUserId: user._id,
           reviewChecklist: args.reviewChecklist,
+          mediaIntegrity: mediaIntegrity.manifest,
           evaluatedAt: Date.now(),
         },
       });
@@ -1305,6 +1321,7 @@ export const approve = mutation({
           hashtags: report.hashtags,
           script: p.script ?? null,
           mediaUrls: p.mediaUrls,
+          mediaIntegrity: mediaIntegrity.manifest,
           qualityScore: report.score,
           standardId: production.standard.id,
           standardVersion: production.standard.version,
@@ -1371,6 +1388,7 @@ export const approve = mutation({
           humanApprovedAt: approvedAt,
           approvedByUserId: user._id,
           reviewChecklist: args.reviewChecklist,
+          mediaIntegrity: mediaIntegrity.manifest,
           evaluatedAt: approvedAt,
         },
       } : {}),
@@ -1386,6 +1404,7 @@ export const approve = mutation({
         hashtags: manualReport?.hashtags ?? p.hashtags,
         script: p.script ?? null,
         mediaUrls: p.mediaUrls,
+        mediaIntegrity: mediaIntegrity.manifest,
         qualityScore: manualReport?.score ?? p.qualityScore,
       },
       ...(requiresStructuredReview ? { reviewChecklist: args.reviewChecklist } : {}),
@@ -1449,16 +1468,15 @@ async function reopenSupplyCollectionAfterPieceChange(
   });
 }
 
-export const edit = mutation({
-  args: {
+const editArgs = {
     pieceId: v.id("contentPieces"),
     caption: v.string(),
     hashtags: v.array(v.string()),
     script: v.optional(v.string()),
     mediaUrls: v.optional(v.array(v.string())),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
+};
+
+export async function editPieceFor(ctx: MutationCtx, user: Doc<"users">, args: ObjectType<typeof editArgs>) {
     const p = await ctx.db.get(args.pieceId);
     if (!p || (p.ownerUserId !== user._id && !isActiveSuperAdmin(user)))
       fail("NOT_FOUND", "콘텐츠를 찾을 수 없습니다.");
@@ -1470,7 +1488,7 @@ export const edit = mutation({
     if (mediaUrls.length > maxMedia) fail("INVALID_ARGUMENT", `이 채널에는 미디어를 최대 ${maxMedia}개까지 추가할 수 있습니다.`);
     if (mediaUrls.some((url) => !/^https:\/\//i.test(url))) fail("INVALID_ARGUMENT", "미디어 URL은 HTTPS 주소만 사용할 수 있습니다.");
     const production = await productionContextForPiece(ctx, p);
-    const requiresStructuredReview = !!production || contentPieceHasOperatorSupplyLineage(p);
+    const requiresStructuredReview = !!production || contentPieceHasOperatorSupplyLineage(p) || mediaUrls.length > 0;
     const product = !production && p.productId ? await ctx.db.get(p.productId) : null;
     const report = evaluatePiece(
       {
@@ -1534,6 +1552,7 @@ export const edit = mutation({
           humanApprovedAt: null,
           approvedByUserId: null,
           reviewChecklist: null,
+          mediaIntegrity: null,
         },
       } : {}),
       ...(p.visibility === "SHARED" ? { libraryWithdrawnAt: Date.now() } : {}),
@@ -1550,7 +1569,11 @@ export const edit = mutation({
     });
     if (production) await refreshContentRun(ctx, production.run._id);
     return { score: report.score, violations: report.violations, status: nextStatus };
-  },
+}
+
+export const edit = mutation({
+  args: editArgs,
+  handler: async (ctx, args) => editPieceFor(ctx, await requireUser(ctx), args),
 });
 
 export const reject = mutation({

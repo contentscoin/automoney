@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { api, internal } from "../convex/_generated/api";
+import { createReviewedMediaPiece } from "./media-fixtures";
 import type { Id } from "../convex/_generated/dataModel";
 import { makeT, seedProduct, signup, type T } from "./helpers";
 
@@ -803,6 +804,7 @@ describe("schedules", () => {
       await ctx.db.patch(instagram.spaceId, { sessionState: "HEALTHY", handle: "legacy_ig", lockJobId: undefined });
       await ctx.db.patch(threads.spaceId, { sessionState: "HEALTHY", handle: "valid_threads", lockJobId: undefined });
     });
+    const reviewed = await createReviewedMediaPiece(t, user, { channel: "INSTAGRAM_FEED" });
     const legacy = await user.as.mutation(api.schedules.upsert, {
       spaceId: instagram.spaceId,
       kind: "DAILY",
@@ -810,8 +812,9 @@ describe("schedules", () => {
       daysOfWeek: [],
       jitterMinutes: 0,
       contentChannel: "INSTAGRAM_FEED",
-      text: "구형 인스타 예약",
-      mediaUrls: ["https://cdn.example.com/legacy.jpg"],
+      text: "",
+      mediaUrls: [],
+      pieceId: reviewed.pieceId,
       autoApprove: false,
     });
     const valid = await user.as.mutation(api.schedules.upsert, {
@@ -826,7 +829,7 @@ describe("schedules", () => {
     });
     const dueAt = Date.now() - 60_000;
     await t.run(async (ctx) => {
-      await ctx.db.patch(legacy.scheduleId, { contentChannel: undefined, nextRunAt: dueAt });
+      await ctx.db.patch(legacy.scheduleId, { contentChannel: undefined, pieceId: undefined, nextRunAt: dueAt });
       await ctx.db.patch(valid.scheduleId, { nextRunAt: dueAt + 1 });
     });
 

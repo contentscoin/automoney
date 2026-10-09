@@ -4,6 +4,32 @@ import { evaluatePiece, stripMatchingTrailingHashtagBlock, type Channel } from "
 import { sha256Hex } from "./crypto";
 import { fail } from "./errors";
 import { isActiveSuperAdmin } from "./rbac";
+import { resolveMediaIntegrity } from "./mediaIntegrity";
+
+type MediaManifest = { url: string; sha256: string; sizeBytes: number; mimeType: string }[];
+
+export function mediaManifestsMatch(value: unknown, expected: MediaManifest): boolean {
+  if (!Array.isArray(value) || value.length !== expected.length) return false;
+  return expected.every((asset, index) => {
+    const actual = value[index] as Partial<MediaManifest[number]> | null;
+    return actual !== null && typeof actual === "object" && actual.url === asset.url && actual.sha256 === asset.sha256
+      && actual.sizeBytes === asset.sizeBytes && actual.mimeType === asset.mimeType;
+  });
+}
+
+async function reviewedMediaEvidence(
+  ctx: MutationCtx | QueryCtx,
+  piece: Doc<"contentPieces">,
+  snapshot: unknown,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (piece.mediaUrls.length === 0) return { ok: true };
+  const integrity = await resolveMediaIntegrity(ctx, piece.mediaUrls);
+  if (!integrity.ok) return integrity;
+  const media = (snapshot as { mediaIntegrity?: unknown } | null)?.mediaIntegrity;
+  return mediaManifestsMatch(media, integrity.manifest)
+    ? { ok: true }
+    : { ok: false, reason: "현재 미디어 파일과 일치하는 사용권·원본 고정 승인 기록이 없습니다. 미디어를 고정하고 다시 승인하세요." };
+}
 
 export function contentPieceText(piece: Pick<Doc<"contentPieces">, "caption" | "hashtags">): string {
   const caption = stripMatchingTrailingHashtagBlock(piece.caption, piece.hashtags);
@@ -116,6 +142,7 @@ export const completeContentReviewChecklist = (value: unknown): boolean => {
 export async function workflowReviewEvidence(
   ctx: MutationCtx | QueryCtx,
   piece: Doc<"contentPieces">,
+  options: { allowUnfrozenMedia?: boolean } = {},
 ): Promise<{ ok: true; outputHash: string } | { ok: false; reason: string }> {
   if (!contentPieceEvidenceRunId(piece)) return { ok: true, outputHash: contentPieceOutputHash(piece) ?? "" };
   const meta = piece.productionMeta as {
@@ -141,9 +168,12 @@ export async function workflowReviewEvidence(
     && candidate.createdAt === meta.humanApprovedAt
     && completeContentReviewChecklist(candidate.reviewChecklist),
   );
-  return event
-    ? { ok: true, outputHash }
-    : { ok: false, reason: "현재 revision과 일치하는 불변 검토 기록이 없습니다." };
+  if (!event) return { ok: false, reason: "현재 revision과 일치하는 불변 검토 기록이 없습니다." };
+  if (!options.allowUnfrozenMedia) {
+    const media = await reviewedMediaEvidence(ctx, piece, event.snapshot);
+    if (!media.ok) return media;
+  }
+  return { ok: true, outputHash };
 }
 
 /**
@@ -153,6 +183,7 @@ export async function workflowReviewEvidence(
 export async function libraryReviewEvidence(
   ctx: MutationCtx | QueryCtx,
   piece: Doc<"contentPieces">,
+  options: { allowUnfrozenMedia?: boolean } = {},
 ): Promise<{ ok: true; outputHash: string } | { ok: false; reason: string }> {
   const facts = await contentPieceFactEvidence(ctx, piece);
   if (!facts.ok) return facts;
@@ -186,9 +217,12 @@ export async function libraryReviewEvidence(
     && candidate.createdAt === meta.humanApprovedAt
     && completeContentReviewChecklist(candidate.reviewChecklist),
   );
-  return event
-    ? { ok: true, outputHash: expectedHash }
-    : { ok: false, reason: "현재 revision과 일치하는 불변 운영 검수 기록이 없습니다." };
+  if (!event) return { ok: false, reason: "현재 revision과 일치하는 불변 운영 검수 기록이 없습니다." };
+  if (!options.allowUnfrozenMedia) {
+    const media = await reviewedMediaEvidence(ctx, piece, event.snapshot);
+    if (!media.ok) return media;
+  }
+  return { ok: true, outputHash: expectedHash };
 }
 
 export async function hashPiecePublishSnapshot(input: {
@@ -214,6 +248,7 @@ export async function consumePiece(
   ctx: MutationCtx | QueryCtx,
   userId: Id<"users">,
   pieceId: Id<"contentPieces">,
+  options: { allowUnfrozenMedia?: boolean } = {},
 ): Promise<{
   text: string;
   mediaUrls: string[];
@@ -243,11 +278,11 @@ export async function consumePiece(
     const operatorSupplyLineage = contentPieceHasOperatorSupplyLineage(p);
     if (!standardPassed || (!operatorSupplyLineage && run?.status !== "COMPLETED"))
       fail("CONFLICT", "전체 제작 실행의 품질 검수와 사람 승인이 완료된 콘텐츠만 게시할 수 있습니다.");
-    const review = await workflowReviewEvidence(ctx, p);
+    const review = await workflowReviewEvidence(ctx, p, options);
     if (!review.ok) fail("CONFLICT", `${review.reason} 콘텐츠를 다시 검토·승인하세요.`);
   }
-  if (!evidenceRunId && contentPieceHasOperatorSupplyLineage(p)) {
-    const review = await libraryReviewEvidence(ctx, p);
+  if (!evidenceRunId && (contentPieceHasOperatorSupplyLineage(p) || (p.mediaUrls.length > 0 && !options.allowUnfrozenMedia))) {
+    const review = await libraryReviewEvidence(ctx, p, options);
     if (!review.ok) fail("CONFLICT", `${review.reason} 콘텐츠를 다시 검토·승인하세요.`);
   }
   if (
@@ -261,7 +296,7 @@ export async function consumePiece(
     const owner = await ctx.db.get(p.ownerUserId);
     if (!owner || !isActiveSuperAdmin(owner))
       fail("FORBIDDEN", "운영사가 제공한 공유 콘텐츠만 사용할 수 있습니다.");
-    const libraryReview = await libraryReviewEvidence(ctx, p);
+    const libraryReview = await libraryReviewEvidence(ctx, p, options);
     if (!libraryReview.ok) fail("FORBIDDEN", "운영 검수가 완료된 공유 콘텐츠만 사용할 수 있습니다.");
   }
   const outputHash = await contentPiecePublishOutputHash(p);

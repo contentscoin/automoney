@@ -6,7 +6,7 @@ import { internalMutation, mutation, query, type QueryCtx, type MutationCtx } fr
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
-import { consumePiece, contentPieceEvidenceRunId, contentPieceFactEvidence, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, libraryReviewEvidence, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
+import { consumePiece, contentPieceEvidenceRunId, contentPieceFactEvidence, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, libraryReviewEvidence, mediaManifestsMatch, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
 import { livePublishEnabled } from "./lib/publishPolicy";
 import { marketingRedirectUrl } from "./lib/publicUrl";
 import { canonicalJson, enqueueJob, validateExecutorPublishContract } from "./jobs";
@@ -14,6 +14,7 @@ import { sha256Hex } from "./lib/crypto";
 import { publicationIdentity } from "./lib/publishIdentity";
 import { metaLivePublishAvailable } from "./lib/meta";
 import { DEMO_LINK_PUBLISH_MESSAGE, isDemoMarketingLink } from "./lib/marketingLinkPolicy";
+import { resolveMediaIntegrity } from "./lib/mediaIntegrity";
 
 const kindValidator = v.union(v.literal("ONE_SHOT"), v.literal("DAILY"), v.literal("WEEKLY"));
 const SCHEDULE_TICK_BATCH_SIZE = 25;
@@ -116,7 +117,14 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
   if (workflowPiece?.productId && !args.linkId) fail("INVALID_ARGUMENT", "제작 워크플로 콘텐츠에는 같은 상품의 활성 마케팅 링크가 필요합니다.");
   const linkUrl = link ? marketingRedirectUrl(link.shortCode) : null;
   if (link && !linkUrl) fail("CONFIG_MISSING", "SITE_URL은 공개 HTTPS 주소로 설정해야 합니다.");
-  const candidatePayload: PublishPayload = { spaceId: space._id, platform: space.platform, contentChannel, text, mediaUrls, linkUrl };
+  let mediaIntegrity: PublishPayload["mediaIntegrity"];
+  if (mediaUrls.length > 0) {
+    if (!args.pieceId) fail("CONFLICT", "미디어 예약은 원본 고정·사용권 검수를 완료한 콘텐츠를 선택해야 합니다.");
+    const integrity = await resolveMediaIntegrity(ctx, mediaUrls);
+    if (!integrity.ok) fail("CONFLICT", integrity.reason);
+    mediaIntegrity = integrity.manifest;
+  }
+  const candidatePayload: PublishPayload = { spaceId: space._id, platform: space.platform, contentChannel, text, mediaUrls, linkUrl, ...(mediaIntegrity ? { mediaIntegrity } : {}) };
   const err = validatePublishPayload(candidatePayload);
   if (err) fail("INVALID_ARGUMENT", `발행 내용 오류: ${err}`);
   const executorError = validateExecutorPublishContract(space, candidatePayload);
@@ -139,7 +147,7 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
     targetPublicationKey: targetIdentity.publicationKey,
     targetHandle: targetIdentity.normalizedHandle ?? undefined,
   };
-  const payloadHash = await sha256Hex(canonicalJson({ ...fields, text, mediaUrls, ...workflowSnapshot, ...targetSnapshot }));
+  const payloadHash = await sha256Hex(canonicalJson({ ...fields, text, mediaUrls, ...(mediaIntegrity ? { mediaIntegrity } : {}), ...workflowSnapshot, ...targetSnapshot }));
   if (requestKey) {
     const duplicate = await ctx.db.query("schedules").withIndex("by_user_requestKey", (q) => q.eq("userId", user._id).eq("requestKey", requestKey)).unique();
     if (duplicate) {
@@ -154,7 +162,7 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
   const nextRunAt = computeNextRunAt({ kind: args.kind, timeOfDay: args.timeOfDay, daysOfWeek: args.daysOfWeek, jitterMinutes: args.jitterMinutes, runDate: args.runDate ?? null }, now, seed);
   if (nextRunAt === null || !Number.isFinite(nextRunAt))
     fail("INVALID_ARGUMENT", "미래에 실행할 시각이 없습니다. 실행 일자·시각을 뒤로 옮기거나 시간 편차를 줄이세요.");
-  const doc = { ...fields, text, mediaUrls, ...workflowSnapshot, ...targetSnapshot, userId: user._id, requestKey, payloadHash, enabled: true, nextRunAt, revision: (existing?.revision ?? 0) + 1 };
+  const doc = { ...fields, text, mediaUrls, mediaIntegrity, ...workflowSnapshot, ...targetSnapshot, userId: user._id, requestKey, payloadHash, enabled: true, nextRunAt, revision: (existing?.revision ?? 0) + 1 };
   const scheduleId = id ? (await ctx.db.patch(id, doc), id) : await ctx.db.insert("schedules", { ...doc, createdAt: Date.now() });
   if (existing) await invalidateScheduledJobs(ctx, scheduleId);
   await audit(ctx, { actorUserId: user._id, action: "schedule.upsert", metadata: { scheduleId, kind: args.kind, nextRunAt: nextRunAt ?? null } });
@@ -322,7 +330,7 @@ export const tick = internalMutation({
         const standardPassed = !pieceEvidenceRunId || (piece.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
         const review = pieceEvidenceRunId
           ? await workflowReviewEvidence(ctx, piece)
-          : contentPieceHasOperatorSupplyLineage(piece) ? await libraryReviewEvidence(ctx, piece) : { ok: true as const };
+          : contentPieceHasOperatorSupplyLineage(piece) || piece.mediaUrls.length > 0 ? await libraryReviewEvidence(ctx, piece) : { ok: true as const };
         const supplyAvailable = await operatorSupplySourceAvailable(ctx, piece);
         const canonicalText = contentPieceText(piece);
         const currentSnapshot = outputHash ? await hashPiecePublishSnapshot({ pieceId: s.pieceId, outputHash, text: canonicalText, mediaUrls: piece.mediaUrls, linkId: s.linkId, linkUrl }) : null;
@@ -345,6 +353,17 @@ export const tick = internalMutation({
         pieceOutputHash = outputHash!;
         pieceSnapshotHash = currentSnapshot!;
       }
+      if (mediaUrls.length > 0) {
+        const integrity = await resolveMediaIntegrity(ctx, mediaUrls);
+        const reason = space.platform === "INSTAGRAM" && !(piece?.channel ?? s.contentChannel) ? "CONTENT_CHANNEL_REVIEW_REQUIRED"
+          : !piece ? "MEDIA_REVIEW_REQUIRED" : !integrity.ok ? "MEDIA_INTEGRITY_REQUIRED"
+          : !mediaManifestsMatch(s.mediaIntegrity, integrity.manifest) ? "MEDIA_INTEGRITY_CHANGED" : null;
+        if (reason) {
+          await ctx.db.patch(s._id, { nextRunAt: undefined, enabled: false, lastSkipReason: reason, lastSkippedAt: now });
+          skipped++;
+          continue;
+        }
+      }
       const payload: PublishPayload = {
         spaceId: space._id,
         platform: space.platform,
@@ -354,6 +373,7 @@ export const tick = internalMutation({
         ...((piece?.channel ?? s.contentChannel) ? { contentChannel: (piece?.channel ?? s.contentChannel) as PublishPayload["contentChannel"] } : {}),
         text,
         mediaUrls,
+        ...(s.mediaIntegrity ? { mediaIntegrity: s.mediaIntegrity } : {}),
         linkUrl,
         ...(s.linkId ? { linkId: s.linkId } : {}),
         ...(s.pieceId ? { pieceId: s.pieceId } : {}),

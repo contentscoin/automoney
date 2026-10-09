@@ -18,6 +18,7 @@ import {
   contentPieceText,
   hashPiecePublishSnapshot,
   libraryReviewEvidence,
+  mediaManifestsMatch,
   operatorSupplySourceAvailable,
   workflowReviewEvidence,
 } from "./pieces";
@@ -26,6 +27,7 @@ import { marketingRedirectUrl } from "./publicUrl";
 import { publicationIdentity } from "./publishIdentity";
 import { isActiveSuperAdmin } from "./rbac";
 import { isDemoMarketingLink } from "./marketingLinkPolicy";
+import { resolveMediaIntegrity } from "./mediaIntegrity";
 
 export type PublishAttemptPolicyResult =
   | { ok: true; currentHash: string }
@@ -40,7 +42,7 @@ export async function validatePublishAttemptPolicy(
   ctx: MutationCtx,
   job: Doc<"agentJobs">,
   now: number,
-  options: { continuation?: boolean } = {},
+  options: { continuation?: boolean; preparation?: boolean } = {},
 ): Promise<PublishAttemptPolicyResult> {
   const deny = (reason: string): PublishAttemptPolicyResult => ({ ok: false, reason });
   if (job.jobType !== "post.publish" || job.status !== "RUNNING") return deny("JOB_NOT_ACTIVE");
@@ -53,11 +55,11 @@ export async function validatePublishAttemptPolicy(
   if (rootJob?.cancelRequested || rootJob?.status === "CANCELLED") return deny("JOB_CANCELLED");
   if (job.expiresAt && job.expiresAt < now) return deny("SCHEDULE_EXPIRED");
   if (!livePublishEnabled()) return deny("LIVE_PUBLISH_DISABLED");
-  if (job.publishPhase !== "INTENT_RECORDED" || !job.publishIntentId) return deny("PREFLIGHT_REQUIRED");
+  if (!options.preparation && (job.publishPhase !== "INTENT_RECORDED" || !job.publishIntentId)) return deny("PREFLIGHT_REQUIRED");
 
   const currentHash = await sha256Hex(canonicalJson({ jobType: job.jobType, payload: job.payload }));
   if (!job.payloadHash || job.payloadHash !== currentHash) return deny("STALE_APPROVAL");
-  if (job.publishPreflightPayloadHash !== currentHash || job.publishPreflightAttemptNo !== job.attemptNo)
+  if (!options.preparation && (job.publishPreflightPayloadHash !== currentHash || job.publishPreflightAttemptNo !== job.attemptNo))
     return deny("PREFLIGHT_REQUIRED");
   if (job.approvalRequired !== false) {
     if (!job.approval || job.approval.payloadHash !== currentHash) return deny("APPROVAL_REQUIRED");
@@ -107,7 +109,7 @@ export async function validatePublishAttemptPolicy(
     const review = await workflowReviewEvidence(ctx, piece);
     if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED");
   }
-  if (piece && !evidenceRunId && contentPieceHasOperatorSupplyLineage(piece)) {
+  if (piece && !evidenceRunId && (contentPieceHasOperatorSupplyLineage(piece) || piece.mediaUrls.length > 0)) {
     const review = await libraryReviewEvidence(ctx, piece);
     if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED");
   }
@@ -129,6 +131,12 @@ export async function validatePublishAttemptPolicy(
     ...(piece ? { contentChannel: piece.channel as PublishPayload["contentChannel"] } : {}),
   });
   if (payloadError) return deny("PUBLISH_PAYLOAD_INVALID");
+  if (payload.mediaUrls.length > 0) {
+    if (!piece) return deny("MEDIA_REVIEW_REQUIRED");
+    const integrity = await resolveMediaIntegrity(ctx, payload.mediaUrls);
+    if (!integrity.ok) return deny("MEDIA_INTEGRITY_REQUIRED");
+    if (!mediaManifestsMatch(payload.mediaIntegrity, integrity.manifest)) return deny("MEDIA_INTEGRITY_CHANGED");
+  }
 
   if (piece) {
     if (evidenceRunId && piece.productId && !link) return deny("CONTENT_LINK_REQUIRED");
@@ -153,7 +161,10 @@ export async function validatePublishAttemptPolicy(
       return deny("CONTENT_REVISION_CHANGED");
   }
 
-  const intent = await ctx.db.get(job.publishIntentId);
+  // Preparing a provider container does not reserve a publication intent. It
+  // still needs the same current approval, account, revision and byte evidence.
+  if (options.preparation) return { ok: true, currentHash };
+  const intent = await ctx.db.get(job.publishIntentId!);
   if (
     !intent
     || intent.rootJobId !== (job.rootJobId ?? job._id)

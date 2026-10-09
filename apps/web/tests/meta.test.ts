@@ -3,6 +3,8 @@ import { api, internal } from "../convex/_generated/api";
 import { makeT, signup, type T } from "./helpers";
 import { metaLivePublishAvailable } from "../convex/lib/meta";
 import { createGraphAdapter } from "../convex/lib/meta/graph";
+import { createReviewedMediaPiece, MEDIA_CAPTION } from "./media-fixtures";
+import * as metaProvider from "../convex/lib/meta";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -11,7 +13,7 @@ afterEach(() => {
 
 async function pairDevice(t: T, user: Awaited<ReturnType<typeof signup>>) {
   const { code } = await user.as.mutation(api.devices.createPairCode, {});
-  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.13" });
+  return await t.mutation(api.devices.pair, { code, deviceName: "PC", platform: "linux", appVersion: "0.1.18" });
 }
 
 /** mock 모드 연결: connectStart → 콜백 GET */
@@ -25,6 +27,49 @@ async function connect(t: T, user: Awaited<ReturnType<typeof signup>>, platform:
 }
 
 describe("Meta API (mock adapter) — connect, cloud publish, fallback, refresh", () => {
+  it("blocks stale stored media before the provider reads or creates a container", async () => {
+    const t = makeT();
+    const user = await signup(t, "meta-media-preparation@test.com");
+    await connect(t, user, "THREADS", "mock:media_preparation");
+    const space = (await user.as.query(api.spaces.listMine, {}))[0]!;
+    const reviewed = await createReviewedMediaPiece(t, user);
+    const jobId = await user.as.mutation(api.jobs.enqueuePublish, { spaceId: space._id, text: "", mediaUrls: [], pieceId: reviewed.pieceId });
+    await user.as.mutation(api.jobs.approve, { jobId });
+    await t.run((ctx) => ctx.storage.delete(reviewed.storageId));
+    const adapter = metaProvider.getMetaAdapter();
+    const publish = vi.fn(adapter.publish);
+    const me = vi.fn(adapter.me);
+    const factory = vi.spyOn(metaProvider, "getMetaAdapter").mockReturnValue({ ...adapter, publish, me });
+    try {
+      await t.finishAllScheduledFunctions(() => {});
+      expect(await t.run((ctx) => ctx.db.get(jobId))).toMatchObject({ status: "FAILED", errorCode: "CONTENT_REVIEW_REQUIRED" });
+      expect(publish).not.toHaveBeenCalled();
+      expect(me).not.toHaveBeenCalled();
+      expect(await t.run((ctx) => ctx.db.query("publishReservations").collect())).toHaveLength(0);
+    } finally {
+      factory.mockRestore();
+    }
+  });
+
+  it("classifies a frozen WebM URL as video when preparing a Threads container", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "container" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "post" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ permalink: "https://www.threads.net/@media/post/ABC" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const beforeCommit = vi.fn(async () => {});
+    const mediaUrl = "https://convex.automoney.test/media-assets/asset/hash.webm";
+    const pending = createGraphAdapter({ appId: "app", appSecret: "secret" }).publish("token", { providerUserId: "provider", username: "media" }, { platform: "THREADS", text: "동영상", mediaUrls: [mediaUrl], linkUrl: null }, beforeCommit);
+    await vi.advanceTimersByTimeAsync(15_001);
+    await pending;
+    const firstBody = new URLSearchParams(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(firstBody.get("media_type")).toBe("VIDEO");
+    expect(firstBody.get("video_url")).toBe(mediaUrl);
+    expect(firstBody.has("image_url")).toBe(false);
+    expect(beforeCommit).toHaveBeenCalledOnce();
+  });
+
   it("allows mock live publishing only inside the explicit test harness", () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousEscape = process.env.META_ALLOW_MOCK_LIVE_TESTS;
@@ -183,7 +228,8 @@ describe("Meta API (mock adapter) — connect, cloud publish, fallback, refresh"
     await t.run(async (ctx) => {
       await ctx.db.patch(acct._id, { tokenEnc: await encryptField(process.env.KYC_ENC_KEY!, "expired-INSTAGRAM-insta_shop") });
     });
-    const jobId = await user.as.mutation(api.jobs.enqueuePublish, { spaceId: space._id, contentChannel: "INSTAGRAM_FEED", text: "폴백 테스트", mediaUrls: ["https://cdn.example.com/a.jpg"], requireApproval: false });
+    const reviewed = await createReviewedMediaPiece(t, user, { channel: "INSTAGRAM_FEED" });
+    const jobId = await user.as.mutation(api.jobs.enqueuePublish, { spaceId: space._id, contentChannel: "INSTAGRAM_FEED", text: "", mediaUrls: [], pieceId: reviewed.pieceId, requireApproval: false });
     const fallbackExpiresAt = Date.now() + 60 * 60_000;
     await t.run(async (ctx) => ctx.db.patch(jobId, { expiresAt: fallbackExpiresAt }));
     await user.as.mutation(api.jobs.approve, { jobId });
@@ -207,13 +253,15 @@ describe("Meta API (mock adapter) — connect, cloud publish, fallback, refresh"
     // 데스크톱 claim 이 폴백 잡을 받는다
     const claimed = await (await t.fetch("/agent/claim", { method: "POST", headers: { authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: "{}" })).json();
     expect(claimed.data.id).toBe(fallback!._id);
-    expect(claimed.data.payload.text).toBe("폴백 테스트");
+    expect(claimed.data.payload.text).toContain(MEDIA_CAPTION);
+    expect(claimed.data.payload.mediaIntegrity).toEqual(reviewed.manifest);
     // 강제 실패([meta-fail]) 는 토큰 문제가 아니므로 계정 상태 유지 + 폴백
     await t.run(async (ctx) => {
       await ctx.db.patch(acct._id, { status: "ACTIVE", tokenEnc: await encryptField(process.env.KYC_ENC_KEY!, "mock-INSTAGRAM-insta_shop") });
       await ctx.db.patch(space._id, { sessionState: "HEALTHY", lockJobId: undefined });
     });
-    const j2 = await user.as.mutation(api.jobs.enqueuePublish, { spaceId: space._id, contentChannel: "INSTAGRAM_FEED", text: "[meta-fail] 본문", mediaUrls: ["https://cdn.example.com/a.jpg"], requireApproval: false });
+    const failPiece = await createReviewedMediaPiece(t, user, { channel: "INSTAGRAM_FEED", caption: `[meta-fail] ${MEDIA_CAPTION}` });
+    const j2 = await user.as.mutation(api.jobs.enqueuePublish, { spaceId: space._id, contentChannel: "INSTAGRAM_FEED", text: "", mediaUrls: [], pieceId: failPiece.pieceId, requireApproval: false });
     await user.as.mutation(api.jobs.approve, { jobId: j2 });
     await t.finishAllScheduledFunctions(() => {});
     expect((await t.run(async (ctx) => ctx.db.get(j2)))!.errorCode).toBe("META_PUBLISH_FAILED");
@@ -239,6 +287,7 @@ describe("Meta API (mock adapter) — connect, cloud publish, fallback, refresh"
     const { encryptField } = await import("../convex/lib/crypto");
     await t.run(async (ctx) => ctx.db.patch(account._id, { tokenEnc: await encryptField(process.env.KYC_ENC_KEY!, "expired-INSTAGRAM-scheduled_shop") }));
 
+    const reviewed = await createReviewedMediaPiece(t, user, { channel: "INSTAGRAM_FEED" });
     const futureKst = new Date(Date.now() + 9 * 3600_000 + 24 * 3600_000);
     const schedule = await user.as.mutation(api.schedules.upsert, {
       spaceId: apiSpace._id,
@@ -248,8 +297,9 @@ describe("Meta API (mock adapter) — connect, cloud publish, fallback, refresh"
       daysOfWeek: [],
       jitterMinutes: 0,
       contentChannel: "INSTAGRAM_FEED",
-      text: "일회 예약 폴백",
-      mediaUrls: ["https://cdn.example.com/a.jpg"],
+      text: "",
+      mediaUrls: [],
+      pieceId: reviewed.pieceId,
       autoApprove: false,
     });
     await t.run((ctx) => ctx.db.patch(schedule.scheduleId, { runDate: "2000-01-01", nextRunAt: Date.now() - 1 }));

@@ -92,9 +92,12 @@
 
 ## 7. 현재 제한과 live 출시 조건
 
-- 승인·작업 payload는 미디어 URL 문자열을 고정하지만 원격 URL의 실제 파일 바이트는 아직 자사 저장소에 immutable snapshot으로 고정하지 않는다. 승인 후 원격 원본이 바뀌는 위험을 제거하려면 object storage 복사, MIME/크기 검사, content hash 저장, 게시 직전 hash 재검증이 필요하다.
+- 미디어 고정 계층은 구현되었다. 콘텐츠 카드의 사용권·공개 배포 동의 후 서버가 HTTPS/DNS/redirect 검증과 IP 고정 연결로 파일을 복사한다. 응답 본문까지 20초 제한, 이미지 10MB·영상 20MB 제한과 파일 signature/MIME 비교를 적용한다. `contentMediaFreezes`는 진행·실패를, `contentMediaAssets`는 저장 지문과 권리 근거를 보존한다. 마지막 파일이 검증되면 콘텐츠 수정·초안 전환·READY 공개 전환을 하나의 transaction으로 처리한다.
+- READY 저장 URL과 SHA-256·크기·MIME의 순서 있는 명세를 사람 승인 event, 게시 payload, 예약 hash에 결합한다. 서버는 큐 등록·실행·최종 게시에서 재검증한다. PC 앱 `0.1.18` 이상은 실제 다운로드 바이트도 비교하며, Meta는 provider가 파일을 읽기 전과 최종 게시 직전에 검증한다. 과거 원격 주소·승인 명세 없는 미디어는 실게시하지 않으며 콘텐츠 수정 저장→고정→재검수로 복구한다. 텍스트 전용 기존 작업과 원격 미디어 dry-run 호환은 유지한다.
+- 준비 실패는 파일 주소·형식·권리·콘텐츠 변경 여부를 확인하고 재시도한다. 요청은 30분 만료, 사용자별 시간당 12회 제한이며 만료된 STAGED 파일만 15분 주기 bounded sweep으로 정리한다. READY 파일은 개인 사본과 외부 게시에서 참조될 수 있으므로 자동 삭제하지 않는다. 응답 유실 시 이미 연결된 파일은 삭제하지 않는다.
+- 운영 제한: `storage.store` 직후 연결 전 프로세스가 강제 종료되면 식별자를 기록하지 못한 미사용 blob이 남을 수 있다. 자동으로 전체 storage를 추정 삭제하지 않는다. 저장소 비용·크기 추이를 관찰하고 삭제가 필요하면 근거 있는 식별자와 참조 대조 후 별도 승인받는다. READY 자산의 회수/권리 철회·보존 기간 정책과 코드 서명은 별도 운영 과제다.
 - Instagram 브라우저 permalink 자체에는 계정 handle이 없으므로 성공 URL만으로 계정 귀속을 재검증할 수 없다. 현재는 submit 직전 session identity와 새 permalink baseline을 결합해 방어하며, provider-signed post owner 확인이 추가되기 전까지 제한 베타 범위로 운영한다.
-- 위 미디어 고정 계층과 실제 계정 스모크 테스트가 완료되기 전 production 기본값은 `LIVE_PUBLISH_ENABLED=false`다. 웹/백엔드 배포와 dry-run 검증은 가능하지만 상시 live 기능은 출시하지 않는다.
+- 실제 계정 스모크 테스트와 운영 승인이 완료되기 전 production 기본값은 `LIVE_PUBLISH_ENABLED=false`다. 웹/백엔드 배포와 합성 검증은 상시 실게시 출시 증거가 아니다.
 
 ## 8. 롤백과 복원
 

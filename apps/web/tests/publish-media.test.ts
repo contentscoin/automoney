@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inspectPublishMedia, validatePieceMediaEdit } from "../components/publish-media";
+import { inspectPublishMedia, mediaLivePublishIssue, validatePieceMediaEdit } from "../components/publish-media";
 
 describe("publish media readiness", () => {
   it("does not treat product still images as prepared Reels media", () => {
@@ -86,5 +86,25 @@ describe("piece media editing", () => {
       "https://cdn.example.com/one.jpg",
       "https://cdn.example.com/two.webm",
     ], "THREADS")).toBeNull();
+  });
+});
+
+describe("immutable media LIVE readiness", () => {
+  it("keeps direct/remote media dry-runs available without claiming they are live-ready", () => {
+    expect(mediaLivePublishIssue({ mediaCount: 1, hasPiece: false, dryRun: true, browserSpace: true, mediaVersionCompatible: false })).toBeNull();
+    expect(mediaLivePublishIssue({ mediaCount: 0, hasPiece: false, browserSpace: true, mediaVersionCompatible: false })).toBeNull();
+  });
+  it("blocks direct media and any missing immutable evidence on LIVE", () => {
+    expect(mediaLivePublishIssue({ mediaCount: 1, hasPiece: false })).toMatch(/고정·승인된 콘텐츠/);
+    for (const mediaReady of [undefined, false]) expect(mediaLivePublishIssue({ mediaCount: 1, hasPiece: true, mediaReady })).toMatch(/고정이 완료되지/);
+  });
+  it("requires the media-capable version of the selected PC, not merely the AI minimum", () => {
+    expect(mediaLivePublishIssue({ mediaCount: 1, hasPiece: true, mediaReady: true, mediaApprovalReady: true, browserSpace: true, mediaVersionCompatible: false })).toMatch(/0\.1\.18/);
+    expect(mediaLivePublishIssue({ mediaCount: 1, hasPiece: true, mediaReady: true, mediaApprovalReady: true, browserSpace: true, mediaVersionCompatible: true })).toBeNull();
+    expect(mediaLivePublishIssue({ mediaCount: 1, hasPiece: true, mediaReady: true, mediaApprovalReady: true, browserSpace: false })).toBeNull();
+  });
+  it("does not confuse immutable storage with a reviewed and approved file snapshot", () => {
+    expect(mediaLivePublishIssue({ mediaCount: 1, hasPiece: true, mediaReady: true })).toMatch(/승인 기록/);
+    expect(mediaLivePublishIssue({ mediaCount: 1, hasPiece: true, mediaReady: true, mediaApprovalReady: false })).toMatch(/승인 기록/);
   });
 });

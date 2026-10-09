@@ -9,6 +9,7 @@ import { libraryReviewEvidence, manualContentOutputHash } from "./lib/pieces";
 import { isActiveSuperAdmin, requireSuperAdmin } from "./lib/rbac";
 import { decorate, requestGenerateFor, type AdminMaterialSnapshot } from "./content";
 import { canonicalJson } from "./jobs";
+import { mediaMatchesSources } from "./lib/mediaIntegrity";
 
 const materialKindValidator = v.union(v.literal("FILE"), v.literal("TEXT"), v.literal("LINK"));
 const rightsStatusValidator = v.union(v.literal("OWNED"), v.literal("LICENSED"), v.literal("LINK_ONLY"));
@@ -966,7 +967,7 @@ export const publishCollection = mutation({
         if (isMediaMaterial(material)) return [materialDeliveryUrl(material)!];
         return [];
       }));
-      if (piece.mediaUrls.some((url) => !allowedMedia.has(url)))
+      if (!(await mediaMatchesSources(ctx, piece.mediaUrls, allowedMedia)))
         fail("CONFLICT", "권리 검수된 운영 자료가 아닌 미디어가 콘텐츠에 포함되어 있습니다.");
       const review = await libraryReviewEvidence(ctx, piece);
       if (!review.ok) fail("CONFLICT", review.reason);

@@ -485,6 +485,7 @@ export default defineSchema({
     jitterMinutes: v.number(),
     text: v.string(),
     mediaUrls: v.array(v.string()),
+    mediaIntegrity: v.optional(v.array(v.object({ url: v.string(), sha256: v.string(), sizeBytes: v.number(), mimeType: v.string() }))),
     linkId: v.optional(v.id("marketingLinks")),
     pieceId: v.optional(v.id("contentPieces")),
     contentChannel: v.optional(v.union(v.literal("INSTAGRAM_FEED"), v.literal("INSTAGRAM_REEL"), v.literal("THREADS"), v.literal("X"), v.literal("TIKTOK"), v.literal("BLOG"))),
@@ -646,6 +647,7 @@ export default defineSchema({
     .index("by_inputHash", ["inputHash"]),
 
   contentPieces: defineTable({
+    mediaFreezeId: v.optional(v.id("contentMediaFreezes")),
     ownerUserId: v.optional(v.id("users")),
     visibility: v.union(v.literal("PRIVATE"), v.literal("SHARED")),
     /** Operator supply collection. User copies retain lineage but are detached from its lifecycle. */
@@ -698,6 +700,21 @@ export default defineSchema({
     .index("by_run", ["runId"]),
 
   /** Immutable operator inputs used to author the shared content library. */
+  contentMediaFreezes: defineTable({
+    pieceId: v.id("contentPieces"), userId: v.id("users"),
+    status: v.union(v.literal("PENDING"), v.literal("RUNNING"), v.literal("SUCCEEDED"), v.literal("FAILED")),
+    inputHash: v.string(), sourceUrls: v.array(v.string()), resultUrls: v.array(v.string()),
+    rightsNote: v.string(), completedCount: v.number(),
+    error: v.optional(v.string()), createdAt: v.number(), expiresAt: v.number(), finishedAt: v.optional(v.number()),
+  }).index("by_status_expiry", ["status", "expiresAt"]).index("by_user_created", ["userId", "createdAt"]),
+
+  contentMediaAssets: defineTable({
+    requestId: v.id("contentMediaFreezes"), createdBy: v.id("users"), storageId: v.id("_storage"),
+    sourceUrl: v.string(), contentHash: v.string(), mimeType: v.string(), extension: v.string(), sizeBytes: v.number(),
+    rightsNote: v.string(), status: v.union(v.literal("STAGED"), v.literal("READY")),
+    createdAt: v.number(), expiresAt: v.number(),
+  }).index("by_request", ["requestId"]).index("by_storage", ["storageId"]).index("by_status_expiry", ["status", "expiresAt"]),
+
   contentSourceMaterials: defineTable({
     kind: v.union(v.literal("FILE"), v.literal("TEXT"), v.literal("LINK")),
     title: v.string(),

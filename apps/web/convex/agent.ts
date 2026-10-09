@@ -7,7 +7,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { httpAction, internalMutation, internalQuery, type ActionCtx } from "./_generated/server";
 import { sha256Hex } from "./lib/crypto";
 import { canonicalJson } from "./jobs";
-import { contentPieceEvidenceRunId, contentPieceFactEvidence, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, libraryReviewEvidence, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
+import { contentPieceEvidenceRunId, contentPieceFactEvidence, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, libraryReviewEvidence, mediaManifestsMatch, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
+import { resolveMediaIntegrity } from "./lib/mediaIntegrity";
 import { livePublishEnabled, PUBLISH_PROTOCOL_VERSION } from "./lib/publishPolicy";
 import { marketingRedirectUrl } from "./lib/publicUrl";
 import { publishReceiptUrl } from "./lib/publishReceipt";
@@ -20,6 +21,7 @@ import { DEMO_LINK_PUBLISH_MESSAGE, isDemoMarketingLink } from "./lib/marketingL
 /** 데스크톱 에이전트 HTTP 계약 (blogautomcp remote-agent 계승). 인증: Authorization: Bearer <deviceToken>. */
 
 export const MIN_PUBLISH_DESKTOP_VERSION = "0.1.13";
+export const MIN_MEDIA_PUBLISH_DESKTOP_VERSION = "0.1.18";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
@@ -217,6 +219,11 @@ export const claimJob = internalMutation({
       .sort((a, b) => a.runAfter - b.runAfter || a.createdAt - b.createdAt);
     for (const j of candidates) {
       if (j.executor === "CLOUD") continue;
+      if (j.jobType === "post.publish") {
+        const publishPayload = j.payload as PublishPayload;
+        if (publishPayload.dryRun !== true && publishPayload.mediaUrls.length > 0
+          && !versionAtLeast(appVersion, MIN_MEDIA_PUBLISH_DESKTOP_VERSION)) continue;
+      }
       if (j.spaceId) {
         const s = await ctx.db.get(j.spaceId);
         if (!s) {
@@ -349,11 +356,11 @@ export const preflightJob = internalMutation({
       const standardPassed = (piece.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
       if (!standardPassed || (!contentPieceHasOperatorSupplyLineage(piece) && run?.status !== "COMPLETED"))
         return deny("CONTENT_REVIEW_REQUIRED", "전체 제작 실행의 품질 검수와 사람 승인이 완료되지 않았습니다.");
-      const review = await workflowReviewEvidence(ctx, piece);
+      const review = await workflowReviewEvidence(ctx, piece, { allowUnfrozenMedia: payload.dryRun === true });
       if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED", review.reason);
     }
-    if (piece && !pieceEvidenceRunId && contentPieceHasOperatorSupplyLineage(piece)) {
-      const review = await libraryReviewEvidence(ctx, piece);
+    if (piece && !pieceEvidenceRunId && (contentPieceHasOperatorSupplyLineage(piece) || (piece.mediaUrls.length > 0 && payload.dryRun !== true))) {
+      const review = await libraryReviewEvidence(ctx, piece, { allowUnfrozenMedia: payload.dryRun === true });
       if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED", review.reason);
     }
     if (piece && CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) return deny("CONTENT_PLATFORM_MISMATCH", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
@@ -373,6 +380,18 @@ export const preflightJob = internalMutation({
       ...(piece ? { contentChannel: piece.channel as PublishPayload["contentChannel"] } : {}),
     });
     if (payloadError) return deny("PUBLISH_PAYLOAD_INVALID", `발행 내용 오류: ${payloadError}`);
+    if (payload.dryRun !== true && payload.mediaUrls.length > 0) {
+      if (!piece) return deny("MEDIA_REVIEW_REQUIRED", "미디어를 콘텐츠에 저장하고 원본 고정·사용권 검수를 완료하세요.");
+      const integrity = await resolveMediaIntegrity(ctx, payload.mediaUrls);
+      if (!integrity.ok) return deny("MEDIA_INTEGRITY_REQUIRED", integrity.reason);
+      if (!mediaManifestsMatch(payload.mediaIntegrity, integrity.manifest))
+        return deny("MEDIA_INTEGRITY_CHANGED", "승인된 미디어 파일 명세가 변경되었습니다. 새 게시 작업을 등록하세요.");
+      if (j.executor !== "CLOUD") {
+        const device = j.claimedByDeviceId ? await ctx.db.get(j.claimedByDeviceId) : null;
+        if (!device || !versionAtLeast(device.appVersion, MIN_MEDIA_PUBLISH_DESKTOP_VERSION))
+          return deny("DESKTOP_UPDATE_REQUIRED", `미디어 게시에는 PC 앱 ${MIN_MEDIA_PUBLISH_DESKTOP_VERSION} 이상이 필요합니다.`);
+      }
+    }
     if (piece) {
       if (pieceEvidenceRunId && piece.productId && !link) return deny("CONTENT_LINK_REQUIRED", "제작 워크플로 콘텐츠에는 승인된 상품 링크가 필요합니다.");
       const outputHash = await contentPiecePublishOutputHash(piece);
@@ -569,6 +588,10 @@ export const markDesktopPublishAttempted = internalMutation({
     if (!job || job.jobType !== "post.publish" || job.status !== "RUNNING" || job.claimedByDeviceId !== args.deviceId) return { ok: false as const, reason: "JOB_NOT_ACTIVE" };
     if (args.attemptNo === undefined || !args.leaseTokenHash || args.attemptNo !== job.attemptNo || args.leaseTokenHash !== job.leaseTokenHash) return { ok: false as const, reason: "STALE_ATTEMPT" };
     if ((job.leaseUntil ?? 0) < now) return { ok: false as const, reason: "LEASE_EXPIRED" };
+    if ((job.payload as PublishPayload).mediaUrls.length > 0) {
+      const device = await ctx.db.get(args.deviceId);
+      if (!device || !versionAtLeast(device.appVersion, MIN_MEDIA_PUBLISH_DESKTOP_VERSION)) return { ok: false as const, reason: "DESKTOP_UPDATE_REQUIRED" };
+    }
     const policy = await validatePublishAttemptPolicy(ctx, job, now);
     if (!policy.ok) return policy;
     await ctx.db.patch(job._id, { publishAttemptedAt: now, stage: "browser_publish_attempted", updatedAt: now });
@@ -596,6 +619,10 @@ export const revalidateDesktopPublishContinuation = internalMutation({
     if (args.attemptNo === undefined || !args.leaseTokenHash || args.attemptNo !== job.attemptNo || args.leaseTokenHash !== job.leaseTokenHash)
       return { ok: false as const, reason: "STALE_ATTEMPT" };
     if ((job.leaseUntil ?? 0) < now) return { ok: false as const, reason: "LEASE_EXPIRED" };
+    if ((job.payload as PublishPayload).mediaUrls.length > 0) {
+      const device = await ctx.db.get(args.deviceId);
+      if (!device || !versionAtLeast(device.appVersion, MIN_MEDIA_PUBLISH_DESKTOP_VERSION)) return { ok: false as const, reason: "DESKTOP_UPDATE_REQUIRED" };
+    }
     const policy = await validatePublishAttemptPolicy(ctx, job, now, { continuation: true });
     if (!policy.ok) return policy;
     await ctx.db.patch(job._id, { stage: "browser_publish_continuation_authorized", updatedAt: now });
