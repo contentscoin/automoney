@@ -32,6 +32,14 @@
 
 운영 환경 읽기 확인: `LIVE_PUBLISH_ENABLED=false`, `ATTRANGS_MODE=mock`, `META_MODE=mock`. Meta 앱 자격증명은 미설정. 이번 작업으로 이 플래그를 실제 게시 모드로 바꾸지 않았다.
 
+배포 확인:
+
+- 구현 커밋: `3ca7addbd276a16d4b99e8ab246a9e71894bb3b5` (기존 개발 브랜치에 push 완료).
+- Convex production `resilient-cheetah-311`: 스키마 검증·함수 배포 성공, 삭제된 인덱스 없음. 공개 준비상태 조회에서 live off / partner mock / Meta 미설정 / 공개 URL 정상 확인.
+- 웹: [운영 사이트](https://automoney-eight.vercel.app), Vercel `dpl_3z9KKPktgbvcMXDAFNaA9iAofNzR`가 READY. 로그인 화면 HTTP 200, 미인증 공급실·게시 화면은 로그인으로 307 이동 확인.
+- PC 앱: [0.1.17 릴리스](https://github.com/contentscoin/automoney/releases/tag/desktop-v0.1.17), Windows x64 설치 프로그램과 Mac arm64 DMG/ZIP 및 업데이트 메타데이터 공개 완료. [빌드·테스트·릴리스 실행](https://github.com/contentscoin/automoney/actions/runs/37913158747) 성공.
+- 사용자 기존 `work/` 폴더는 수정·커밋·웹 업로드하지 않았다. 웹 배포는 커밋의 깨끗한 소스 사본에서 진행했다.
+
 ---
 
 기준일: 2026-09-22  

@@ -13,6 +13,7 @@
 - `MOCK`/`DEMO` 링크는 서버에서도 실제 게시와 예약 실행을 차단한다. origin이 없는 기존 링크는 하위 호환을 유지하므로 상시 live 전환 전 운영 링크를 점검하여 실제 파트너 링크만 사용한다.
 - 상품 사실 검사는 수동 작성·편집·공유 조회·게시 등록·사전검사·게시 직전·예약 실행에 적용한다. 가격 변경으로 막힌 결과는 상품 근거를 확인하고 새 내용으로 수정·재검수한다.
 - 읽기 확인한 현재 production은 live off / 파트너 mock / Meta mock이며 Meta 앱 자격증명이 없다. 코드 배포로 이 설정을 자동 활성화하지 않는다. 운영자 로그인 상태의 end-to-end 실계정 테스트와 원격 미디어 바이트 고정은 별도의 출시 조건이다.
+- 배포 완료: 코드 `3ca7add`, Convex `resilient-cheetah-311`, Vercel `dpl_3z9KKPktgbvcMXDAFNaA9iAofNzR`, 데스크톱 `desktop-v0.1.17` (Windows x64 / Mac arm64). PC 콘텐츠 생성 최소 호환 버전은 0.1.16을 유지하지만 최신 품질 검사는 0.1.17에 포함되므로 업데이트를 권장한다.
 
 1. `ATTRANGS_MODE`, Meta mock/graph 모드, Convex 대상이 배포 환경과 일치하는지 확인한다. `SITE_URL`은 브라우저와 SNS에서 접근 가능한 공개 HTTPS origin이어야 하며 localhost·HTTP·사설 IP를 사용하지 않는다. 운영 live Meta 게시에는 `META_MODE=graph`와 실제 앱 자격증명이 모두 필요하며 mock 계정은 테스트 harness 외 실게시에서 차단된다. `LIVE_PUBLISH_ENABLED`의 기본값은 off이므로 검증 전과 승인된 실게시 시간 외에는 미설정 또는 `false`로 둔다.
 2. 운영 요율·파트너 CSV·링크 풀을 테스트 fixture와 분리하고, 실제 값이 미확정이면 발급·정산 기능을 활성화하지 않는다.
