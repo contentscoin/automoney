@@ -35,7 +35,13 @@
 - 저장 직후 연결 전에 프로세스가 강제 종료되면 식별되지 않은 미사용 blob이 남을 수 있다. 자동으로 기존 저장소를 추정 삭제하지 않는다. 비용 관찰·권리 철회/보존 정책·앱 코드 서명은 운영 잔여 과제로 runbook에 기록했다.
 - 배포 전 production DB snapshot: `1791542589834566691`. 로컬 보관: `D:\CodexData\Documents\Codex\automoney-backups\media-predeploy-20261009-194308.zip` (기존 파일 저장소는 변경·삭제하지 않음).
 
-배포 결과는 완료 확인 후 이 절에 추가한다.
+배포 확인:
+
+- 구현 커밋 `eb58ccbc634cac10c8a278cfef6fae007c4408a0`, 기존 개발 브랜치 push 완료.
+- Convex production `resilient-cheetah-311` 스키마·함수 배포 성공. 새 미디어 테이블 인덱스 5개 추가, 기존 인덱스 삭제 없음. 준비상태 조회에서 live off / partner mock / Meta 미설정 / 미디어 PC 최소 0.1.18 확인. 잘못된 파일 ID의 공개 경로는 404 반환.
+- [운영 웹](https://automoney-eight.vercel.app): Vercel `dpl_9DbY6wMjBohtdYZu6pDcpoxeMHV1` READY. 로그인 200, 미인증 공급실·게시 화면은 로그인으로 307 이동 확인.
+- PC [0.1.18 릴리스](https://github.com/contentscoin/automoney/releases/tag/desktop-v0.1.18): Windows x64 EXE, Mac arm64 DMG/ZIP 및 업데이트 메타데이터 공개 완료. [빌드·테스트·릴리스 실행](https://github.com/contentscoin/automoney/actions/runs/37919685113) 성공. 운영 웹의 Windows/Mac 다운로드 경로가 각각 0.1.18 설치 파일로 302 이동하는 것을 확인했다. 앱 코드 서명 완료를 의미하지 않는다.
+- 기존 `work/`는 수정·커밋·업로드하지 않았으며 웹은 커밋 소스의 깨끗한 사본으로 배포했다.
 
 ## 2026-10-09 콘텐츠 운영 보강 결과
 
