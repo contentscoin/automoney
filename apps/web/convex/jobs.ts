@@ -13,6 +13,7 @@ import { publicationIdentity } from "./lib/publishIdentity";
 import { internal } from "./_generated/api";
 import { sha256Hex } from "./lib/crypto";
 import { metaLivePublishAvailable } from "./lib/meta";
+import { DEMO_LINK_PUBLISH_MESSAGE, isDemoMarketingLink } from "./lib/marketingLinkPolicy";
 
 const MAX_EXECUTION_ATTEMPTS = 3;
 const MAX_QUEUE_AGE_MS = 24 * 60 * 60_000;
@@ -79,6 +80,11 @@ export async function enqueueJob(ctx: MutationCtx, input: EnqueueInput): Promise
     if (publishPayload.spaceId !== publishSpace._id || publishPayload.platform !== publishSpace.platform)
       fail("INVALID_ARGUMENT", "게시 대상 스페이스와 페이로드가 일치하지 않습니다.");
     const dryRun = publishPayload.dryRun === true;
+    if (!dryRun && publishPayload.linkId) {
+      const link = await ctx.db.get(publishPayload.linkId as Id<"marketingLinks">);
+      if (!link || link.userId !== input.userId) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
+      if (isDemoMarketingLink(link)) fail("INVALID_ARGUMENT", DEMO_LINK_PUBLISH_MESSAGE);
+    }
     const identity = await publicationIdentity(ctx, publishSpace);
     if (!dryRun && publishSpace.sessionState !== "HEALTHY")
       fail("CONFLICT", "정상 상태로 확인된 게시 계정만 실게시 작업에 사용할 수 있습니다.");

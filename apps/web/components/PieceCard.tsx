@@ -38,6 +38,7 @@ export type PieceLike = {
   collectionStatus?: string | null;
   productId?: string | null;
   legacyBlocked?: boolean;
+  requiresStructuredReview?: boolean;
   productEvidence?: {
     name: string;
     price: number;
@@ -92,7 +93,8 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onRemove, onShare, o
   const [approving, setApproving] = useState(false);
   const [reviewState, setReviewState] = useState(() => ({ revision: reviewRevision, checklist: emptyReviewChecklist() }));
   const reviewChecklist = reviewState.revision === reviewRevision ? reviewState.checklist : emptyReviewChecklist();
-  const requiresStructuredReview = !!(p.runId || p.collectionId) && p.mine && p.status === "DRAFT" && !!onApprove;
+  const structuredReview = p.requiresStructuredReview ?? !!(p.runId || p.collectionId);
+  const requiresStructuredReview = structuredReview && p.mine && p.status === "DRAFT" && !!onApprove;
   const reviewCount = checkedReviewCount(reviewChecklist);
   const reviewComplete = isReviewChecklistComplete(reviewChecklist);
   const editedMediaUrls = media.split(/\s+/).filter(Boolean);
@@ -183,7 +185,7 @@ export function PieceCard({ p, onApprove, onReject, onEdit, onRemove, onShare, o
             {shortForm && <p id={`${fieldId}-shortform-media-help`} className="mt-1 text-xs font-medium text-amber-800">Reels·TikTok은 기존 정적 상품 이미지를 모두 지우고 HTTPS 영상 URL 1개로 교체해야 합니다.</p>}
             {mediaEditError && <p id={`${fieldId}-media-error`} className="mt-1 text-xs text-rose-700">{mediaEditError}</p>}
           </div>
-          {(p.runId || p.collectionId) && <p className="text-xs text-stone-500">수정 저장 시 새 출력으로 다시 평가되며 이전 사람 검토 체크는 초기화됩니다.</p>}
+          {structuredReview && <p className="text-xs text-stone-500">수정 저장 시 새 출력으로 다시 평가되며 이전 사람 검토 체크는 초기화됩니다.</p>}
           <div className="flex flex-wrap gap-2"><button className="btn-primary" type="button" aria-describedby={mediaEditError ? `${fieldId}-media-error` : undefined} onClick={async () => {
             if (mediaEditError) {
               document.getElementById(`${fieldId}-media-edit`)?.focus();

@@ -2,13 +2,15 @@
 
 import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { PieceCard } from "@/components/PieceCard";
 import type { ReviewChecklist } from "@/components/content-review";
 import { CHANNEL_LABEL, CHANNEL_ORDER } from "@/lib/content-format";
 import { dateTime, errorMessage } from "@/lib/format";
+import { MaterialEditor, CollectionEditor } from "@/components/ContentSupplyEditors";
+import { useReadiness } from "@/components/use-readiness";
 
 type MaterialKind = "FILE" | "TEXT" | "LINK";
 type RightsStatus = "OWNED" | "LICENSED" | "LINK_ONLY";
@@ -63,6 +65,7 @@ function fileSize(value?: number | null): string {
 }
 
 function validateFile(file: File): string | null {
+  if (file.size === 0) return "빈 파일은 등록할 수 없습니다. 파일을 다시 선택하세요.";
   if (!(FILE_TYPES as readonly string[]).includes(file.type)) return "JPG, PNG, WebP, GIF 이미지 또는 MP4, MOV, WebM 영상만 올릴 수 있습니다.";
   const image = file.type.startsWith("image/");
   const limit = image ? IMAGE_LIMIT : VIDEO_LIMIT;
@@ -80,24 +83,26 @@ function splitHashtags(value: string): string[] {
 
 export default function SuperContentPage() {
   const supplySummary = useQuery(api.adminContent.summary, {});
-  const materials = useQuery(api.adminContent.listMaterials, {});
-  const collections = useQuery(api.adminContent.listCollections, { limit: 50 });
+  const materialPage = usePaginatedQuery(api.adminContent.paginateMaterials, {}, { initialNumItems: 20 });
+  const collectionPage = usePaginatedQuery(api.adminContent.paginateCollections, {}, { initialNumItems: 12 });
+  const materials = materialPage.status === "LoadingFirstPage" ? undefined : materialPage.results;
+  const collections = collectionPage.status === "LoadingFirstPage" ? undefined : collectionPage.results;
+  const [materialSearch, setMaterialSearch] = useState("");
+  const [collectionSearch, setCollectionSearch] = useState("");
   const products = useQuery(api.products.search, { limit: 100 });
-  const devices = useQuery(api.devices.listMine);
+  const readiness = useReadiness();
   const requestGenerate = useMutation(api.adminContent.requestGenerate);
-  const activeDevice = devices?.find((device) => device.status === "ACTIVE");
+  const activeDevice = readiness?.device;
   const deviceOnline = !!activeDevice?.online;
-  const codexReady = !!(activeDevice?.snapshot as { codexLoggedIn?: boolean } | null)?.codexLoggedIn;
-  const appVersionReady = !!activeDevice && (() => {
-    const match = /^(\d+)\.(\d+)\.(\d+)/.exec(activeDevice.appVersion.trim());
-    if (!match) return false;
-    const parts = match.slice(1).map(Number);
-    return parts[0]! > 0 || parts[1]! > 1 || (parts[1] === 1 && parts[2]! >= 16);
-  })();
+  const codexReady = !!activeDevice?.codexInstalled && !!activeDevice?.codexLoggedIn;
+  const appVersionReady = !!activeDevice?.compatible;
 
   const generateUploadUrl = useMutation(api.adminContent.generateUploadUrl);
   const bindUpload = useMutation(api.adminContent.bindUpload);
   const createMaterial = useMutation(api.adminContent.createMaterial);
+  const updateMaterial = useMutation(api.adminContent.updateMaterial);
+  const updateCollection = useMutation(api.adminContent.updateCollection);
+  const discardCollection = useMutation(api.adminContent.discardCollection);
   const markMaterialReady = useMutation(api.adminContent.markMaterialReady);
   const archiveMaterial = useMutation(api.adminContent.archiveMaterial);
   const createCollection = useMutation(api.adminContent.createCollection);
@@ -159,6 +164,7 @@ export default function SuperContentPage() {
   const aiHasFactEvidence = !!pieceForm.productId || selectedPieceMaterials.some((material) =>
     !!material.productId || (material.kind === "TEXT" && !!material.bodyText?.trim()),
   );
+  const hasPendingRun = collection?.runs.some((run) => run.status === "PENDING") ?? false;
 
   const perform = async <T,>(key: string, action: () => Promise<T>, success?: string): Promise<T | null> => {
     setBusyAction(key);
@@ -253,7 +259,7 @@ export default function SuperContentPage() {
       title: collectionForm.title.trim(),
       summary: collectionForm.summary.trim() || undefined,
       tags: splitTags(collectionForm.tags),
-      sourceMaterialIds: selectedMaterialIds as Id<"contentSourceMaterials">[],
+      sourceMaterialIds: selectedMaterialIds.filter((id) => readyMaterials.some((material) => material._id === id)) as Id<"contentSourceMaterials">[],
     }), "콘텐츠 묶음 초안을 만들었습니다. 채널별 게시 초안을 추가하세요.");
     if (!result) return;
     setSelectedCollectionId(result.collectionId);
@@ -310,7 +316,7 @@ export default function SuperContentPage() {
   };
 
   const runPieceAction = async (action: () => Promise<unknown>, success: string) => {
-    const result = await perform("piece-action", action, success);
+    const result = await perform("piece-action", async () => { await action(); return true; }, success);
     return result !== null;
   };
 
@@ -322,7 +328,7 @@ export default function SuperContentPage() {
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold">콘텐츠 공급실</h1>
-          <p className="max-w-3xl text-sm text-stone-600">운영 자료를 등록하고 채널별 콘텐츠를 검토한 뒤 사용자 라이브러리에 공개합니다. 공개 전까지 모든 자료와 콘텐츠는 운영 화면에만 보입니다.</p>
+          <p className="max-w-3xl text-sm text-stone-600">운영 자료를 등록하고 채널별 콘텐츠를 검토한 뒤 사용자 라이브러리에 공개합니다. 검토를 마친 묶음만 사용자 라이브러리에 표시됩니다.</p>
         </div>
         <Link className="btn-ghost" href="/super/magazines">매거진·큐레이션 관리</Link>
       </header>
@@ -353,6 +359,7 @@ export default function SuperContentPage() {
           <div className="stat"><span className="k">사용자 공개 묶음</span><span className="v">{supplySummary.collections.published}</span></div>
         </section>
       )}
+      {supplySummary?.truncated && <p className="text-xs text-stone-600">현황 숫자는 최근 자료·묶음 기준의 부분 집계입니다. 이전 항목은 아래에서 더 불러올 수 있습니다.</p>}
 
       {notice && (
         <div className={`rounded-lg border p-3 text-sm ${notice.tone === "error" ? "border-rose-200 bg-rose-50 text-rose-900" : "border-emerald-200 bg-emerald-50 text-emerald-900"}`} role={notice.tone === "error" ? "alert" : "status"} aria-live={notice.tone === "error" ? "assertive" : "polite"}>
@@ -388,6 +395,7 @@ export default function SuperContentPage() {
               <input key={fileInputKey} id="supply-material-file" className="input p-2" type="file" required accept={FILE_ACCEPT} aria-describedby="supply-material-file-help" onChange={(event) => setMaterialFile(event.target.files?.[0] ?? null)} />
               <p id="supply-material-file-help" className="mt-1 text-xs text-stone-500">JPG·PNG·WebP·GIF 이미지는 10 MB 이하, MP4·MOV·WebM 영상은 20 MB 이하로 올려주세요.</p>
               <p className="mt-1 text-xs text-stone-500">파일은 게시 미디어로 연결되며 AI가 화면 속 상품 사실을 추론하지 않습니다. 관련 상품을 연결하거나 텍스트 자료를 함께 등록하세요.</p>
+              <p className="mt-1 text-xs text-stone-600">사용 준비를 완료한 파일은 배포 주소를 아는 사람이 볼 수 있습니다. 개인정보·비밀자료는 올리지 마세요.</p>
             </div>
           )}
           {materialForm.kind === "TEXT" && (
@@ -428,10 +436,11 @@ export default function SuperContentPage() {
             <div><h3 className="font-semibold">등록 자료</h3><p className="text-sm text-stone-500">사용 준비가 끝난 자료를 선택하면 다음 단계에서 하나의 콘텐츠 묶음으로 만들 수 있습니다.</p></div>
             <span className="text-sm font-medium">{selectedReadyCount}개 선택</span>
           </div>
+          <div className="mt-3"><label className="label" htmlFor="supply-material-search">불러온 자료에서 제목 검색</label><input id="supply-material-search" className="input" type="search" value={materialSearch} onChange={(event) => setMaterialSearch(event.target.value)} /></div>
           {materials === undefined && <p className="mt-3 text-sm text-stone-500" role="status">자료를 불러오는 중…</p>}
           {materials?.length === 0 && <div className="mt-3 rounded-lg bg-stone-50 p-4 text-sm text-stone-600"><strong className="block text-stone-800">아직 등록한 자료가 없습니다</strong><p className="mt-1">위 양식에서 첫 이미지, 영상, 문구 또는 링크를 등록하세요.</p></div>}
           <ul id="supply-material-list" tabIndex={-1} className="mt-3 grid gap-3 lg:grid-cols-2">
-            {materials?.map((material) => {
+            {materials?.filter((material) => material.title.toLocaleLowerCase().includes(materialSearch.toLocaleLowerCase())).map((material) => {
               const product = material.productId ? productById.get(material.productId) : null;
               const selectable = material.status === "READY";
               const selected = selectedMaterialIds.includes(material._id);
@@ -454,17 +463,20 @@ export default function SuperContentPage() {
                   <div className="mt-3 flex flex-wrap gap-2">
                     {(material.previewUrl || material.deliveryUrl) && <a className="btn-ghost" href={material.previewUrl ?? material.deliveryUrl!} target="_blank" rel="noreferrer">업로드 파일 보기<span className="sr-only">: {material.title} (새 창)</span></a>}
                     {material.externalUrl && <a className="btn-ghost" href={material.externalUrl} target="_blank" rel="noreferrer">출처 링크 보기<span className="sr-only">: {material.title} (새 창)</span></a>}
-                    {material.status === "DRAFT" && <button className="btn-primary" type="button" disabled={busyAction !== null} onClick={() => perform(`ready-${material._id}`, () => markMaterialReady({ materialId: material._id }), `‘${material.title}’ 자료를 콘텐츠 제작에 사용할 수 있습니다.`)}>사용 준비 완료</button>}
+                    {material.status === "DRAFT" && <button className="btn-primary" type="button" disabled={busyAction !== null} onClick={() => perform(`ready-${material._id}`, () => markMaterialReady({ materialId: material._id, expectedUpdatedAt: material.updatedAt }), `‘${material.title}’ 자료를 콘텐츠 제작에 사용할 수 있습니다.`)}>사용 준비 완료</button>}
                     {material.status !== "ARCHIVED" && <button className="btn-ghost" type="button" disabled={busyAction !== null} onClick={async () => {
                       if (!window.confirm(`‘${material.title}’ 자료를 보관할까요? 새 콘텐츠 묶음에서는 선택할 수 없게 됩니다.`)) return;
-                      const result = await perform(`archive-${material._id}`, () => archiveMaterial({ materialId: material._id }), `‘${material.title}’ 자료를 보관했습니다.`);
+                      const result = await perform(`archive-${material._id}`, async () => { await archiveMaterial({ materialId: material._id }); return true; }, `‘${material.title}’ 자료를 보관했습니다.`);
                       if (result !== null) setSelectedMaterialIds((current) => current.filter((id) => id !== material._id));
                     }}>자료 보관</button>}
+                    {material.status === "DRAFT" && <MaterialEditor key={material._id} material={material} products={products ?? []} busy={busyAction !== null} onSave={(value) => runPieceAction(() => updateMaterial(value), "자료를 수정했습니다. 사용 권한을 다시 확인하고 준비 완료로 바꾸세요.")} />}
                   </div>
                 </li>
               );
             })}
           </ul>
+          {materialSearch && materials && !materials.some((material) => material.title.toLocaleLowerCase().includes(materialSearch.toLocaleLowerCase())) && <p className="mt-3 text-sm text-stone-600">불러온 자료에 검색 결과가 없습니다. 검색어를 바꾸거나 이전 자료를 더 불러오세요.</p>}
+          {materialPage.status !== "Exhausted" && <button className="btn-ghost mt-3" type="button" disabled={materialPage.status !== "CanLoadMore"} onClick={() => materialPage.loadMore(20)}>{materialPage.isLoading ? "자료 불러오는 중…" : "이전 자료 더 불러오기"}</button>}
         </div>
       </section>
 
@@ -485,21 +497,23 @@ export default function SuperContentPage() {
             <textarea id="supply-collection-summary" className="input" rows={3} maxLength={500} value={collectionForm.summary} onChange={(event) => setCollectionForm({ ...collectionForm, summary: event.target.value })} />
           </div>
           <div className="sm:col-span-2 flex flex-wrap items-center gap-3">
-            <button className="btn-primary" disabled={busyAction !== null || selectedReadyCount === 0}>{busyAction === "create-collection" ? "묶음 만드는 중…" : `선택 자료 ${selectedReadyCount}개로 묶음 만들기`}</button>
+            <button className="btn-primary" disabled={busyAction !== null || selectedReadyCount === 0 || selectedReadyCount > 30}>{busyAction === "create-collection" ? "묶음 만드는 중…" : `선택 자료 ${selectedReadyCount}개로 묶음 만들기`}</button>
+            {selectedReadyCount > 30 && <span className="text-xs text-amber-800">묶음에는 최대 30개의 자료를 담을 수 있습니다.</span>}
             {selectedReadyCount === 0 && <span className="text-xs text-amber-800">1단계에서 사용 준비가 끝난 자료를 선택하세요.</span>}
           </div>
         </form>
 
         <div className="mt-6 border-t border-stone-200 pt-5">
           <h3 className="font-semibold">콘텐츠 묶음</h3>
+          <div className="mt-3"><label className="label" htmlFor="supply-collection-search">불러온 묶음에서 제목·태그 검색</label><input id="supply-collection-search" className="input" type="search" value={collectionSearch} onChange={(event) => setCollectionSearch(event.target.value)} /></div>
           {collections === undefined && <p className="mt-3 text-sm text-stone-500" role="status">묶음을 불러오는 중…</p>}
           {collections?.length === 0 && <div className="mt-3 rounded-lg bg-stone-50 p-4 text-sm text-stone-600"><strong className="block text-stone-800">아직 콘텐츠 묶음이 없습니다</strong><p className="mt-1">자료를 선택하고 첫 묶음을 만들어 채널별 게시 초안을 준비하세요.</p></div>}
           <ul className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {collections?.map((item) => {
+            {collections?.filter((item) => [item.title, ...item.tags].join(" ").toLocaleLowerCase().includes(collectionSearch.toLocaleLowerCase())).map((item) => {
               const active = selectedCollectionId === item._id;
               return (
                 <li key={item._id} className={`rounded-xl border p-4 ${active ? "border-orange-300 bg-orange-50" : "border-stone-200 bg-white"}`}>
-                  <div className="flex flex-wrap items-start justify-between gap-2"><h4 className="break-words font-semibold">{item.title}</h4><span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-medium">{COLLECTION_STATUS_LABEL[item.status as CollectionStatus]}</span></div>
+                  <div className="flex flex-wrap items-start justify-between gap-2"><h4 className="break-words font-semibold">{item.title}</h4><span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-medium">{item.discardedAt ? "폐기됨" : COLLECTION_STATUS_LABEL[item.status as CollectionStatus]}</span></div>
                   {item.summary && <p className="mt-2 text-sm text-stone-600">{item.summary}</p>}
                   <p className="mt-3 text-xs text-stone-600">자료 {item.materialCount}개 · 콘텐츠 {item.pieceCount}개 · 승인 {item.approvedPieceCount}개</p>
                   {item.tags.length > 0 && <p className="mt-1 break-words text-xs text-sky-700">{item.tags.map((tag) => `#${tag}`).join(" ")}</p>}
@@ -508,6 +522,8 @@ export default function SuperContentPage() {
               );
             })}
           </ul>
+          {collectionSearch && collections && !collections.some((item) => [item.title, ...item.tags].join(" ").toLocaleLowerCase().includes(collectionSearch.toLocaleLowerCase())) && <p className="mt-3 text-sm text-stone-600">불러온 묶음에 검색 결과가 없습니다. 검색어를 바꾸거나 이전 묶음을 더 불러오세요.</p>}
+          {collectionPage.status !== "Exhausted" && <button className="btn-ghost mt-3" type="button" disabled={collectionPage.status !== "CanLoadMore"} onClick={() => collectionPage.loadMore(12)}>{collectionPage.isLoading ? "묶음 불러오는 중…" : "이전 묶음 더 불러오기"}</button>}
         </div>
       </section>
 
@@ -525,6 +541,11 @@ export default function SuperContentPage() {
                 <div><div className="flex flex-wrap items-center gap-2"><h3 className="text-lg font-semibold">{collection.title}</h3><span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-medium">{COLLECTION_STATUS_LABEL[collection.status as CollectionStatus]}</span></div>{collection.summary && <p className="mt-1 text-sm text-stone-600">{collection.summary}</p>}</div>
                 <span className="text-xs text-stone-500">개정 {collection.revision} · {dateTime(collection.updatedAt)}</span>
               </div>
+              {hasPendingRun && <p className="mt-3 rounded-lg bg-sky-50 p-3 text-sm text-sky-950" role="status">AI 생성·결과 저장 중에는 묶음과 콘텐츠를 변경할 수 없습니다. 완료를 기다리거나 작업 결과에서 생성 작업을 취소하세요. <Link className="underline" href="/dashboard/jobs">작업 결과 확인</Link></p>}
+              {collection.status === "DRAFT" && <CollectionEditor key={collection._id} collection={collection} materials={[...new Map([...collection.materials, ...readyMaterials].map((material) => [material._id, material])).values()]} busy={busyAction !== null || hasPendingRun} onSave={(value) => runPieceAction(() => updateCollection(value), "묶음 정보를 수정했습니다.")} onDiscard={async () => {
+                if (!window.confirm(`‘${collection.title}’ 초안을 폐기할까요? 포함된 콘텐츠가 폐기되고 자료 연결이 해제됩니다. 되돌릴 수 없으며 감사 기록은 유지됩니다.`)) return;
+                await runPieceAction(() => discardCollection({ collectionId: collection._id, expectedRevision: collection.revision }), "초안 묶음을 폐기했습니다. 자료는 새 묶음에서 다시 사용할 수 있습니다.");
+              }} />}
               <dl className="mt-4 grid grid-cols-3 gap-2 text-center text-sm">
                 <div className="rounded-lg bg-stone-50 p-2"><dt className="text-xs text-stone-500">자료</dt><dd className="font-semibold tabular-nums">{collection.materials.length}</dd></div>
                 <div className="rounded-lg bg-stone-50 p-2"><dt className="text-xs text-stone-500">콘텐츠</dt><dd className="font-semibold tabular-nums">{collection.pieces.length}</dd></div>
@@ -591,9 +612,20 @@ export default function SuperContentPage() {
               <div><label className="label" htmlFor="supply-ai-message">전달할 핵심 메시지</label><textarea className="input" id="supply-ai-message" rows={3} maxLength={300} value={aiMessage} onChange={(event) => setAiMessage(event.target.value)} /></div>
               <p className="text-xs text-stone-600">선택 자료 {pieceMaterialIds.length}개 · 관련 상품 {pieceForm.productId ? productById.get(pieceForm.productId as Id<"products">)?.name : "자료의 연결 상품 자동 적용"}. 자료 원문과 사용권 근거는 요청 시점에 저장됩니다.</p>
               {!aiHasFactEvidence && <p className="text-xs font-medium text-amber-800">판매 상품을 연결하거나 내용이 입력된 텍스트 자료를 선택해야 합니다. 링크·이미지만으로 상품 사실을 만들지 않습니다.</p>}
-              <button className="btn-primary" disabled={busyAction !== null || !deviceOnline || !codexReady || !appVersionReady || !pieceMaterialIds.length || !aiChannels.length || !aiAudience.trim() || !aiHasFactEvidence}>{busyAction === "generate-ai" ? "생성 요청 중…" : "선택 자료로 AI 초안 생성"}</button>
+              {pieceMaterialIds.length > 10 && <p className="text-xs text-amber-800">AI 생성은 한 번에 최대 10개 자료를 사용할 수 있습니다. 근거 자료 선택을 줄이세요.</p>}
+              <button className="btn-primary" disabled={busyAction !== null || hasPendingRun || !readiness?.aiReady || !pieceMaterialIds.length || pieceMaterialIds.length > 10 || !aiChannels.length || !aiAudience.trim() || !aiHasFactEvidence}>{busyAction === "generate-ai" ? "생성 요청 중…" : hasPendingRun ? "AI 생성·저장 진행 중…" : "선택 자료로 AI 초안 생성"}</button>
             </form>}
-            {collection.runs.length > 0 && <section className="card" aria-labelledby="supply-ai-runs"><h3 id="supply-ai-runs" className="font-semibold">AI 생성 진행</h3><ul className="mt-3 space-y-2">{collection.runs.map((run) => <li key={run._id} className="rounded-lg bg-stone-50 p-3 text-sm"><p>{run.channels.map((channel) => CHANNEL_LABEL[channel as Channel]).join(" · ")} · {run.status === "PENDING" ? "PC 생성 대기·진행 중" : run.status === "QUARANTINED" ? "컬렉션 변경으로 결과 연결 제외" : run.status === "FAILED" ? "생성 실패" : "결과 검토 가능"}</p><p className="mt-1 text-xs text-stone-600">{dateTime(run.createdAt)}{run.quarantineReason && ` · ${run.quarantineReason}`}</p></li>)}</ul></section>}
+            {collection.runs.length > 0 && <section className="card" aria-labelledby="supply-ai-runs">
+              <h3 id="supply-ai-runs" className="font-semibold">AI 생성 진행</h3>
+              <ul className="mt-3 space-y-2">{collection.runs.map((run) => <li key={run._id} className="rounded-lg bg-stone-50 p-3 text-sm">
+                <p>{run.channels.map((channel) => CHANNEL_LABEL[channel as Channel]).join(" · ")} · {run.status === "PENDING" ? "PC 생성 대기·진행 중" : run.status === "QUARANTINED" ? "묶음 변경으로 결과 연결 제외" : run.status === "FAILED" ? "생성 실패" : "결과 검토 가능"}</p>
+                <p className="mt-1 text-xs text-stone-600">{dateTime(run.createdAt)}</p>
+                {run.errorMessage && <p className="mt-2 break-words text-rose-800">{run.errorMessage}</p>}
+                {run.status === "FAILED" && <p className="mt-1 text-xs text-stone-600">PC·Codex 연결과 선택 근거를 확인한 뒤 새 AI 생성을 요청하세요. 실패 기록은 유지됩니다.</p>}
+                {run.status === "QUARANTINED" && <p className="mt-1 text-xs text-stone-600">제작 당시와 현재 묶음이 달라 자동 연결하지 않았습니다. 현재 자료로 새로 생성하세요.</p>}
+                <Link className="mt-2 inline-block underline" href="/dashboard/jobs">생성 작업 상세·취소 확인</Link>
+              </li>)}</ul>
+            </section>}
             {collection.status === "DRAFT" && (
               <form className="card grid gap-3 sm:grid-cols-2" onSubmit={submitPiece}>
                 <div className="sm:col-span-2"><h3 className="font-semibold">채널별 콘텐츠 초안 추가</h3><p className="text-sm text-stone-500">선택 자료의 이미지·영상은 초안에 자동으로 연결됩니다.</p></div>
@@ -613,7 +645,7 @@ export default function SuperContentPage() {
                   <label className="label" htmlFor="supply-piece-script">숏폼 대본 (선택)</label>
                   <textarea id="supply-piece-script" className="input" rows={3} value={pieceForm.script} onChange={(event) => setPieceForm({ ...pieceForm, script: event.target.value })} />
                 </div>
-                <div className="sm:col-span-2"><button className="btn-primary" disabled={busyAction !== null || pieceMaterialIds.length === 0}>{busyAction === "add-piece" ? "초안 추가 중…" : "채널별 초안 추가"}</button></div>
+                <div className="sm:col-span-2"><button className="btn-primary" disabled={busyAction !== null || hasPendingRun || pieceMaterialIds.length === 0}>{busyAction === "add-piece" ? "초안 추가 중…" : "채널별 초안 추가"}</button></div>
               </form>
             )}
 
@@ -629,9 +661,9 @@ export default function SuperContentPage() {
                     ...(piece.productionMeta?.outputHash ? { expectedOutputHash: piece.productionMeta.outputHash } : {}),
                     reviewChecklist,
                   }), "콘텐츠를 승인했습니다.") : undefined}
-                  onEdit={collection.status === "DRAFT" ? (value) => runPieceAction(() => editPiece({ pieceId: piece._id, ...value }), "콘텐츠를 수정했습니다. 변경된 내용을 다시 검토하세요.") : undefined}
-                  onReject={collection.status === "DRAFT" ? (reason) => runPieceAction(() => rejectPiece({ pieceId: piece._id, reason }), "콘텐츠를 폐기했습니다.") : undefined}
-                  onRemove={collection.status === "DRAFT" ? async () => {
+                  onEdit={collection.status === "DRAFT" && !hasPendingRun && !busyAction ? (value) => runPieceAction(() => editPiece({ pieceId: piece._id, ...value }), "콘텐츠를 수정했습니다. 변경된 내용을 다시 검토하세요.") : undefined}
+                  onReject={collection.status === "DRAFT" && !hasPendingRun && !busyAction ? (reason) => runPieceAction(() => rejectPiece({ pieceId: piece._id, reason }), "콘텐츠를 폐기했습니다.") : undefined}
+                  onRemove={collection.status === "DRAFT" && !hasPendingRun && !busyAction ? async () => {
                     if (!window.confirm("이 콘텐츠를 묶음에서 제거할까요? 감사 기록은 유지되며 사용자에게 공개되지 않습니다.")) return;
                     await runPieceAction(() => removePiece({ collectionId: collection._id, pieceId: piece._id }), "콘텐츠를 묶음에서 제거했습니다.");
                   } : undefined}
@@ -661,7 +693,8 @@ export default function SuperContentPage() {
                 {collection.status === "DRAFT" && <span className="rounded-lg bg-stone-100 px-3 py-2 text-sm text-stone-600">3단계에서 검토를 시작하세요.</span>}
                 {collection.status === "IN_REVIEW" && <button className="btn-primary" type="button" disabled={busyAction !== null || !readyToPublish} onClick={() => confirmCollectionAction("publish")}>사용자에게 공개</button>}
                 {collection.status === "PUBLISHED" && <button className="btn-ghost" type="button" disabled={busyAction !== null} onClick={() => confirmCollectionAction("withdraw")}>사용자 공개 종료</button>}
-                {collection.status === "WITHDRAWN" && <button className="btn-primary" type="button" disabled={busyAction !== null} onClick={() => confirmCollectionAction("reopen")}>초안으로 다시 열기</button>}
+                {collection.status === "WITHDRAWN" && !collection.discardedAt && <button className="btn-primary" type="button" disabled={busyAction !== null} onClick={() => confirmCollectionAction("reopen")}>초안으로 다시 열기</button>}
+                {collection.discardedAt && <p className="text-sm text-stone-600">폐기한 묶음은 다시 열 수 없습니다. 2단계에서 새 묶음을 만드세요.</p>}
                 <Link className="btn-ghost" href="/dashboard/content">사용자 라이브러리 화면 보기</Link>
               </div>
             </div>

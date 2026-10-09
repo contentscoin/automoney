@@ -1,6 +1,6 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
-import { stripMatchingTrailingHashtagBlock } from "@automoney/shared";
+import { evaluatePiece, stripMatchingTrailingHashtagBlock, type Channel } from "@automoney/shared";
 import { sha256Hex } from "./crypto";
 import { fail } from "./errors";
 import { isActiveSuperAdmin } from "./rbac";
@@ -79,6 +79,30 @@ export async function contentPieceProductAvailable(
   return (await ctx.db.get(piece.productId))?.status === "ACTIVE";
 }
 
+/** Recheck today's catalog before distributing or publishing any saved revision. */
+export async function contentPieceFactEvidence(
+  ctx: MutationCtx | QueryCtx,
+  piece: Doc<"contentPieces">,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const product = piece.productId ? await ctx.db.get(piece.productId) : null;
+  const report = evaluatePiece({
+    channel: piece.channel as Channel,
+    caption: piece.caption,
+    hashtags: piece.hashtags,
+    script: piece.script,
+  }, {
+    products: product ? [{
+      attrangsProductId: product.attrangsProductId,
+      name: product.name,
+      price: product.price,
+      salePrice: product.salePrice,
+      category: product.category,
+    }] : [],
+  });
+  const blocks = report.violations.filter((violation) => violation.severity === "block");
+  return blocks.length ? { ok: false, reason: blocks.map((violation) => violation.message).join(" ") } : { ok: true };
+}
+
 export const completeContentReviewChecklist = (value: unknown): boolean => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const checklist = value as Record<string, unknown>;
@@ -130,6 +154,8 @@ export async function libraryReviewEvidence(
   ctx: MutationCtx | QueryCtx,
   piece: Doc<"contentPieces">,
 ): Promise<{ ok: true; outputHash: string } | { ok: false; reason: string }> {
+  const facts = await contentPieceFactEvidence(ctx, piece);
+  if (!facts.ok) return facts;
   const meta = piece.productionMeta as {
     outputHash?: unknown;
     standardPassed?: unknown;
@@ -185,7 +211,7 @@ export async function hashPiecePublishSnapshot(input: {
 
 /** 라이브러리 조각을 발행/예약 본문으로 읽는다. 사용 횟수는 실제 게시 성공 때만 증가한다. */
 export async function consumePiece(
-  ctx: MutationCtx,
+  ctx: MutationCtx | QueryCtx,
   userId: Id<"users">,
   pieceId: Id<"contentPieces">,
 ): Promise<{
@@ -205,6 +231,8 @@ export async function consumePiece(
     fail("CONFLICT", "판매 중이 아닌 상품의 콘텐츠는 게시할 수 없습니다.");
   if (!(await operatorSupplySourceAvailable(ctx, p)))
     fail("FORBIDDEN", "현재 공개 중인 운영 콘텐츠만 게시할 수 있습니다.");
+  const facts = await contentPieceFactEvidence(ctx, p);
+  if (!facts.ok) fail("CONFLICT", `${facts.reason} 콘텐츠를 수정하고 다시 승인하세요.`);
   const evidenceRunId = contentPieceEvidenceRunId(p);
   if (!evidenceRunId && p.generatedBy !== "manual")
     fail("CONFLICT", "이전 품질 계약으로 생성된 콘텐츠는 게시할 수 없습니다. 새 제작 워크플로로 다시 생성하세요.");
@@ -216,6 +244,10 @@ export async function consumePiece(
     if (!standardPassed || (!operatorSupplyLineage && run?.status !== "COMPLETED"))
       fail("CONFLICT", "전체 제작 실행의 품질 검수와 사람 승인이 완료된 콘텐츠만 게시할 수 있습니다.");
     const review = await workflowReviewEvidence(ctx, p);
+    if (!review.ok) fail("CONFLICT", `${review.reason} 콘텐츠를 다시 검토·승인하세요.`);
+  }
+  if (!evidenceRunId && contentPieceHasOperatorSupplyLineage(p)) {
+    const review = await libraryReviewEvidence(ctx, p);
     if (!review.ok) fail("CONFLICT", `${review.reason} 콘텐츠를 다시 검토·승인하세요.`);
   }
   if (

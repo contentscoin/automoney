@@ -5,6 +5,15 @@
 
 ## 1. 배포 전 확인
 
+### 2026-10-09 운영 준비 보강
+
+- 자료 수정·묶음 폐기·실행 중 변경 잠금과 공급실 페이지네이션을 추가했다. `discardedAt`/`discardedBy`는 선택 필드라 기존 데이터 이관은 필요하지 않다.
+- `markMaterialReady`의 검토 시각과 `updateMaterial`/`updateCollection`의 충돌 검사를 사용한다. 백엔드가 먼저 배포되는 짧은 전환 구간에는 오래 열린 공급실 탭을 새로고침한다.
+- `readiness.getMine`은 PC·SNS·live/partner 설정을 비밀값 없이 제공하며 웹은 30초마다 PC heartbeat 만료를 갱신한다. 게시 기본값은 dry-run, 실게시 off 상태에서 예약 신규 생성·재개는 UI에서 막는다.
+- `MOCK`/`DEMO` 링크는 서버에서도 실제 게시와 예약 실행을 차단한다. origin이 없는 기존 링크는 하위 호환을 유지하므로 상시 live 전환 전 운영 링크를 점검하여 실제 파트너 링크만 사용한다.
+- 상품 사실 검사는 수동 작성·편집·공유 조회·게시 등록·사전검사·게시 직전·예약 실행에 적용한다. 가격 변경으로 막힌 결과는 상품 근거를 확인하고 새 내용으로 수정·재검수한다.
+- 읽기 확인한 현재 production은 live off / 파트너 mock / Meta mock이며 Meta 앱 자격증명이 없다. 코드 배포로 이 설정을 자동 활성화하지 않는다. 운영자 로그인 상태의 end-to-end 실계정 테스트와 원격 미디어 바이트 고정은 별도의 출시 조건이다.
+
 1. `ATTRANGS_MODE`, Meta mock/graph 모드, Convex 대상이 배포 환경과 일치하는지 확인한다. `SITE_URL`은 브라우저와 SNS에서 접근 가능한 공개 HTTPS origin이어야 하며 localhost·HTTP·사설 IP를 사용하지 않는다. 운영 live Meta 게시에는 `META_MODE=graph`와 실제 앱 자격증명이 모두 필요하며 mock 계정은 테스트 harness 외 실게시에서 차단된다. `LIVE_PUBLISH_ENABLED`의 기본값은 off이므로 검증 전과 승인된 실게시 시간 외에는 미설정 또는 `false`로 둔다.
 2. 운영 요율·파트너 CSV·링크 풀을 테스트 fixture와 분리하고, 실제 값이 미확정이면 발급·정산 기능을 활성화하지 않는다.
 3. KYC 암호화 키와 key id를 별도 비밀 저장소에서 주입한다. 로그나 `.env` 예시에 실제 키를 남기지 않는다.

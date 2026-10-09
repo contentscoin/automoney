@@ -273,7 +273,7 @@ export const BANNED_CLAIMS: { re: RegExp; code: string; message: string }[] = [
   { re: /100%|완벽하게|무조건|절대/, code: "ABSOLUTE_CLAIM", message: "절대 표현 금지" },
   { re: /효능|치료|다이어트 효과|살 빠지/, code: "HEALTH_CLAIM", message: "효능·건강 주장 금지" },
 ];
-/** ProductBrief에 근거 필드가 아직 없는 운영·재고 주장은 V2에서 보수적으로 차단한다. */
+/** ProductBrief에 근거 필드가 아직 없는 운영·재고 주장은 모든 제작 경로에서 차단한다. */
 export const UNVERIFIED_CATALOG_CLAIM_RE = /오늘\s*출발|당일\s*배송|무료\s*(?:배송|교환|반품)|(?:교환|반품)\s*무료|자체\s*제작|품절\s*임박|재고\s*(?:\d+|소진)|누적\s*(?:판매|주문)|(?:리뷰|후기)\s*\d+/i;
 /** ProductBrief에 소재·색상·착용 효과 근거가 없으므로 추론성 상품 속성도 보수적으로 차단한다. */
 export const UNVERIFIED_PRODUCT_ATTRIBUTE_RE = /(?:울|캐시미어|면|코튼|폴리에스터|레이온|나일론|스판)\s*\d+\s*%|체형\s*(?:보정|커버)|키가\s*커\s*보|다리가\s*길어\s*보|날씬해\s*보|신축성(?:이)?\s*(?:좋|뛰어|우수)|비침(?:이)?\s*(?:없|적)|구김(?:이)?\s*(?:없|적)|촉감(?:이)?\s*(?:부드럽|좋)/i;
@@ -283,7 +283,7 @@ export interface EvaluatePieceOptions {
   linkExpected?: boolean;
   products?: ProductBrief[];
   brief?: ContentProductionBrief;
-  /** Supplying a standard opts into the V2 hard quality contract. */
+  /** Adds V2 editorial requirements. Factual safety checks always apply. */
   standard?: ContentProductionStandard;
 }
 
@@ -298,10 +298,13 @@ function emojiCount(value: string): number {
 }
 
 function mentionedWonAmounts(value: string): number[] {
-  return [...value.matchAll(/₩\s*(\d[\d,]*(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*만\s*원|(\d[\d,]*(?:\.\d+)?)\s*(?:원(?![가-힣])|KRW\b)/gi)]
+  // Korean particles are normally attached (e.g. "35,000원입니다"). Do not
+  // Accept attached price particles/endings, not nouns such as "3원칙" or
+  // "상품 100001 원단". Apply that boundary to mixed-unit prices as well.
+  return [...value.matchAll(/₩\s*(\d[\d,]*(?:\.\d+)?)|(?:(\d+(?:\.\d+)?)\s*만\s*(?:(\d+(?:\.\d+)?)\s*천\s*)?(?:(\d{1,4})\s*)?|(\d+(?:\.\d+)?)\s*천\s*|(\d[\d,]*(?:\.\d+)?)\s*)원(?=$|[^가-힣A-Za-z0-9]|(?:입니다|이에요|이며|이고|이면|이어서|이라|으로|부터|까지|짜리)|(?:은|는|이|을|를|에|의|도|만|과|와|대|인)(?=$|[^가-힣]))|(\d[\d,]*(?:\.\d+)?)\s*KRW\b/gi)]
     .map((match) => match[2]
-      ? Number(match[2]) * 10_000
-      : Number((match[1] ?? match[3] ?? "").replace(/,/g, "")))
+      ? Number(match[2]) * 10_000 + Number(match[3] ?? 0) * 1_000 + Number(match[4] ?? 0)
+      : match[5] ? Number(match[5]) * 1_000 : Number((match[1] ?? match[6] ?? match[7] ?? "").replace(/,/g, "")))
     .filter(Number.isFinite);
 }
 
@@ -323,7 +326,20 @@ export function evaluatePiece(piece: GeneratedPiece, opts: EvaluatePieceOptions 
   let hashtags = [...new Set((piece.hashtags ?? []).map((h) => h.trim().replace(/^#/, "")).filter(Boolean))];
 
   if (!caption) violations.push({ code: "EMPTY", message: "본문이 비어 있습니다.", severity: "block" });
-  for (const b of BANNED_CLAIMS) if (b.re.test(caption)) violations.push({ code: b.code, message: b.message, severity: "block" });
+  // Authorship never makes a claim factual. Apply the same checks to manual
+  // captions, scripts and hashtags as to generated outputs, before trimming.
+  const factualText = [caption, piece.script ?? "", hashtags.join(" ")].join("\n");
+  for (const b of BANNED_CLAIMS) if (b.re.test(factualText)) violations.push({ code: b.code, message: b.message, severity: "block" });
+  if (UNVERIFIED_CATALOG_CLAIM_RE.test(factualText))
+    violations.push({ code: "UNVERIFIED_CATALOG_CLAIM", message: "카탈로그 근거가 없는 배송·교환·재고·판매량 주장은 사용할 수 없습니다.", severity: "block" });
+  if (UNVERIFIED_PRODUCT_ATTRIBUTE_RE.test(factualText))
+    violations.push({ code: "UNVERIFIED_PRODUCT_ATTRIBUTE", message: "제공된 상품 근거에 없는 소재 함량·착용 효과·신축성·비침·촉감 주장은 사용할 수 없습니다.", severity: "block" });
+  const allowedPrices = new Set((opts.products ?? []).flatMap((product) =>
+    [product.price, product.salePrice].filter((price): price is number => typeof price === "number" && Number.isFinite(price)).map(Math.round),
+  ));
+  const mismatchedPrices = [...new Set(mentionedWonAmounts(factualText))].filter((price) => !allowedPrices.has(price));
+  if (mismatchedPrices.length > 0)
+    violations.push({ code: "PRICE_MISMATCH", message: `연결된 상품 가격으로 확인할 수 없는 금액입니다: ${mismatchedPrices.map((price) => `${price.toLocaleString("ko-KR")}원`).join(", ")}. 상품을 연결하거나 금액을 수정하세요.`, severity: "block" });
 
   // 광고 표기 자동 삽입 (표시광고법)
   if (!AD_DISCLOSURE_RE.test(caption) && !hashtags.includes("광고")) {
@@ -390,22 +406,6 @@ export function evaluatePiece(piece: GeneratedPiece, opts: EvaluatePieceOptions 
           severity: "block",
         });
     }
-    for (const banned of BANNED_CLAIMS) {
-      if (banned.re.test(fullText) && !violations.some((violation) => violation.code === banned.code))
-        violations.push({ code: banned.code, message: banned.message, severity: "block" });
-    }
-    if (UNVERIFIED_CATALOG_CLAIM_RE.test(fullText))
-      violations.push({
-        code: "UNVERIFIED_CATALOG_CLAIM",
-        message: "카탈로그 근거가 없는 배송·교환·재고·판매량 주장은 사용할 수 없습니다.",
-        severity: "block",
-      });
-    if (UNVERIFIED_PRODUCT_ATTRIBUTE_RE.test(fullText))
-      violations.push({
-        code: "UNVERIFIED_PRODUCT_ATTRIBUTE",
-        message: "제공된 상품 근거에 없는 소재 함량·착용 효과·신축성·비침·촉감 주장은 사용할 수 없습니다.",
-        severity: "block",
-      });
     const normalizedFullText = fullText.toLowerCase();
     const hasProductReference = (opts.products ?? []).length === 0 || (opts.products ?? []).some((product) => {
       if (product.name.trim() && normalizedFullText.includes(product.name.trim().toLowerCase())) return true;
@@ -450,21 +450,6 @@ export function evaluatePiece(piece: GeneratedPiece, opts: EvaluatePieceOptions 
         });
     }
 
-    const allowedPrices = new Set(
-      (opts.products ?? []).flatMap((product) =>
-        [product.price, product.salePrice]
-          .filter((price): price is number => typeof price === "number" && Number.isFinite(price))
-          .map((price) => Math.round(price)),
-      ),
-    );
-    const mismatchedPrices = [...new Set(mentionedWonAmounts(`${caption}\n${piece.script ?? ""}`))]
-      .filter((price) => !allowedPrices.has(price));
-    if (mismatchedPrices.length > 0)
-      violations.push({
-        code: "PRICE_MISMATCH",
-        message: `제공된 상품 가격과 다른 금액입니다: ${mismatchedPrices.map((price) => `${price.toLocaleString("ko-KR")}원`).join(", ")}`,
-        severity: "block",
-      });
   }
 
   // 점수: 훅 길이, 줄바꿈 가독성, CTA, AI 상투어

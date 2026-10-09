@@ -7,7 +7,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { httpAction, internalMutation, internalQuery, type ActionCtx } from "./_generated/server";
 import { sha256Hex } from "./lib/crypto";
 import { canonicalJson } from "./jobs";
-import { contentPieceEvidenceRunId, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
+import { contentPieceEvidenceRunId, contentPieceFactEvidence, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, libraryReviewEvidence, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
 import { livePublishEnabled, PUBLISH_PROTOCOL_VERSION } from "./lib/publishPolicy";
 import { marketingRedirectUrl } from "./lib/publicUrl";
 import { publishReceiptUrl } from "./lib/publishReceipt";
@@ -15,6 +15,7 @@ import { publicationIdentity } from "./lib/publishIdentity";
 import { validatePublishAttemptPolicy } from "./lib/publishAttempt";
 import { metaLivePublishAvailable } from "./lib/meta";
 import { isActiveSuperAdmin } from "./lib/rbac";
+import { DEMO_LINK_PUBLISH_MESSAGE, isDemoMarketingLink } from "./lib/marketingLinkPolicy";
 
 /** 데스크톱 에이전트 HTTP 계약 (blogautomcp remote-agent 계승). 인증: Authorization: Bearer <deviceToken>. */
 
@@ -128,13 +129,13 @@ async function handlePublishAttempt(ctx: ActionCtx, request: Request): Promise<R
   const jobId = url.pathname.split("/").filter(Boolean).at(-2) as Id<"agentJobs"> | undefined;
   if (!jobId) return err("INVALID_ARGUMENT", "job id missing", 400);
   const body = (await readJson(request)) ?? {};
-  const recorded = await ctx.runMutation(internal.agent.markDesktopPublishAttempted, {
+  const result = await ctx.runMutation(internal.agent.markDesktopPublishAttempted, {
     jobId,
     deviceId: dev.deviceId,
     attemptNo: typeof body.attemptNo === "number" ? body.attemptNo : undefined,
     leaseTokenHash: typeof body.leaseToken === "string" ? await sha256Hex(body.leaseToken) : undefined,
   });
-  if (!recorded) return err("CONFLICT", "publish attempt is not authorized", 409);
+  if (!result.ok) return err(result.reason, "게시 실행 조건이 변경되었습니다. 작업 원인을 확인한 뒤 다시 등록하세요.", 409);
   return json({ success: true, data: { recorded: true } });
 }
 
@@ -333,6 +334,8 @@ export const preflightJob = internalMutation({
     if (piece) {
       if (!(await operatorSupplySourceAvailable(ctx, piece))) return deny("CONTENT_UNAVAILABLE", "운영 콘텐츠 공개가 종료되었습니다.");
       if (!(await contentPieceProductAvailable(ctx, piece))) return deny("CONTENT_PRODUCT_INACTIVE", "연결된 상품이 현재 판매 중이 아닙니다.");
+      const facts = await contentPieceFactEvidence(ctx, piece);
+      if (!facts.ok) return deny("CONTENT_FACTS_CHANGED", facts.reason);
       const accessible = piece.ownerUserId === j.userId || piece.visibility === "SHARED" || isActiveSuperAdmin(user);
       if (!accessible) return deny("CONTENT_UNAVAILABLE", "승인된 콘텐츠에 더 이상 접근할 수 없습니다.");
       if (payload.contentChannel && payload.contentChannel !== piece.channel)
@@ -349,10 +352,15 @@ export const preflightJob = internalMutation({
       const review = await workflowReviewEvidence(ctx, piece);
       if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED", review.reason);
     }
+    if (piece && !pieceEvidenceRunId && contentPieceHasOperatorSupplyLineage(piece)) {
+      const review = await libraryReviewEvidence(ctx, piece);
+      if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED", review.reason);
+    }
     if (piece && CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform) return deny("CONTENT_PLATFORM_MISMATCH", "콘텐츠 채널과 게시 계정 플랫폼이 일치하지 않습니다.");
     const link = payload.linkId ? await ctx.db.get(payload.linkId as Id<"marketingLinks">) : null;
     if (payload.linkId && (!link || link.userId !== j.userId)) return deny("LINK_NOT_FOUND", "마케팅 링크를 찾을 수 없습니다.");
     if (link?.status !== undefined && link.status !== "ACTIVE") return deny("LINK_INACTIVE", "비활성 마케팅 링크는 게시할 수 없습니다.");
+    if (!payload.dryRun && link && isDemoMarketingLink(link)) return deny("DEMO_LINK_NOT_PUBLISHABLE", DEMO_LINK_PUBLISH_MESSAGE);
     if (piece?.productId && link && piece.productId !== link.productId) return deny("CONTENT_LINK_PRODUCT_MISMATCH", "콘텐츠 상품과 마케팅 링크 상품이 일치하지 않습니다.");
     const expectedLinkUrl = link ? marketingRedirectUrl(link.shortCode) : null;
     if (link && !expectedLinkUrl) return deny("PUBLIC_SITE_URL_INVALID", "SITE_URL은 공개 HTTPS 주소로 설정해야 합니다.");
@@ -558,13 +566,13 @@ export const markDesktopPublishAttempted = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const job = await ctx.db.get(args.jobId);
-    if (!job || job.jobType !== "post.publish" || job.status !== "RUNNING" || job.claimedByDeviceId !== args.deviceId) return false;
-    if (args.attemptNo === undefined || !args.leaseTokenHash || args.attemptNo !== job.attemptNo || args.leaseTokenHash !== job.leaseTokenHash) return false;
-    if ((job.leaseUntil ?? 0) < now) return false;
+    if (!job || job.jobType !== "post.publish" || job.status !== "RUNNING" || job.claimedByDeviceId !== args.deviceId) return { ok: false as const, reason: "JOB_NOT_ACTIVE" };
+    if (args.attemptNo === undefined || !args.leaseTokenHash || args.attemptNo !== job.attemptNo || args.leaseTokenHash !== job.leaseTokenHash) return { ok: false as const, reason: "STALE_ATTEMPT" };
+    if ((job.leaseUntil ?? 0) < now) return { ok: false as const, reason: "LEASE_EXPIRED" };
     const policy = await validatePublishAttemptPolicy(ctx, job, now);
-    if (!policy.ok) return false;
+    if (!policy.ok) return policy;
     await ctx.db.patch(job._id, { publishAttemptedAt: now, stage: "browser_publish_attempted", updatedAt: now });
-    return true;
+    return { ok: true as const };
   },
 });
 

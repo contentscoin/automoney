@@ -1,4 +1,4 @@
-import { v, type ObjectType } from "convex/values";
+import { ConvexError, v, type ObjectType } from "convex/values";
 import {
   CHANNELS,
   contentMediaMax,
@@ -32,7 +32,9 @@ import { canonicalJson, enqueueJob } from "./jobs";
 import { playbookHintsFor } from "./analytics";
 import {
   completeContentReviewChecklist,
+  consumePiece,
   contentPieceEvidenceRunId,
+  contentPieceHasOperatorSupplyLineage,
   libraryReviewEvidence,
   manualContentOutputHash,
   workflowReviewEvidence,
@@ -866,6 +868,7 @@ const pieceView = (
   generatedBy: p.generatedBy,
   runId: contentPieceEvidenceRunId(p) ?? null,
   productionMeta: p.productionMeta ?? null,
+  requiresStructuredReview: !!contentPieceEvidenceRunId(p) || contentPieceHasOperatorSupplyLineage(p),
   legacyBlocked: !contentPieceEvidenceRunId(p) && p.generatedBy !== "manual",
   usageCount: p.usageCount,
   createdAt: p.createdAt,
@@ -1031,6 +1034,23 @@ export const getPiece = query({
   },
 });
 
+/** A deep link must not depend on the first page of the content library. */
+export const getPublishPiece = query({
+  args: { pieceId: v.string() },
+  handler: async (ctx, { pieceId }) => {
+    const user = await requireUser(ctx);
+    const normalizedId = ctx.db.normalizeId("contentPieces", pieceId);
+    if (!normalizedId) return null;
+    try {
+      await consumePiece(ctx, user._id, normalizedId);
+      return await getPieceFor(ctx, user, { pieceId: normalizedId });
+    } catch (error) {
+      if (error instanceof ConvexError) return null;
+      throw error;
+    }
+  },
+});
+
 /** 유저가 직접 작성한 콘텐츠도 생성 결과와 같은 품질 게이트를 거쳐 저장한다. */
 export const createManual = mutation({
   args: {
@@ -1043,12 +1063,17 @@ export const createManual = mutation({
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
-    if (args.productId && !(await ctx.db.get(args.productId))) fail("NOT_FOUND", "상품을 찾을 수 없습니다.");
+    const product = args.productId ? await ctx.db.get(args.productId) : null;
+    if (args.productId && !product) fail("NOT_FOUND", "상품을 찾을 수 없습니다.");
+    if (product && product.status !== "ACTIVE") fail("CONFLICT", "판매 중인 상품만 연결할 수 있습니다.");
     if (!args.caption.trim()) fail("INVALID_ARGUMENT", "본문을 입력하세요.");
     const maxMedia = contentMediaMax(args.channel);
     if (args.mediaUrls.length > maxMedia) fail("INVALID_ARGUMENT", `이 채널에는 미디어를 최대 ${maxMedia}개까지 추가할 수 있습니다.`);
     if (args.mediaUrls.some((url) => !/^https:\/\//i.test(url))) fail("INVALID_ARGUMENT", "미디어 URL은 HTTPS 주소만 사용할 수 있습니다.");
-    const report = evaluatePiece({ channel: args.channel, caption: args.caption, hashtags: args.hashtags, script: args.script }, { linkExpected: true });
+    const report = evaluatePiece({ channel: args.channel, caption: args.caption, hashtags: args.hashtags, script: args.script }, {
+      linkExpected: true,
+      products: product ? [productBrief(product)] : [],
+    });
     const autoApproved = isAutoApprovable(report) && validateContentMedia(args.channel, args.mediaUrls) === null;
     const pieceId = await ctx.db.insert("contentPieces", {
       ownerUserId: user._id,
@@ -1199,12 +1224,13 @@ export const approve = mutation({
     const mediaContractError = validateContentMedia(p.channel as Channel, p.mediaUrls);
     if (mediaContractError)
       fail("CONFLICT", "채널 미디어 요건을 충족하지 못했습니다. Reels·TikTok은 검증 가능한 HTTPS 동영상 URL 1개가 필요합니다.");
-    let collectionManualReport: ReturnType<typeof evaluatePiece> | null = null;
-    if (p.collectionId && p.generatedBy === "manual") {
+    const requiresStructuredReview = contentPieceHasOperatorSupplyLineage(p);
+    let manualReport: ReturnType<typeof evaluatePiece> | null = null;
+    if (p.generatedBy === "manual") {
       const product = p.productId ? await ctx.db.get(p.productId) : null;
       if (p.productId && (!product || product.status !== "ACTIVE"))
         fail("CONFLICT", "판매 중인 상품의 콘텐츠만 승인할 수 있습니다.");
-      collectionManualReport = evaluatePiece({
+      manualReport = evaluatePiece({
         channel: p.channel as Channel,
         caption: p.caption,
         hashtags: p.hashtags,
@@ -1213,7 +1239,10 @@ export const approve = mutation({
         linkExpected: !!product,
         products: product ? [productBrief(product)] : [],
       });
-      if (!isAutoApprovable(collectionManualReport))
+      const blocks = manualReport.violations.filter((violation) => violation.severity === "block");
+      if (blocks.length > 0)
+        fail("CONFLICT", `금칙·상품 사실 검증을 통과하지 못했습니다. ${blocks.map((violation) => violation.message).join(" ")}`);
+      if (requiresStructuredReview && !isAutoApprovable(manualReport))
         fail("CONFLICT", "운영 제공 콘텐츠는 90점 이상의 수동 콘텐츠 품질 기준을 통과해야 합니다.");
     }
     const production = await productionContextForPiece(ctx, p);
@@ -1297,17 +1326,17 @@ export const approve = mutation({
       await refreshContentRun(ctx, production.run._id);
       return;
     }
-    const blocks = (collectionManualReport?.violations ?? (
+    const blocks = (manualReport?.violations ?? (
       (p.qualityReport as { violations?: { severity: string }[] })
         ?.violations ?? []
     )).filter((v) => v.severity === "block");
     if (blocks.length > 0)
       fail("CONFLICT", "금칙 위반이 있는 콘텐츠는 수정 후 승인할 수 있습니다.");
     const outputHash = p.generatedBy === "manual"
-      ? await manualContentOutputHash(collectionManualReport ? {
+      ? await manualContentOutputHash(manualReport ? {
           channel: p.channel,
-          caption: collectionManualReport.caption,
-          hashtags: collectionManualReport.hashtags,
+          caption: manualReport.caption,
+          hashtags: manualReport.hashtags,
           script: p.script,
           mediaUrls: p.mediaUrls,
         } : p)
@@ -1318,7 +1347,7 @@ export const approve = mutation({
           script: p.script ?? null,
           mediaUrls: p.mediaUrls,
         }));
-    if (p.collectionId) {
+    if (requiresStructuredReview) {
       if (!args.expectedOutputHash || args.expectedOutputHash !== outputHash)
         fail("CONFLICT", "검토 후 콘텐츠가 변경되었습니다. 최신 내용을 다시 확인한 뒤 승인하세요.");
       if (!completeContentReviewChecklist(args.reviewChecklist))
@@ -1326,14 +1355,14 @@ export const approve = mutation({
     }
     const approvedAt = Date.now();
     await ctx.db.patch(p._id, {
-      ...(collectionManualReport ? {
-        caption: collectionManualReport.caption,
-        hashtags: collectionManualReport.hashtags,
-        qualityScore: collectionManualReport.score,
-        qualityReport: { violations: collectionManualReport.violations, fixed: collectionManualReport.fixed },
+      ...(manualReport ? {
+        caption: manualReport.caption,
+        hashtags: manualReport.hashtags,
+        qualityScore: manualReport.score,
+        qualityReport: { violations: manualReport.violations, fixed: manualReport.fixed },
       } : {}),
       status: "APPROVED",
-      ...(p.collectionId ? {
+      ...(requiresStructuredReview ? {
         productionMeta: {
           ...(p.productionMeta as Record<string, unknown> | undefined),
           provider: "manual",
@@ -1353,13 +1382,13 @@ export const approve = mutation({
       outputHash,
       snapshot: {
         channel: p.channel,
-        caption: collectionManualReport?.caption ?? p.caption,
-        hashtags: collectionManualReport?.hashtags ?? p.hashtags,
+        caption: manualReport?.caption ?? p.caption,
+        hashtags: manualReport?.hashtags ?? p.hashtags,
         script: p.script ?? null,
         mediaUrls: p.mediaUrls,
-        qualityScore: collectionManualReport?.score ?? p.qualityScore,
+        qualityScore: manualReport?.score ?? p.qualityScore,
       },
-      ...(p.collectionId ? { reviewChecklist: args.reviewChecklist } : {}),
+      ...(requiresStructuredReview ? { reviewChecklist: args.reviewChecklist } : {}),
       createdAt: approvedAt,
     });
     await audit(ctx, { actorUserId: user._id, action: "content.approve", metadata: { pieceId: p._id, outputHash } });
@@ -1380,6 +1409,15 @@ async function reopenSupplyCollectionAfterPieceChange(
   ) fail("FORBIDDEN", "운영 컬렉션 소유자만 콘텐츠를 변경할 수 있습니다.");
   if (!collection.pieceIds.includes(piece._id))
     fail("CONFLICT", "컬렉션에서 제거된 콘텐츠는 원본 컬렉션을 변경할 수 없습니다.");
+  const runs = await ctx.db.query("contentRuns").withIndex("by_collection", (q) => q.eq("collectionId", collection._id)).collect();
+  for (const run of runs) {
+    if (run.quarantineReason) continue;
+    const jobs = await Promise.all(run.jobIds.map((jobId) => ctx.db.get(jobId)));
+    if (jobs.some((job) => job && (
+      !["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status)
+      || (job.status === "SUCCEEDED" && (run.status === "QUEUED" || run.status === "RUNNING"))
+    ))) fail("CONFLICT", "AI 생성 결과를 저장하고 있습니다. 모든 결과가 도착한 뒤 수정·거절하세요.");
+  }
   if (collection.status === "DRAFT") return;
   const now = Date.now();
   for (const pieceId of collection.pieceIds) {
@@ -1432,6 +1470,8 @@ export const edit = mutation({
     if (mediaUrls.length > maxMedia) fail("INVALID_ARGUMENT", `이 채널에는 미디어를 최대 ${maxMedia}개까지 추가할 수 있습니다.`);
     if (mediaUrls.some((url) => !/^https:\/\//i.test(url))) fail("INVALID_ARGUMENT", "미디어 URL은 HTTPS 주소만 사용할 수 있습니다.");
     const production = await productionContextForPiece(ctx, p);
+    const requiresStructuredReview = !!production || contentPieceHasOperatorSupplyLineage(p);
+    const product = !production && p.productId ? await ctx.db.get(p.productId) : null;
     const report = evaluatePiece(
       {
         channel: p.channel as Channel,
@@ -1446,7 +1486,7 @@ export const edit = mutation({
             brief: production.brief,
             standard: production.standard,
           }
-        : { linkExpected: true },
+        : { linkExpected: !!product, products: product ? [productBrief(product)] : [] },
     );
     const mediaContractPassed = validateContentMedia(p.channel as Channel, mediaUrls) === null;
     const standardPassed = (production
@@ -1462,7 +1502,7 @@ export const edit = mutation({
           provider: production.provider,
           attemptNo: (p.productionMeta as { attemptNo?: number } | undefined)?.attemptNo ?? 1,
         }))
-      : p.collectionId && p.generatedBy === "manual"
+      : requiresStructuredReview && p.generatedBy === "manual"
         ? await manualContentOutputHash({
             channel: p.channel,
             caption: report.caption,
@@ -1471,7 +1511,7 @@ export const edit = mutation({
             mediaUrls,
           })
         : undefined;
-    const nextStatus = production || p.collectionId ? "DRAFT" as const : standardPassed ? "APPROVED" as const : "DRAFT" as const;
+    const nextStatus = requiresStructuredReview ? "DRAFT" as const : standardPassed ? "APPROVED" as const : "DRAFT" as const;
     await ctx.db.patch(p._id, {
       visibility: "PRIVATE",
       caption: report.caption,
@@ -1482,7 +1522,7 @@ export const edit = mutation({
       qualityReport: { violations: report.violations, fixed: report.fixed },
       status: nextStatus,
       generatedBy: production ? p.generatedBy : "manual",
-      ...(production || p.collectionId ? {
+      ...(requiresStructuredReview ? {
         productionMeta: {
           ...(p.productionMeta as Record<string, unknown> | undefined),
           provider: production?.provider ?? "manual",

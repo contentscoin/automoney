@@ -744,6 +744,9 @@ export default defineSchema({
     publishedAt: v.optional(v.number()),
     withdrawnBy: v.optional(v.id("users")),
     withdrawnAt: v.optional(v.number()),
+    /** A discarded draft retains its audit record but cannot be reopened. */
+    discardedBy: v.optional(v.id("users")),
+    discardedAt: v.optional(v.number()),
     revision: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),

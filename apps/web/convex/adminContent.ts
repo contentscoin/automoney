@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { paginationOptsValidator } from "convex/server";
 import { contentMediaMax, evaluatePiece, isAutoApprovable, normalizeContentBrief, validateContentMedia, type Channel, type ProductBrief } from "@automoney/shared";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
@@ -44,6 +45,7 @@ const MAX_COLLECTION_MATERIALS = 30;
 const MAX_COLLECTION_PIECES = 100;
 const MAX_AI_MATERIALS = 10;
 const MAX_AI_SNAPSHOT_TEXT = 20_000;
+const SUMMARY_SAMPLE_LIMIT = 1_000;
 export const CONTENT_FILE_POLICY = {
   "image/jpeg": { maxBytes: 10 * MIB, extensions: ["jpg", "jpeg"], media: true },
   "image/png": { maxBytes: 10 * MIB, extensions: ["png"], media: true },
@@ -235,6 +237,7 @@ async function reopenCollectionInternal(
   collection: Doc<"contentCollections">,
   reason: string,
 ): Promise<void> {
+  if (collection.discardedAt !== undefined) fail("CONFLICT", "폐기된 컬렉션은 다시 열 수 없습니다. 새 컬렉션을 만들어 주세요.");
   if (collection.status === "DRAFT") return;
   const now = Date.now();
   for (const pieceId of collection.pieceIds) {
@@ -451,25 +454,65 @@ export const createMaterial = mutation({
       action: "adminContent.materialCreate",
       metadata: { materialId, kind: args.kind, productId: args.productId ?? null, contentHash: contentHash ?? null },
     });
-    return { materialId, deliveryUrl: materialDeliveryUrl(material) };
+    return { materialId, deliveryUrl: materialDeliveryUrl(material), updatedAt: material.updatedAt };
+  },
+});
+
+/** Draft evidence can be corrected; reviewed evidence stays immutable for existing outputs. */
+export const updateMaterial = mutation({
+  args: {
+    materialId: v.id("contentSourceMaterials"),
+    expectedUpdatedAt: v.number(),
+    title: v.string(),
+    bodyText: v.optional(v.string()),
+    externalUrl: v.optional(v.string()),
+    productId: v.optional(v.union(v.id("products"), v.null())),
+    rightsStatus: rightsStatusValidator,
+    rightsNote: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const actor = await requireSuperAdmin(ctx);
+    const material = await ownedMaterial(ctx, actor._id, args.materialId);
+    if (material.status !== "DRAFT") fail("CONFLICT", "초안 자료만 수정할 수 있습니다. 검수 완료 자료의 수정본은 새 자료로 등록하세요.");
+    if (material.updatedAt !== args.expectedUpdatedAt) fail("CONFLICT", "다른 운영자가 자료를 변경했습니다. 새로고침한 뒤 다시 확인하세요.");
+    validateMaterialRightsPolicy(material.kind, args.rightsStatus);
+    const title = cleanRequired(args.title, "자료 제목", 160);
+    const rightsNote = cleanRequired(args.rightsNote, "권리 근거", 1_000);
+    const bodyText = material.kind === "TEXT" ? cleanRequired(args.bodyText ?? "", "본문", 200_000) : undefined;
+    if (material.kind !== "TEXT" && args.bodyText) fail("INVALID_ARGUMENT", "텍스트 자료에만 본문을 입력할 수 있습니다.");
+    const externalUrl = material.kind === "LINK"
+      ? safeHttpsUrl(args.externalUrl ?? "", "외부 링크")
+      : args.externalUrl?.trim() ? safeHttpsUrl(args.externalUrl, "원문 링크") : undefined;
+    const productId = args.productId === null ? undefined : args.productId ?? material.productId;
+    if (productId && !(await ctx.db.get(productId))) fail("NOT_FOUND", "상품을 찾을 수 없습니다.");
+    const updatedAt = Math.max(Date.now(), material.updatedAt + 1);
+    await ctx.db.patch(material._id, { title, bodyText, externalUrl, productId, rightsStatus: args.rightsStatus, rightsNote, updatedAt });
+    await audit(ctx, {
+      actorUserId: actor._id,
+      action: "adminContent.materialUpdate",
+      metadata: { materialId: material._id, previousUpdatedAt: material.updatedAt, updatedAt },
+    });
+    return { materialId: material._id, updatedAt };
   },
 });
 
 export const markMaterialReady = mutation({
-  args: { materialId: v.id("contentSourceMaterials") },
+  args: { materialId: v.id("contentSourceMaterials"), expectedUpdatedAt: v.number() },
   handler: async (ctx, args) => {
     const actor = await requireSuperAdmin(ctx);
     const material = await ownedMaterial(ctx, actor._id, args.materialId);
     if (material.status !== "DRAFT") fail("CONFLICT", "초안 자료만 검수 완료할 수 있습니다.");
+    if (material.updatedAt !== args.expectedUpdatedAt)
+      fail("CONFLICT", "확인한 이후 자료가 변경되었습니다. 최신 원문·상품·사용 권한을 다시 확인한 뒤 준비 완료로 바꾸세요.");
     validateMaterialRightsPolicy(material.kind, material.rightsStatus);
     await validateStoredFileMaterial(ctx, material);
     if (material.productId) {
       const product = await ctx.db.get(material.productId);
       if (!product || product.status !== "ACTIVE") fail("CONFLICT", "연결된 상품이 판매 중이 아닙니다.");
     }
-    const now = Date.now();
+    const now = Math.max(Date.now(), material.updatedAt + 1);
     await ctx.db.patch(material._id, { status: "READY", readyAt: material.readyAt ?? now, updatedAt: now });
-    await audit(ctx, { actorUserId: actor._id, action: "adminContent.materialReady", metadata: { materialId: material._id } });
+    await audit(ctx, { actorUserId: actor._id, action: "adminContent.materialReady", metadata: { materialId: material._id, reviewedUpdatedAt: args.expectedUpdatedAt } });
   },
 });
 
@@ -499,6 +542,20 @@ export const listMaterials = query({
       deliveryUrl: materialDeliveryUrl(row),
       previewUrl: await materialAdminPreviewUrl(ctx, row),
     })));
+  },
+});
+
+export const paginateMaterials = query({
+  args: { paginationOpts: paginationOptsValidator, status: v.optional(materialStatusValidator) },
+  handler: async (ctx, args) => {
+    await requireSuperAdmin(ctx);
+    const source = args.status
+      ? ctx.db.query("contentSourceMaterials").withIndex("by_status", (q) => q.eq("status", args.status!))
+      : ctx.db.query("contentSourceMaterials");
+    const result = await source.order("desc").paginate({ ...args.paginationOpts, numItems: Math.min(Math.max(args.paginationOpts.numItems, 1), 100), maximumBytesRead: 4 * MIB });
+    return { ...result, page: await Promise.all(result.page.map(async (row) => ({
+      ...row, deliveryUrl: materialDeliveryUrl(row), previewUrl: await materialAdminPreviewUrl(ctx, row),
+    }))) };
   },
 });
 
@@ -540,6 +597,85 @@ export const createCollection = mutation({
       metadata: { collectionId, sourceMaterialIds, revision: 1 },
     });
     return { collectionId };
+  },
+});
+
+export const updateCollection = mutation({
+  args: {
+    collectionId: v.id("contentCollections"),
+    expectedRevision: v.number(),
+    title: v.string(),
+    summary: v.optional(v.string()),
+    tags: v.array(v.string()),
+    sourceMaterialIds: v.array(v.id("contentSourceMaterials")),
+  },
+  handler: async (ctx, args) => {
+    const actor = await requireSuperAdmin(ctx);
+    const collection = await ownedCollection(ctx, actor._id, args.collectionId);
+    if (collection.status !== "DRAFT") fail("CONFLICT", "초안 컬렉션만 수정할 수 있습니다. 수정 모드로 먼저 전환하세요.");
+    if (collection.revision !== args.expectedRevision) fail("CONFLICT", "컬렉션이 변경되었습니다. 새로고침한 뒤 다시 확인하세요.");
+    await requireNoPendingRuns(ctx, collection._id);
+    const sourceMaterialIds = [...new Set(args.sourceMaterialIds)];
+    if (sourceMaterialIds.length === 0 || sourceMaterialIds.length > MAX_COLLECTION_MATERIALS)
+      fail("INVALID_ARGUMENT", `컬렉션에는 운영 자료를 1~${MAX_COLLECTION_MATERIALS}개 연결하세요.`);
+    for (const id of sourceMaterialIds) {
+      const material = await ownedMaterial(ctx, actor._id, id);
+      if (material.status === "ARCHIVED") fail("CONFLICT", "보관된 자료는 컬렉션에 추가할 수 없습니다.");
+    }
+    for (const pieceId of collection.pieceIds) {
+      const piece = await ctx.db.get(pieceId);
+      if (!piece || piece.collectionId !== collection._id) fail("CONFLICT", "컬렉션 콘텐츠의 연결 정보를 확인할 수 없습니다.");
+      if (piece.sourceMaterialIds?.some((id) => !sourceMaterialIds.includes(id)))
+        fail("CONFLICT", "콘텐츠가 사용 중인 근거 자료는 분리할 수 없습니다. 해당 콘텐츠를 먼저 제거하세요.");
+    }
+    const revision = collection.revision + 1;
+    await ctx.db.patch(collection._id, {
+      title: cleanRequired(args.title, "컬렉션 제목", 160),
+      summary: cleanOptional(args.summary, 1_000),
+      tags: normalizeTags(args.tags),
+      sourceMaterialIds,
+      revision,
+      updatedAt: Date.now(),
+    });
+    await audit(ctx, {
+      actorUserId: actor._id,
+      action: "adminContent.collectionUpdate",
+      metadata: { collectionId: collection._id, revision, previousSourceMaterialIds: collection.sourceMaterialIds, sourceMaterialIds },
+    });
+    return { collectionId: collection._id, revision };
+  },
+});
+
+/** Retain audit/lineage while releasing abandoned draft materials for archival. */
+export const discardCollection = mutation({
+  args: { collectionId: v.id("contentCollections"), expectedRevision: v.number() },
+  handler: async (ctx, args) => {
+    const actor = await requireSuperAdmin(ctx);
+    const collection = await ownedCollection(ctx, actor._id, args.collectionId);
+    if (collection.discardedAt !== undefined) return { collectionId: collection._id, discarded: true as const };
+    if (collection.status !== "DRAFT") fail("CONFLICT", "초안 컬렉션만 폐기할 수 있습니다. 수정 모드로 먼저 전환하세요.");
+    if (collection.revision !== args.expectedRevision) fail("CONFLICT", "컬렉션이 변경되었습니다. 새로고침한 뒤 다시 확인하세요.");
+    await requireNoPendingRuns(ctx, collection._id);
+    const now = Date.now();
+    for (const pieceId of collection.pieceIds) {
+      const piece = await ctx.db.get(pieceId);
+      if (!piece || piece.collectionId !== collection._id) fail("CONFLICT", "컬렉션 콘텐츠의 연결 정보를 확인할 수 없습니다.");
+      await retireCollectionPiece(ctx, actor._id, collection, piece, now);
+    }
+    await ctx.db.patch(collection._id, {
+      status: "WITHDRAWN", sourceMaterialIds: [], pieceIds: [],
+      discardedBy: actor._id, discardedAt: now,
+      withdrawnBy: actor._id, withdrawnAt: now,
+      reviewedBy: undefined, reviewedByIds: undefined, reviewedAt: undefined, submittedAt: undefined,
+      publishedBy: undefined, publishedAt: undefined,
+      revision: collection.revision + 1, updatedAt: now,
+    });
+    await audit(ctx, {
+      actorUserId: actor._id,
+      action: "adminContent.collectionDiscard",
+      metadata: { collectionId: collection._id, revision: collection.revision + 1, sourceMaterialIds: collection.sourceMaterialIds, pieceIds: collection.pieceIds },
+    });
+    return { collectionId: collection._id, discarded: true as const };
   },
 });
 
@@ -645,6 +781,27 @@ export const addManualPiece = mutation({
   },
 });
 
+async function retireCollectionPiece(
+  ctx: MutationCtx,
+  actorId: Id<"users">,
+  collection: Doc<"contentCollections">,
+  piece: Doc<"contentPieces">,
+  now: number,
+) {
+  if (piece.visibility === "SHARED") fail("CONFLICT", "공개 중인 콘텐츠는 컬렉션 공개를 먼저 종료하세요.");
+  await ctx.db.patch(piece._id, {
+    status: "RETIRED",
+    visibility: "PRIVATE",
+    collectionId: undefined,
+    productionMeta: {
+      ...(piece.productionMeta as Record<string, unknown> | undefined),
+      removedFromCollectionId: collection._id,
+      removedFromCollectionAt: now,
+      removedFromCollectionBy: actorId,
+    },
+  });
+}
+
 /** Discards an unusable draft (including non-Codex fallback output) without trapping the collection. */
 export const removePiece = mutation({
   args: { collectionId: v.id("contentCollections"), pieceId: v.id("contentPieces") },
@@ -652,22 +809,12 @@ export const removePiece = mutation({
     const actor = await requireSuperAdmin(ctx);
     const collection = await ownedCollection(ctx, actor._id, args.collectionId);
     if (collection.status !== "DRAFT") fail("CONFLICT", "초안 컬렉션의 콘텐츠만 제거할 수 있습니다.");
+    await requireNoPendingRuns(ctx, collection._id);
     if (!collection.pieceIds.includes(args.pieceId)) fail("NOT_FOUND", "컬렉션 콘텐츠를 찾을 수 없습니다.");
     const piece = await ctx.db.get(args.pieceId);
     if (!piece || piece.collectionId !== collection._id) fail("NOT_FOUND", "컬렉션 콘텐츠를 찾을 수 없습니다.");
-    if (piece.visibility === "SHARED") fail("CONFLICT", "공개 중인 콘텐츠는 컬렉션 공개를 먼저 종료하세요.");
     const now = Date.now();
-    await ctx.db.patch(piece._id, {
-      status: "RETIRED",
-      visibility: "PRIVATE",
-      collectionId: undefined,
-      productionMeta: {
-        ...(piece.productionMeta as Record<string, unknown> | undefined),
-        removedFromCollectionId: collection._id,
-        removedFromCollectionAt: now,
-        removedFromCollectionBy: actor._id,
-      },
-    });
+    await retireCollectionPiece(ctx, actor._id, collection, piece, now);
     await ctx.db.patch(collection._id, {
       pieceIds: collection.pieceIds.filter((pieceId) => pieceId !== piece._id),
       updatedAt: now,
@@ -684,9 +831,17 @@ async function collectionRuns(ctx: QueryCtx | MutationCtx, collectionId: Id<"con
   const runs = await ctx.db.query("contentRuns").withIndex("by_collection", (q) => q.eq("collectionId", collectionId)).order("desc").collect();
   return await Promise.all(runs.map(async (run) => {
     const jobs = await Promise.all(run.jobIds.map((id) => ctx.db.get(id)));
+    const unfinished = jobs.some((job) => job && !["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status));
+    const awaitingIngest = jobs.some((job) => job?.status === "SUCCEEDED") && ["QUEUED", "RUNNING"].includes(run.status);
     return { _id: run._id, channels: run.channels, createdAt: run.createdAt, quarantineReason: run.quarantineReason ?? null,
-      status: run.quarantineReason ? "QUARANTINED" : jobs.some((job) => job && !["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status)) ? "PENDING" : run.status === "FAILED" || jobs.some((job) => job?.status !== "SUCCEEDED") ? "FAILED" : "REVIEW_REQUIRED",
-      jobIds: run.jobIds };
+      status: run.quarantineReason ? "QUARANTINED" : unfinished || awaitingIngest ? "PENDING" : run.status === "FAILED" || jobs.some((job) => job?.status !== "SUCCEEDED") ? "FAILED" : "REVIEW_REQUIRED",
+      jobIds: run.jobIds,
+      jobs: jobs.filter((job): job is Doc<"agentJobs"> => job !== null).map((job) => ({
+        _id: job._id, status: job.status, errorCode: job.errorCode ?? null, errorMessage: job.errorMessage ?? null,
+        cancelRequested: job.cancelRequested, updatedAt: job.updatedAt,
+      })),
+      errorMessage: run.quarantineReason ?? jobs.find((job) => job?.errorMessage)?.errorMessage ?? null,
+    };
   }));
 }
 
@@ -906,6 +1061,18 @@ export const listCollections = query({
   },
 });
 
+export const paginateCollections = query({
+  args: { paginationOpts: paginationOptsValidator, status: v.optional(collectionStatusValidator) },
+  handler: async (ctx, args) => {
+    await requireSuperAdmin(ctx);
+    const source = args.status
+      ? ctx.db.query("contentCollections").withIndex("by_status", (q) => q.eq("status", args.status!))
+      : ctx.db.query("contentCollections");
+    const result = await source.order("desc").paginate({ ...args.paginationOpts, numItems: Math.min(Math.max(args.paginationOpts.numItems, 1), 50) });
+    return { ...result, page: await Promise.all(result.page.map((row) => collectionView(ctx, row))) };
+  },
+});
+
 export const getCollection = query({
   args: { collectionId: v.id("contentCollections") },
   handler: async (ctx, args) => {
@@ -938,15 +1105,35 @@ export const summary = query({
   args: {},
   handler: async (ctx) => {
     await requireSuperAdmin(ctx);
-    const materials = await ctx.db.query("contentSourceMaterials").collect();
-    const collections = await ctx.db.query("contentCollections").collect();
-    const pieceIds = new Set(collections.flatMap((collection) => collection.pieceIds));
+    // Stop by both row and estimated byte budgets: material bodies can be 200k characters.
+    const materials: Doc<"contentSourceMaterials">[] = [];
+    const collections: Doc<"contentCollections">[] = [];
+    let truncated = false;
+    let bytes = 0;
+    for await (const material of ctx.db.query("contentSourceMaterials").order("desc")) {
+      materials.push(material);
+      bytes += JSON.stringify(material).length * 3;
+      if (materials.length >= SUMMARY_SAMPLE_LIMIT || bytes >= 2 * MIB) { truncated = true; break; }
+    }
+    bytes = 0;
+    for await (const collection of ctx.db.query("contentCollections").order("desc")) {
+      collections.push(collection);
+      bytes += JSON.stringify(collection).length * 3;
+      if (collections.length >= SUMMARY_SAMPLE_LIMIT || bytes >= 2 * MIB) { truncated = true; break; }
+    }
+    const allPieceIds = [...new Set(collections.flatMap((collection) => collection.pieceIds))];
+    const pieceIds = allPieceIds.slice(0, SUMMARY_SAMPLE_LIMIT);
     let approved = 0;
     let shared = 0;
+    let sampledPieces = 0;
+    bytes = 0;
     for (const id of pieceIds) {
       const piece = await ctx.db.get(id);
+      sampledPieces++;
       if (piece?.status === "APPROVED") approved++;
       if (piece?.visibility === "SHARED") shared++;
+      bytes += JSON.stringify(piece).length * 3;
+      if (bytes >= 4 * MIB) { truncated = true; break; }
     }
     return {
       materials: {
@@ -962,7 +1149,9 @@ export const summary = query({
         published: collections.filter((row) => row.status === "PUBLISHED").length,
         withdrawn: collections.filter((row) => row.status === "WITHDRAWN").length,
       },
-      pieces: { total: pieceIds.size, approved, shared },
+      pieces: { total: sampledPieces, approved, shared },
+      truncated: truncated || allPieceIds.length > SUMMARY_SAMPLE_LIMIT,
+      sampleLimit: SUMMARY_SAMPLE_LIMIT,
     };
   },
 });

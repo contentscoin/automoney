@@ -6,16 +6,32 @@ import { internalMutation, mutation, query, type QueryCtx, type MutationCtx } fr
 import { audit } from "./lib/audit";
 import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
-import { consumePiece, contentPieceEvidenceRunId, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
+import { consumePiece, contentPieceEvidenceRunId, contentPieceFactEvidence, contentPieceHasOperatorSupplyLineage, contentPieceProductAvailable, contentPiecePublishOutputHash, contentPieceText, hashPiecePublishSnapshot, libraryReviewEvidence, operatorSupplySourceAvailable, workflowReviewEvidence } from "./lib/pieces";
 import { livePublishEnabled } from "./lib/publishPolicy";
 import { marketingRedirectUrl } from "./lib/publicUrl";
 import { canonicalJson, enqueueJob, validateExecutorPublishContract } from "./jobs";
 import { sha256Hex } from "./lib/crypto";
 import { publicationIdentity } from "./lib/publishIdentity";
 import { metaLivePublishAvailable } from "./lib/meta";
+import { DEMO_LINK_PUBLISH_MESSAGE, isDemoMarketingLink } from "./lib/marketingLinkPolicy";
 
 const kindValidator = v.union(v.literal("ONE_SHOT"), v.literal("DAILY"), v.literal("WEEKLY"));
 const SCHEDULE_TICK_BATCH_SIZE = 25;
+
+function validateScheduleSpec(spec: Pick<Doc<"schedules">, "kind" | "timeOfDay" | "daysOfWeek" | "runDate" | "jitterMinutes">) {
+  if (!parseTimeOfDay(spec.timeOfDay)) fail("INVALID_ARGUMENT", "시간은 HH:MM 형식입니다.");
+  if (spec.daysOfWeek.some((day) => !Number.isInteger(day) || day < 0 || day > 6))
+    fail("INVALID_ARGUMENT", "요일은 0(일요일)부터 6(토요일)까지의 정수로 입력하세요.");
+  if (spec.kind === "WEEKLY" && spec.daysOfWeek.length === 0) fail("INVALID_ARGUMENT", "요일을 선택하세요.");
+  if (!Number.isFinite(spec.jitterMinutes) || !Number.isInteger(spec.jitterMinutes) || spec.jitterMinutes < 0 || spec.jitterMinutes > 120)
+    fail("INVALID_ARGUMENT", "시간 편차는 0~120분 사이의 정수로 입력하세요.");
+  if (spec.kind === "ONE_SHOT" && !spec.runDate) fail("INVALID_ARGUMENT", "실행 일자를 입력하세요.");
+  if (spec.runDate !== undefined) {
+    const parsed = /^\d{4}-\d{2}-\d{2}$/.test(spec.runDate) ? new Date(`${spec.runDate}T00:00:00Z`) : null;
+    if (!parsed || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== spec.runDate)
+      fail("INVALID_ARGUMENT", "실행 일자는 실제 존재하는 날짜를 YYYY-MM-DD 형식으로 입력하세요.");
+  }
+}
 
 async function invalidateScheduledJobs(ctx: MutationCtx, scheduleId: Id<"schedules">, now = Date.now()) {
   let cancelled = 0;
@@ -89,15 +105,13 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
     workflowPiece = piece;
   }
   if (contentChannel && CHANNEL_PLATFORM[contentChannel] !== space.platform) fail("INVALID_ARGUMENT", "게시 형식과 게시 계정 플랫폼이 일치하지 않습니다.");
-  if (!parseTimeOfDay(args.timeOfDay)) fail("INVALID_ARGUMENT", "시간은 HH:MM 형식입니다.");
-  if (args.kind === "WEEKLY" && args.daysOfWeek.length === 0) fail("INVALID_ARGUMENT", "요일을 선택하세요.");
-  if (args.kind === "ONE_SHOT" && !args.runDate) fail("INVALID_ARGUMENT", "실행 일자를 입력하세요.");
-  if (args.jitterMinutes < 0 || args.jitterMinutes > 120) fail("INVALID_ARGUMENT", "지터는 0~120분입니다.");
+  validateScheduleSpec(args);
   const link = args.linkId ? await ctx.db.get(args.linkId) : null;
   if (args.linkId) {
     if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
     if (link.status !== "ACTIVE") fail("CONFLICT", "활성 상태의 링크만 예약에 사용할 수 있습니다.");
     if (contentProductId && link.productId !== contentProductId) fail("INVALID_ARGUMENT", "콘텐츠 상품과 마케팅 링크 상품이 일치하지 않습니다.");
+    if (isDemoMarketingLink(link)) fail("INVALID_ARGUMENT", DEMO_LINK_PUBLISH_MESSAGE);
   }
   if (workflowPiece?.productId && !args.linkId) fail("INVALID_ARGUMENT", "제작 워크플로 콘텐츠에는 같은 상품의 활성 마케팅 링크가 필요합니다.");
   const linkUrl = link ? marketingRedirectUrl(link.shortCode) : null;
@@ -109,8 +123,6 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
   if (executorError) fail("INVALID_ARGUMENT", executorError);
   const { id, ...fields } = args;
   delete fields.clientRequestId;
-  const seed = id ?? `${space._id}:${Date.now()}`;
-  const nextRunAt = computeNextRunAt({ kind: args.kind, timeOfDay: args.timeOfDay, daysOfWeek: args.daysOfWeek, jitterMinutes: args.jitterMinutes, runDate: args.runDate ?? null }, Date.now(), seed) ?? undefined;
   const existing = id ? await ctx.db.get(id) : null;
   const workflowSnapshot = workflowPiece && args.pieceId ? {
     pieceOutputHash: workflowPiece.outputHash,
@@ -130,11 +142,18 @@ export async function upsertScheduleFor(ctx: MutationCtx, user: Doc<"users">, ar
   const payloadHash = await sha256Hex(canonicalJson({ ...fields, text, mediaUrls, ...workflowSnapshot, ...targetSnapshot }));
   if (requestKey) {
     const duplicate = await ctx.db.query("schedules").withIndex("by_user_requestKey", (q) => q.eq("userId", user._id).eq("requestKey", requestKey)).unique();
-    if (duplicate && duplicate._id !== id) {
-      if (duplicate.payloadHash !== payloadHash) fail("CONFLICT", "IDEMPOTENCY_CONFLICT");
+    if (duplicate) {
+      if ((id && duplicate._id !== id) || duplicate.payloadHash !== payloadHash) fail("CONFLICT", "IDEMPOTENCY_CONFLICT");
       return { scheduleId: duplicate._id, nextRunAt: duplicate.nextRunAt ?? null };
     }
   }
+  // A successful request can be retried after its slot expires. Return it above
+  // before validating whether a new or edited schedule still has a future slot.
+  const now = Date.now();
+  const seed = id ?? `${space._id}:${now}`;
+  const nextRunAt = computeNextRunAt({ kind: args.kind, timeOfDay: args.timeOfDay, daysOfWeek: args.daysOfWeek, jitterMinutes: args.jitterMinutes, runDate: args.runDate ?? null }, now, seed);
+  if (nextRunAt === null || !Number.isFinite(nextRunAt))
+    fail("INVALID_ARGUMENT", "미래에 실행할 시각이 없습니다. 실행 일자·시각을 뒤로 옮기거나 시간 편차를 줄이세요.");
   const doc = { ...fields, text, mediaUrls, ...workflowSnapshot, ...targetSnapshot, userId: user._id, requestKey, payloadHash, enabled: true, nextRunAt, revision: (existing?.revision ?? 0) + 1 };
   const scheduleId = id ? (await ctx.db.patch(id, doc), id) : await ctx.db.insert("schedules", { ...doc, createdAt: Date.now() });
   if (existing) await invalidateScheduledJobs(ctx, scheduleId);
@@ -175,9 +194,12 @@ export const setEnabled = mutation({
     const user = await requireUser(ctx);
     const s = await ctx.db.get(args.id);
     if (!s || s.userId !== user._id) fail("NOT_FOUND", "예약을 찾을 수 없습니다.");
+    if (args.enabled) validateScheduleSpec(s);
     const nextRunAt = args.enabled
       ? computeNextRunAt({ kind: s.kind, timeOfDay: s.timeOfDay, daysOfWeek: s.daysOfWeek, jitterMinutes: s.jitterMinutes, runDate: s.runDate ?? null }, Date.now(), s._id) ?? undefined
       : undefined;
+    if (args.enabled && (nextRunAt === undefined || !Number.isFinite(nextRunAt)))
+      fail("INVALID_ARGUMENT", "미래에 실행할 시각이 없어 재개할 수 없습니다. 새 일자·시각으로 예약을 다시 등록하세요.");
     await ctx.db.patch(s._id, { enabled: args.enabled, nextRunAt, revision: (s.revision ?? 0) + 1 });
     await invalidateScheduledJobs(ctx, s._id);
   },
@@ -243,13 +265,16 @@ export const tick = internalMutation({
       const piece = s.pieceId ? await ctx.db.get(s.pieceId) : null;
       const pieceEvidenceRunId = piece ? contentPieceEvidenceRunId(piece) : undefined;
       const pieceProductAvailable = piece ? await contentPieceProductAvailable(ctx, piece) : true;
+      const pieceFactsValid = piece ? (await contentPieceFactEvidence(ctx, piece)).ok : true;
       const link = s.linkId ? await ctx.db.get(s.linkId) : null;
       const invalidAssociation =
         (s.pieceId && (!piece || piece.status !== "APPROVED")) ? "CONTENT_UNAVAILABLE"
           : piece && CHANNEL_PLATFORM[piece.channel as keyof typeof CHANNEL_PLATFORM] !== space.platform ? "CONTENT_PLATFORM_MISMATCH"
             : !pieceProductAvailable ? "CONTENT_PRODUCT_INACTIVE"
+              : !pieceFactsValid ? "CONTENT_FACTS_CHANGED"
               : s.linkId && (!link || link.userId !== s.userId) ? "LINK_NOT_FOUND"
                 : link && link.status !== "ACTIVE" ? "LINK_INACTIVE"
+                  : link && isDemoMarketingLink(link) ? "DEMO_LINK_NOT_PUBLISHABLE"
                   : pieceEvidenceRunId && piece?.productId && !link ? "CONTENT_LINK_REQUIRED"
                     : piece?.productId && link && piece.productId !== link.productId ? "CONTENT_LINK_PRODUCT_MISMATCH"
                     : null;
@@ -295,19 +320,21 @@ export const tick = internalMutation({
         const run = pieceEvidenceRunId ? await ctx.db.get(pieceEvidenceRunId) : null;
         const outputHash = await contentPiecePublishOutputHash(piece);
         const standardPassed = !pieceEvidenceRunId || (piece.productionMeta as { standardPassed?: boolean } | undefined)?.standardPassed === true;
-        const review = pieceEvidenceRunId ? await workflowReviewEvidence(ctx, piece) : { ok: true as const };
+        const review = pieceEvidenceRunId
+          ? await workflowReviewEvidence(ctx, piece)
+          : contentPieceHasOperatorSupplyLineage(piece) ? await libraryReviewEvidence(ctx, piece) : { ok: true as const };
         const supplyAvailable = await operatorSupplySourceAvailable(ctx, piece);
         const canonicalText = contentPieceText(piece);
         const currentSnapshot = outputHash ? await hashPiecePublishSnapshot({ pieceId: s.pieceId, outputHash, text: canonicalText, mediaUrls: piece.mediaUrls, linkId: s.linkId, linkUrl }) : null;
         const staleReason = !supplyAvailable
           ? "CONTENT_UNAVAILABLE"
-          : !standardPassed || (pieceEvidenceRunId && !contentPieceHasOperatorSupplyLineage(piece) && run?.status !== "COMPLETED") || !review.ok
+          : !standardPassed || (pieceEvidenceRunId && !contentPieceHasOperatorSupplyLineage(piece) && run?.status !== "COMPLETED")
           ? "CONTENT_REVIEW_REQUIRED"
           : !s.pieceOutputHash || !s.pieceSnapshotHash
             ? "CONTENT_SNAPSHOT_MISSING"
             : outputHash !== s.pieceOutputHash || currentSnapshot !== s.pieceSnapshotHash
               ? "CONTENT_REVISION_CHANGED"
-              : null;
+              : !review.ok ? "CONTENT_REVIEW_REQUIRED" : null;
         if (staleReason) {
           await ctx.db.patch(s._id, { nextRunAt: next, enabled: next !== undefined, lastSkipReason: staleReason, lastSkippedAt: now });
           skipped++;

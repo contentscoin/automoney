@@ -51,7 +51,7 @@ async function readyTextMaterial(
     rightsStatus: "OWNED",
     rightsNote: "운영사 자체 작성 원문",
   });
-  await owner.as.mutation(api.adminContent.markMaterialReady, { materialId: created.materialId });
+  await owner.as.mutation(api.adminContent.markMaterialReady, { materialId: created.materialId, expectedUpdatedAt: created.updatedAt });
   return created.materialId;
 }
 
@@ -78,6 +78,139 @@ async function createCollectionPiece(
 }
 
 describe("SUPER_ADMIN content supply workflow", () => {
+  it("corrects draft evidence with stale-edit protection and preserves reviewed evidence", async () => {
+    const { t, owner, user, productId } = await setup();
+    const created = await owner.as.mutation(api.adminContent.createMaterial, {
+      kind: "TEXT", title: "오입력", bodyText: "수정 전", productId,
+      rightsStatus: "OWNED", rightsNote: "자체 작성",
+    });
+    const original = (await t.run((ctx) => ctx.db.get(created.materialId)))!;
+    const correction = {
+      materialId: created.materialId, expectedUpdatedAt: original.updatedAt,
+      title: "확인된 제품 설명", bodyText: "상품에서 확인한 소재와 핏 정보입니다.",
+      externalUrl: "https://example.com/source", productId: null,
+      rightsStatus: "LICENSED" as const, rightsNote: "브랜드 콘텐츠 사용 계약",
+    };
+    await expect(user.as.mutation(api.adminContent.updateMaterial, correction)).rejects.toThrow(/권한/);
+    const updated = await owner.as.mutation(api.adminContent.updateMaterial, correction);
+    expect(updated.updatedAt).toBeGreaterThan(original.updatedAt);
+    const material = await t.run((ctx) => ctx.db.get(created.materialId));
+    expect(material).toMatchObject({ title: correction.title, bodyText: correction.bodyText, rightsStatus: "LICENSED", status: "DRAFT" });
+    expect(material?.productId).toBeUndefined();
+    await expect(owner.as.mutation(api.adminContent.updateMaterial, correction)).rejects.toThrow(/다른 운영자/);
+    await expect(owner.as.mutation(api.adminContent.markMaterialReady, { materialId: created.materialId, expectedUpdatedAt: original.updatedAt })).rejects.toThrow(/자료가 변경/);
+    expect(await t.run((ctx) => ctx.db.get(created.materialId))).toMatchObject({ status: "DRAFT" });
+    await owner.as.mutation(api.adminContent.markMaterialReady, { materialId: created.materialId, expectedUpdatedAt: updated.updatedAt });
+    const readyEvents = await t.run((ctx) => ctx.db.query("auditEvents").collect());
+    expect(readyEvents.find((event) => event.action === "adminContent.materialReady")?.metadata)
+      .toMatchObject({ materialId: created.materialId, reviewedUpdatedAt: updated.updatedAt });
+    await expect(owner.as.mutation(api.adminContent.updateMaterial, { ...correction, expectedUpdatedAt: updated.updatedAt })).rejects.toThrow(/초안 자료만/);
+
+    const link = await owner.as.mutation(api.adminContent.createMaterial, {
+      kind: "LINK", title: "잘못된 출처", externalUrl: "https://example.com/wrong",
+      rightsStatus: "LINK_ONLY", rightsNote: "출처 확인",
+    });
+    const linkBefore = (await t.run((ctx) => ctx.db.get(link.materialId)))!;
+    const linkEdit = { materialId: link.materialId, expectedUpdatedAt: linkBefore.updatedAt, title: "수정된 출처", externalUrl: "https://example.com/correct", rightsStatus: "LINK_ONLY" as const, rightsNote: "출처 확인" };
+    await expect(owner.as.mutation(api.adminContent.updateMaterial, { ...linkEdit, externalUrl: "http://example.com" })).rejects.toThrow(/HTTPS/);
+    await owner.as.mutation(api.adminContent.updateMaterial, linkEdit);
+    expect(await t.run((ctx) => ctx.db.get(link.materialId))).toMatchObject({ externalUrl: "https://example.com/correct" });
+  });
+
+  it("reselects collection materials without severing output evidence and detects concurrent edits", async () => {
+    const { t, owner } = await setup();
+    const used = await readyTextMaterial(owner);
+    const unused = await readyTextMaterial(owner, { title: "잘못 선택한 자료" });
+    const replacement = await readyTextMaterial(owner, { title: "새 캠페인 자료" });
+    const item = await createCollectionPiece(owner, used);
+    const update = { collectionId: item.collectionId, expectedRevision: 1, title: "수정한 캠페인", summary: "공급용", tags: ["새태그"], sourceMaterialIds: [used, unused] };
+    expect(await owner.as.mutation(api.adminContent.updateCollection, update)).toMatchObject({ revision: 2 });
+    await expect(owner.as.mutation(api.adminContent.updateCollection, update)).rejects.toThrow(/컬렉션이 변경/);
+    await expect(owner.as.mutation(api.adminContent.updateCollection, { ...update, expectedRevision: 2, sourceMaterialIds: [replacement] })).rejects.toThrow(/콘텐츠가 사용 중/);
+    await owner.as.mutation(api.adminContent.updateCollection, { ...update, expectedRevision: 2, sourceMaterialIds: [used, replacement] });
+    await owner.as.mutation(api.adminContent.archiveMaterial, { materialId: unused });
+    expect(await t.run((ctx) => ctx.db.get(unused))).toMatchObject({ status: "ARCHIVED" });
+    await owner.as.mutation(api.adminContent.removePiece, { collectionId: item.collectionId, pieceId: item.pieceId });
+    await owner.as.mutation(api.adminContent.updateCollection, { ...update, expectedRevision: 3, sourceMaterialIds: [replacement] });
+    await owner.as.mutation(api.adminContent.archiveMaterial, { materialId: used });
+    expect(await owner.as.query(api.adminContent.getCollection, { collectionId: item.collectionId })).toMatchObject({ title: update.title, revision: 4, sourceMaterialIds: [replacement] });
+  });
+
+  it("discards a reopened draft, releases source materials, and preserves existing user copies and audit lineage", async () => {
+    const { t, owner, user } = await setup();
+    const materialId = await readyTextMaterial(owner);
+    const item = await createCollectionPiece(owner, materialId);
+    await owner.as.mutation(api.adminContent.submitCollection, { collectionId: item.collectionId });
+    await owner.as.mutation(api.content.approve, { pieceId: item.pieceId, expectedOutputHash: item.outputHash, reviewChecklist: REVIEW_CHECKLIST });
+    await owner.as.mutation(api.adminContent.publishCollection, { collectionId: item.collectionId });
+    const copy = await user.as.mutation(api.content.copyToMine, { pieceId: item.pieceId });
+    await expect(owner.as.mutation(api.adminContent.discardCollection, { collectionId: item.collectionId, expectedRevision: 1 })).rejects.toThrow(/초안 컬렉션만/);
+    await owner.as.mutation(api.adminContent.reopenCollection, { collectionId: item.collectionId });
+    await expect(user.as.mutation(api.adminContent.discardCollection, { collectionId: item.collectionId, expectedRevision: 2 })).rejects.toThrow(/권한/);
+    await expect(owner.as.mutation(api.adminContent.discardCollection, { collectionId: item.collectionId, expectedRevision: 1 })).rejects.toThrow(/컬렉션이 변경/);
+    await owner.as.mutation(api.adminContent.discardCollection, { collectionId: item.collectionId, expectedRevision: 2 });
+    expect(await owner.as.mutation(api.adminContent.discardCollection, { collectionId: item.collectionId, expectedRevision: 2 })).toMatchObject({ discarded: true });
+    const discarded = await owner.as.query(api.adminContent.getCollection, { collectionId: item.collectionId });
+    expect(discarded).toMatchObject({ status: "WITHDRAWN", discardedBy: owner.userId, sourceMaterialIds: [], pieceIds: [] });
+    expect(discarded.discardedAt).toBeTypeOf("number");
+    expect(await t.run((ctx) => ctx.db.get(item.pieceId))).toMatchObject({ status: "RETIRED", visibility: "PRIVATE", productionMeta: { removedFromCollectionId: item.collectionId } });
+    await expect(owner.as.mutation(api.adminContent.reopenCollection, { collectionId: item.collectionId })).rejects.toThrow(/폐기된 컬렉션/);
+    await owner.as.mutation(api.adminContent.archiveMaterial, { materialId });
+    expect(await user.as.query(api.content.getPiece, { pieceId: copy.pieceId })).toMatchObject({ mine: true, status: "DRAFT", sourceMaterialIds: [materialId] });
+    const events = await t.run((ctx) => ctx.db.query("auditEvents").collect());
+    expect(events.find((event) => event.action === "adminContent.collectionDiscard")?.metadata).toMatchObject({ sourceMaterialIds: [materialId], pieceIds: [item.pieceId] });
+  });
+
+  it("locks collection changes until pending generation results are ingested", async () => {
+    const { t, owner } = await setup();
+    const materialId = await readyTextMaterial(owner);
+    const item = await createCollectionPiece(owner, materialId);
+    const { code } = await owner.as.mutation(api.devices.createPairCode, {});
+    const device = await t.mutation(api.devices.pair, { code, deviceName: "운영 PC", platform: "win32", appVersion: "0.1.16" });
+    await t.run((ctx) => ctx.db.patch(device.deviceId, { lastSeenAt: Date.now(), snapshot: { codexLoggedIn: true } }));
+    const run = await owner.as.mutation(api.adminContent.requestGenerate, { collectionId: item.collectionId, sourceMaterialIds: [materialId], channels: ["THREADS"], brief: {}, clientRequestId: "locked_collection_001" });
+    const update = { collectionId: item.collectionId, expectedRevision: 1, title: "변경", tags: [], sourceMaterialIds: [materialId] };
+    for (const status of ["QUEUED", "SUCCEEDED"] as const) {
+      await t.run((ctx) => ctx.db.patch(run.jobIds[0]!, { status }));
+      await expect(owner.as.mutation(api.adminContent.updateCollection, update)).rejects.toThrow(/AI 생성이 진행/);
+      await expect(owner.as.mutation(api.adminContent.discardCollection, { collectionId: item.collectionId, expectedRevision: 1 })).rejects.toThrow(/AI 생성이 진행/);
+      await expect(owner.as.mutation(api.adminContent.removePiece, { collectionId: item.collectionId, pieceId: item.pieceId })).rejects.toThrow(/AI 생성이 진행/);
+    }
+    await t.run((ctx) => ctx.db.patch(run.jobIds[0]!, { status: "FAILED", errorCode: "CODEX_NOT_READY", errorMessage: "운영 PC의 로그인을 확인하세요." }));
+    const collection = await owner.as.query(api.adminContent.getCollection, { collectionId: item.collectionId });
+    expect(collection.runs[0]).toMatchObject({ status: "FAILED", errorMessage: "운영 PC의 로그인을 확인하세요.", jobs: [{ errorCode: "CODEX_NOT_READY" }] });
+    await owner.as.mutation(api.adminContent.updateCollection, update);
+  });
+
+  it("paginates all materials and collections and bounds oversized dashboard summaries", async () => {
+    const { t, owner, user } = await setup();
+    const materialId = await readyTextMaterial(owner);
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 55; i++) {
+        await ctx.db.insert("contentCollections", { title: `컬렉션 ${i}`, tags: [], sourceMaterialIds: [materialId], pieceIds: [], status: "DRAFT", createdBy: owner.userId, revision: 1, createdAt: Date.now(), updatedAt: Date.now() });
+      }
+      for (let i = 0; i < 8; i++) {
+        await ctx.db.insert("contentSourceMaterials", { kind: "TEXT", title: `자료 ${i}`, bodyText: "가".repeat(200_000), rightsStatus: "OWNED", rightsNote: "자체 제작", status: "DRAFT", createdBy: owner.userId, createdAt: Date.now(), updatedAt: Date.now() });
+      }
+    });
+    const first = await owner.as.query(api.adminContent.paginateCollections, { paginationOpts: { numItems: 50, cursor: null }, status: "DRAFT" });
+    expect(first.page).toHaveLength(50);
+    expect(first.isDone).toBe(false);
+    const second = await owner.as.query(api.adminContent.paginateCollections, { paginationOpts: { numItems: 50, cursor: first.continueCursor }, status: "DRAFT" });
+    expect(second.page).toHaveLength(5);
+    expect(second.isDone).toBe(true);
+    expect(new Set([...first.page, ...second.page].map((row) => row._id)).size).toBe(55);
+    const materials = await owner.as.query(api.adminContent.paginateMaterials, { paginationOpts: { numItems: 3, cursor: null }, status: "DRAFT" });
+    expect(materials.page).toHaveLength(3);
+    expect(materials.isDone).toBe(false);
+    expect((await owner.as.query(api.adminContent.paginateMaterials, { paginationOpts: { numItems: 3, cursor: materials.continueCursor }, status: "DRAFT" })).page[0]!._id).not.toBe(materials.page[0]!._id);
+    await expect(user.as.query(api.adminContent.paginateMaterials, { paginationOpts: { numItems: 3, cursor: null } })).rejects.toThrow(/권한/);
+    const summary = await owner.as.query(api.adminContent.summary, {});
+    expect(summary.truncated).toBe(true);
+    expect(summary.materials.total).toBeLessThan(9);
+    expect(summary.collections.total).toBe(55);
+  });
+
   it("freezes admin material evidence, deduplicates requests, and attaches private AI drafts without catalog media", async () => {
     const { t, owner, productId, user } = await setup();
     const materialId = await readyTextMaterial(owner, { productId });
@@ -131,7 +264,7 @@ describe("SUPER_ADMIN content supply workflow", () => {
       rightsStatus: "LINK_ONLY",
       rightsNote: "출처 확인용",
     });
-    await owner.as.mutation(api.adminContent.markMaterialReady, { materialId: linkMaterial.materialId });
+    await owner.as.mutation(api.adminContent.markMaterialReady, { materialId: linkMaterial.materialId, expectedUpdatedAt: linkMaterial.updatedAt });
     const linkCollection = await owner.as.mutation(api.adminContent.createCollection, {
       title: "근거 없는 AI 요청 차단",
       tags: [],
@@ -210,7 +343,7 @@ describe("SUPER_ADMIN content supply workflow", () => {
     const listedDraft = (await owner.as.query(api.adminContent.listMaterials, {}))
       .find((material) => material._id === created.materialId);
     expect(listedDraft?.previewUrl).toMatch(/^https?:\/\//);
-    await owner.as.mutation(api.adminContent.markMaterialReady, { materialId: created.materialId });
+    await owner.as.mutation(api.adminContent.markMaterialReady, { materialId: created.materialId, expectedUpdatedAt: created.updatedAt });
     const served = await t.fetch(new URL(created.deliveryUrl!).pathname);
     expect(served.status).toBe(200);
     expect(served.headers.get("content-type")).toBe("image/png");

@@ -8,9 +8,15 @@ import { audit } from "./lib/audit";
 import { getAttrangsAdapter } from "./lib/attrangs/mock";
 import { fail } from "./lib/errors";
 import { requireUser } from "./lib/rbac";
+import { isDemoMarketingLink, partnerLinkMode } from "./lib/marketingLinkPolicy";
 
-/** 링크 발급: 어댑터에서 tracking code 를 받아 저장. 상품×유저 1:1. */
+/** One current link per product/user; superseded demo rows preserve attribution history. */
 export type IssuedLink = { linkId: string; shortCode: string; trackingCode: string; existed: boolean; reactivated?: boolean };
+
+function currentLink(links: Doc<"marketingLinks">[], realOnly = false): Doc<"marketingLinks"> | undefined {
+  const candidates = realOnly ? links.filter((link) => !isDemoMarketingLink(link)) : links;
+  return candidates.sort((a, b) => Number(isDemoMarketingLink(a)) - Number(isDemoMarketingLink(b)) || b.issuedAt - a.issuedAt)[0];
+}
 
 /** 링크 발급 본문(액션 컨텍스트): 웹 액션과 MCP `link_issue` 가 공유 */
 export async function issueLinkFor(ctx: ActionCtx, userId: Id<"users">, productId: Id<"products">): Promise<IssuedLink> {
@@ -20,7 +26,7 @@ export async function issueLinkFor(ctx: ActionCtx, userId: Id<"users">, productI
     if (reactivated) await ctx.runMutation(internal.links.reactivateIssued, { userId, linkId: prep.existing._id });
     return { linkId: prep.existing._id, shortCode: prep.existing.shortCode, trackingCode: prep.existing.trackingCode, existed: true, reactivated };
   }
-  if ((process.env.ATTRANGS_MODE ?? "mock").toLowerCase() !== "mock") {
+  if (partnerLinkMode() === "pool") {
     return await ctx.runMutation(internal.links.allocateFromPool, { userId, productId });
   }
   let issued;
@@ -61,8 +67,16 @@ export const allocateFromPool = internalMutation({
     if (!user || (user.status ?? "ACTIVE") !== "ACTIVE") fail("FORBIDDEN", "활성 계정만 링크를 발급할 수 있습니다.");
     const product = await ctx.db.get(args.productId);
     if (!product || product.status !== "ACTIVE") fail("NOT_FOUND", "판매 중인 상품이 아닙니다.");
-    const duplicate = await ctx.db.query("marketingLinks").withIndex("by_user_product", (q) => q.eq("userId", args.userId).eq("productId", args.productId)).unique();
-    if (duplicate) return { linkId: duplicate._id, shortCode: duplicate.shortCode, trackingCode: duplicate.trackingCode, existed: true };
+    const history = await ctx.db.query("marketingLinks").withIndex("by_user_product", (q) => q.eq("userId", args.userId).eq("productId", args.productId)).collect();
+    const duplicate = currentLink(history, true);
+    if (duplicate) {
+      const reactivated = duplicate.status !== "ACTIVE";
+      if (reactivated) {
+        await ctx.db.patch(duplicate._id, { status: "ACTIVE" });
+        await audit(ctx, { actorUserId: args.userId, action: "link.reactivate", metadata: { linkId: duplicate._id, productId: args.productId } });
+      }
+      return { linkId: duplicate._id, shortCode: duplicate.shortCode, trackingCode: duplicate.trackingCode, existed: true, reactivated };
+    }
     const pool = await ctx.db.query("partnerLinkPool").withIndex("by_product_status", (q) => q.eq("productId", args.productId).eq("status", "AVAILABLE")).first();
     if (!pool) fail("ATTRANGS_LINK_UNAVAILABLE", "사용 가능한 파트너 링크 풀이 소진되었습니다.");
     let shortCode = "";
@@ -73,7 +87,9 @@ export const allocateFromPool = internalMutation({
     if (!shortCode) fail("CONFLICT", "단축 코드 생성에 실패했습니다.");
     const linkId = await ctx.db.insert("marketingLinks", { userId: args.userId, productId: args.productId, trackingCode: pool.trackingCode, shortCode, targetUrl: pool.targetUrl, origin: "POOL", status: "ACTIVE", issuedAt: Date.now(), clickCount: 0 });
     await ctx.db.patch(pool._id, { status: "ASSIGNED", assignedUserId: args.userId, assignedLinkId: linkId });
-    await audit(ctx, { actorUserId: args.userId, action: "link.issueFromPool", metadata: { linkId, poolId: pool._id, productId: args.productId } });
+    const supersededDemoIds = history.filter(isDemoMarketingLink).map((link) => link._id);
+    for (const demoId of supersededDemoIds) await ctx.db.patch(demoId, { status: "DISABLED" });
+    await audit(ctx, { actorUserId: args.userId, action: "link.issueFromPool", metadata: { linkId, poolId: pool._id, productId: args.productId, supersededDemoIds } });
     return { linkId, shortCode, trackingCode: pool.trackingCode, existed: false };
   },
 });
@@ -107,6 +123,10 @@ export const reactivateIssued = internalMutation({
   handler: async (ctx, args) => {
     const link = await ctx.db.get(args.linkId);
     if (!link || link.userId !== args.userId) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
+    const user = await ctx.db.get(args.userId);
+    if (!user || (user.status ?? "ACTIVE") !== "ACTIVE") fail("FORBIDDEN", "활성 계정만 링크를 발급할 수 있습니다.");
+    if ((await ctx.db.get(link.productId))?.status !== "ACTIVE") fail("NOT_FOUND", "판매 중인 상품이 아닙니다.");
+    await assertCanActivate(ctx, link);
     if (link.status !== "ACTIVE") {
       await ctx.db.patch(link._id, { status: "ACTIVE" });
       await audit(ctx, { actorUserId: args.userId, action: "link.reactivate", metadata: { linkId: link._id, productId: link.productId } });
@@ -122,11 +142,12 @@ export const prepareIssue = internalQuery({
     if (!user.partnerCode) fail("CONFLICT", "파트너 코드가 없습니다. 운영팀에 문의하세요.");
     const product = await ctx.db.get(args.productId);
     if (!product || product.status !== "ACTIVE") fail("NOT_FOUND", "판매 중인 상품이 아닙니다.");
-    const existing = await ctx.db
+    const history = await ctx.db
       .query("marketingLinks")
       .withIndex("by_user_product", (q) => q.eq("userId", args.userId).eq("productId", args.productId))
-      .unique();
-    return { partnerCode: user.partnerCode, product, existing };
+      .collect();
+    const existing = currentLink(history, partnerLinkMode() === "pool");
+    return { partnerCode: user.partnerCode, product, existing: existing ?? null };
   },
 });
 
@@ -139,10 +160,11 @@ export const saveIssued = internalMutation({
     origin: v.union(v.literal("MOCK"), v.literal("API"), v.literal("DEMO")),
   },
   handler: async (ctx, args) => {
-    const dup = await ctx.db
+    const history = await ctx.db
       .query("marketingLinks")
       .withIndex("by_user_product", (q) => q.eq("userId", args.userId).eq("productId", args.productId))
-      .unique();
+      .collect();
+    const dup = currentLink(history);
     if (dup) return { linkId: dup._id, shortCode: dup.shortCode, trackingCode: dup.trackingCode };
     let shortCode = "";
     for (let i = 0; i < 8; i++) {
@@ -212,6 +234,14 @@ export const setStatus = mutation({
     const user = await requireUser(ctx);
     const link = await ctx.db.get(args.linkId);
     if (!link || link.userId !== user._id) fail("NOT_FOUND", "링크를 찾을 수 없습니다.");
+    if (args.status === "ACTIVE") await assertCanActivate(ctx, link);
     await ctx.db.patch(args.linkId, { status: args.status });
   },
 });
+
+async function assertCanActivate(ctx: QueryCtx, link: Doc<"marketingLinks">) {
+  if (!isDemoMarketingLink(link)) return;
+  const history = await ctx.db.query("marketingLinks").withIndex("by_user_product", (q) => q.eq("userId", link.userId).eq("productId", link.productId)).collect();
+  if (partnerLinkMode() === "pool" || history.some((candidate) => !isDemoMarketingLink(candidate)))
+    fail("CONFLICT", "실제 파트너 링크로 전환한 상품의 데모 링크는 다시 활성화할 수 없습니다. 링크를 새로 발급하세요.");
+}

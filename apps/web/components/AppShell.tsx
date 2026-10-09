@@ -90,11 +90,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
       </aside>
-      <div className="flex-1">
-        <header className="flex items-center justify-between border-b border-stone-200 px-4 py-3 md:px-6">
-          <div className="flex items-center gap-3 text-sm">
+      <div className="min-w-0 flex-1">
+        <header className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 px-4 py-3 md:px-6">
+          <div className="flex min-w-0 flex-wrap items-center gap-3 text-sm">
             <button className="btn-ghost md:hidden" aria-expanded={menuOpen} aria-controls="mobile-nav" onClick={() => setMenuOpen((v) => !v)}>메뉴</button>
-            <span className="font-medium">{me.name || me.email}</span>
+            <span className="break-all font-medium">{me.name || me.email}</span>
             <span className="ml-2 text-xs text-stone-500">{ROLE_LABEL[role]}</span>
           </div>
           <button

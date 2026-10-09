@@ -11,11 +11,13 @@ import { sha256Hex } from "./crypto";
 import { metaLivePublishAvailable } from "./meta";
 import {
   contentPieceEvidenceRunId,
+  contentPieceFactEvidence,
   contentPieceHasOperatorSupplyLineage,
   contentPieceProductAvailable,
   contentPiecePublishOutputHash,
   contentPieceText,
   hashPiecePublishSnapshot,
+  libraryReviewEvidence,
   operatorSupplySourceAvailable,
   workflowReviewEvidence,
 } from "./pieces";
@@ -23,6 +25,7 @@ import { livePublishEnabled } from "./publishPolicy";
 import { marketingRedirectUrl } from "./publicUrl";
 import { publicationIdentity } from "./publishIdentity";
 import { isActiveSuperAdmin } from "./rbac";
+import { isDemoMarketingLink } from "./marketingLinkPolicy";
 
 export type PublishAttemptPolicyResult =
   | { ok: true; currentHash: string }
@@ -88,6 +91,7 @@ export async function validatePublishAttemptPolicy(
   if (piece) {
     if (!(await operatorSupplySourceAvailable(ctx, piece))) return deny("CONTENT_UNAVAILABLE");
     if (!(await contentPieceProductAvailable(ctx, piece))) return deny("CONTENT_PRODUCT_INACTIVE");
+    if (!(await contentPieceFactEvidence(ctx, piece)).ok) return deny("CONTENT_FACTS_CHANGED");
     const accessible = piece.ownerUserId === job.userId || piece.visibility === "SHARED" || isActiveSuperAdmin(user);
     if (!accessible) return deny("CONTENT_UNAVAILABLE");
     if (payload.contentChannel && payload.contentChannel !== piece.channel) return deny("CONTENT_CHANNEL_MISMATCH");
@@ -103,10 +107,15 @@ export async function validatePublishAttemptPolicy(
     const review = await workflowReviewEvidence(ctx, piece);
     if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED");
   }
+  if (piece && !evidenceRunId && contentPieceHasOperatorSupplyLineage(piece)) {
+    const review = await libraryReviewEvidence(ctx, piece);
+    if (!review.ok) return deny("CONTENT_REVIEW_REQUIRED");
+  }
 
   const link = payload.linkId ? await ctx.db.get(payload.linkId as Id<"marketingLinks">) : null;
   if (payload.linkId && (!link || link.userId !== job.userId)) return deny("LINK_NOT_FOUND");
   if (link?.status !== undefined && link.status !== "ACTIVE") return deny("LINK_INACTIVE");
+  if (link && isDemoMarketingLink(link)) return deny("DEMO_LINK_NOT_PUBLISHABLE");
   if (piece?.productId && link && piece.productId !== link.productId) return deny("CONTENT_LINK_PRODUCT_MISMATCH");
   const expectedLinkUrl = link ? marketingRedirectUrl(link.shortCode) : null;
   if (link && !expectedLinkUrl) return deny("PUBLIC_SITE_URL_INVALID");

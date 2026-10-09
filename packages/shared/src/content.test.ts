@@ -84,6 +84,27 @@ describe("evaluatePiece", () => {
     expect(long.fixed.some((f) => f.includes("축약"))).toBe(true);
     expect([...long.caption].length).toBeLessThan(500);
   });
+  it("blocks unsupported facts in manual captions, scripts and hashtags without an AI standard", () => {
+    const report = evaluatePiece({
+      channel: "THREADS", caption: "원피스가 9,900원입니다. 링크에서 확인하세요",
+      script: "오늘 출발하는 상품이에요", hashtags: ["광고", "체형보정"], generatedBy: "manual",
+    }, { products });
+    expect(report.violations.map((violation) => violation.code))
+      .toEqual(expect.arrayContaining(["PRICE_MISMATCH", "UNVERIFIED_CATALOG_CLAIM", "UNVERIFIED_PRODUCT_ATTRIBUTE"]));
+    expect(isAutoApprovable(report)).toBe(false);
+    expect(evaluatePiece({ channel: "X", caption: "가격은 49,000원이며 링크에서 확인하세요", hashtags: ["광고"] })
+      .violations.map((violation) => violation.code)).toContain("PRICE_MISMATCH");
+  });
+  it("recognizes Korean price endings and mixed units without mistaking product ids for prices", () => {
+    for (const caption of ["49,000원입니다", "4만9000원이에요", "4만 9천원에", "4.9만원부터", "₩49,000", "49000 KRW", "100001 원피스", "배색 3원칙", "상품 100001 원단", "3원색 조합"]) {
+      expect(evaluatePiece({ channel: "X", caption: `${caption} 링크에서 확인하세요`, hashtags: ["광고"] }, { products })
+        .violations.some((violation) => violation.code === "PRICE_MISMATCH"), caption).toBe(false);
+    }
+    for (const caption of ["9,900원입니다", "4만 8천원에", "4만8000원부터", "9천원으로", "9,900원짜리", "9,900원을", "9,900원이며", "₩9,900", "9900 KRW"]) {
+      expect(evaluatePiece({ channel: "X", caption: `${caption} 링크에서 확인하세요`, hashtags: ["광고"] }, { products })
+        .violations.some((violation) => violation.code === "PRICE_MISMATCH"), caption).toBe(true);
+    }
+  });
 });
 
 describe("templateGenerate + prompt/parse", () => {
@@ -93,7 +114,7 @@ describe("templateGenerate + prompt/parse", () => {
     const pieces = templateGenerate({ channels: [...CHANNELS], atoms, products, magazineTitle: m.title });
     expect(pieces).toHaveLength(CHANNELS.length);
     for (const p of pieces) {
-      const r = evaluatePiece(p, { linkExpected: true });
+      const r = evaluatePiece(p, { linkExpected: true, products });
       expect(r.violations.filter((v) => v.severity === "block"), p.channel).toEqual([]);
       if (p.channel === "TIKTOK" || p.channel === "INSTAGRAM_REEL") expect(p.script).toBeTruthy();
     }
@@ -245,7 +266,7 @@ describe("content production quality contract V2", () => {
     expect(passesContentStandard(report, "codex", DEFAULT_CONTENT_STANDARD)).toBe(false);
   });
 
-  it("applies the base banned-claim rules to script and hashtags only in the strict path", () => {
+  it("applies the same banned-claim rules to script and hashtags in both manual and strict paths", () => {
     const piece = {
       channel: "INSTAGRAM_REEL" as const,
       caption: "가을 니트 코디\n프로필 링크에서 확인하세요",
@@ -253,7 +274,7 @@ describe("content production quality contract V2", () => {
       script: "[0-3초] 최저가 니트를 소개해요\n[마무리] 링크를 확인하세요",
     };
     const legacy = evaluatePiece(piece, { products });
-    expect(legacy.violations.map((violation) => violation.code)).not.toContain("PRICE_CLAIM");
+    expect(legacy.violations.map((violation) => violation.code)).toEqual(expect.arrayContaining(["PRICE_CLAIM", "ABSOLUTE_CLAIM"]));
     const strict = evaluatePiece(piece, {
       products,
       brief: normalizeContentBrief(),

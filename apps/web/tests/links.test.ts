@@ -48,6 +48,41 @@ describe("links & clicks", () => {
     expect(r.found).toBe(false);
   });
 
+  it("upgrades a demo link atomically without rewriting attribution or click history", async () => {
+    const t = makeT();
+    const owner = await signup(t, "owner@automoney.test");
+    const user = await signup(t, "upgrade-link@test.com");
+    const productId = await seedProduct(t, 220001);
+    const issuedDemo = await user.as.action(api.links.issue, { productId });
+    await t.mutation(api.clicks.record, { shortCode: issuedDemo.shortCode, secret: "redirect-secret" });
+    const before = (await user.as.query(api.links.listMine, {}))[0]!;
+    process.env.ATTRANGS_MODE = "pool";
+    try {
+      await expect(user.as.action(api.links.issue, { productId })).rejects.toThrow(/소진/);
+      expect((await user.as.query(api.links.listMine, {}))[0]).toMatchObject(before);
+      const csv = "external_product_id,tracking_code,target_url\n220001,real-upgrade,https://partner.test/real";
+      const preview = await owner.as.mutation(api.imports.previewLinkPool, { csv });
+      await owner.as.mutation(api.imports.applyLinkPool, { batchId: preview.batchId });
+      const [first, second] = await Promise.all([
+        user.as.action(api.links.issue, { productId }), user.as.action(api.links.issue, { productId }),
+      ]);
+      expect(first.linkId).toBe(second.linkId);
+      expect(first.shortCode).not.toBe(before.shortCode);
+      const history = await user.as.query(api.links.listMine, {});
+      expect(history).toHaveLength(2);
+      expect(history.find((link) => link._id === before._id)).toMatchObject({ ...before, status: "DISABLED" });
+      const real = history.find((link) => link._id !== before._id)!;
+      expect(real).toMatchObject({ origin: "POOL", trackingCode: "real-upgrade", status: "ACTIVE", clickCount: 0 });
+      await expect(user.as.mutation(api.links.setStatus, { linkId: before._id, status: "ACTIVE" })).rejects.toThrow(/데모 링크/);
+      await user.as.mutation(api.links.setStatus, { linkId: real._id, status: "DISABLED" });
+      expect(await user.as.action(api.links.issue, { productId })).toMatchObject({ linkId: real._id, existed: true, reactivated: true });
+    } finally {
+      delete process.env.ATTRANGS_MODE;
+    }
+    expect((await user.as.action(api.links.issue, { productId })).trackingCode).toBe("real-upgrade");
+    expect((await user.as.query(api.links.listMine, {}))).toHaveLength(2);
+  });
+
   it("issues up to ten product links as one workflow batch", async () => {
     const t = makeT();
     const user = await signup(t, "batch-links@test.com");

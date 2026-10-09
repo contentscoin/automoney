@@ -17,6 +17,73 @@ const continuePublishAttempt = (t: T, token: string, jobId: Id<"agentJobs">, pro
   t.fetch(`/agent/jobs/${jobId}/publish-continuation`, authed(token, { method: "POST", body: JSON.stringify(proof) }));
 
 describe("device pairing & agent contract", () => {
+  it("rechecks changed catalog facts before preflight, submit, and scheduled execution", async () => {
+    const t = makeT();
+    const user = await signup(t, "catalog-jit@test.com");
+    const { deviceToken } = await pairDevice(t, user);
+    const { spaceId, jobId: createJob } = await user.as.mutation(api.spaces.create, { platform: "THREADS", name: "catalog-check" });
+    await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }));
+    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY", handle: "catalog_shop" } }) }));
+    const productId = await seedProduct(t);
+    await user.as.action(api.links.issue, { productId });
+    const linkId = (await user.as.query(api.links.listMine, {}))[0]!._id;
+    await t.run((ctx) => ctx.db.patch(linkId, { origin: "POOL" }));
+    const piece = await user.as.mutation(api.content.createManual, { productId, channel: "THREADS", caption: "상품은 35,000원입니다. 링크에서 확인하세요.", hashtags: ["광고"], mediaUrls: [] });
+    expect(piece.status).toBe("APPROVED");
+    const input = { spaceId, text: "", mediaUrls: [] as string[], linkId, pieceId: piece.pieceId };
+    const schedule = await user.as.mutation(api.schedules.upsert, { ...input, kind: "DAILY", timeOfDay: "10:00", daysOfWeek: [], jitterMinutes: 0, autoApprove: false });
+    const jobId = await user.as.mutation(api.jobs.enqueuePublish, input);
+    await approveLive(user, jobId);
+    const claim = (await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json()).data;
+    await t.run((ctx) => ctx.db.patch(productId, { salePrice: 34000 }));
+    expect((await (await t.fetch(`/agent/jobs/${jobId}/preflight`, authed(deviceToken, { method: "POST", body: JSON.stringify(claim) }))).json()).error.code).toBe("CONTENT_FACTS_CHANGED");
+    await t.run((ctx) => ctx.db.patch(productId, { salePrice: 35000 }));
+    expect((await t.fetch(`/agent/jobs/${jobId}/preflight`, authed(deviceToken, { method: "POST", body: JSON.stringify(claim) }))).status).toBe(200);
+    await t.run((ctx) => ctx.db.patch(productId, { salePrice: 34000 }));
+    expect((await (await markPublishAttempt(t, deviceToken, jobId, claim)).json()).error.code).toBe("CONTENT_FACTS_CHANGED");
+    expect((await t.run((ctx) => ctx.db.get(jobId)))?.publishAttemptedAt).toBeUndefined();
+    await t.fetch(`/agent/jobs/${jobId}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ ...claim, status: "FAILED", errorCode: "CONTENT_FACTS_CHANGED" }) }));
+    await t.mutation(internal.schedules.tick, { now: schedule.nextRunAt! + 1 });
+    expect((await t.run((ctx) => ctx.db.get(schedule.scheduleId)))?.lastSkipReason).toBe("CONTENT_FACTS_CHANGED");
+  });
+
+  it("allows demo links only in dry-runs and rechecks origin at both live execution boundaries", async () => {
+    const t = makeT();
+    const user = await signup(t, "demo-live@test.com");
+    const { deviceToken } = await pairDevice(t, user);
+    const { spaceId, jobId: createJob } = await user.as.mutation(api.spaces.create, { platform: "X", name: "demo-check" });
+    await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }));
+    await t.fetch(`/agent/jobs/${createJob}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ status: "SUCCEEDED", spaceUpdate: { sessionState: "HEALTHY", handle: "demo_shop" } }) }));
+    const productId = await seedProduct(t);
+    await user.as.action(api.links.issue, { productId });
+    const linkId = (await user.as.query(api.links.listMine, {}))[0]!._id;
+    const input = { spaceId, text: "데모 원점 검사", mediaUrls: [] as string[], linkId };
+    await expect(user.as.mutation(api.jobs.enqueuePublish, input)).rejects.toThrow(/데모 마케팅 링크/);
+    const scheduleInput = { ...input, kind: "DAILY" as const, timeOfDay: "10:00", daysOfWeek: [], jitterMinutes: 0, autoApprove: false };
+    await expect(user.as.mutation(api.schedules.upsert, scheduleInput)).rejects.toThrow(/데모 마케팅 링크/);
+    const dry = await user.as.mutation(api.jobs.enqueuePublish, { ...input, dryRun: true, requireApproval: false });
+    const dryClaim = (await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json()).data;
+    expect(dryClaim.id).toBe(dry);
+    expect((await t.fetch(`/agent/jobs/${dry}/preflight`, authed(deviceToken, { method: "POST", body: JSON.stringify(dryClaim) }))).status).toBe(200);
+    await t.fetch(`/agent/jobs/${dry}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ ...dryClaim, status: "SUCCEEDED", result: { schema: "automoney.job-result/v1", kind: "ok", data: { dryRun: true } } }) }));
+    await t.run((ctx) => ctx.db.patch(linkId, { origin: "POOL" }));
+    const schedule = await user.as.mutation(api.schedules.upsert, scheduleInput);
+    const jobId = await user.as.mutation(api.jobs.enqueuePublish, input);
+    await approveLive(user, jobId);
+    const claim = (await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json()).data;
+    await t.run((ctx) => ctx.db.patch(linkId, { origin: "MOCK" }));
+    const preflightDenied = await t.fetch(`/agent/jobs/${jobId}/preflight`, authed(deviceToken, { method: "POST", body: JSON.stringify(claim) }));
+    expect((await preflightDenied.json()).error.code).toBe("DEMO_LINK_NOT_PUBLISHABLE");
+    await t.run((ctx) => ctx.db.patch(linkId, { origin: "POOL" }));
+    expect((await t.fetch(`/agent/jobs/${jobId}/preflight`, authed(deviceToken, { method: "POST", body: JSON.stringify(claim) }))).status).toBe(200);
+    await t.run((ctx) => ctx.db.patch(linkId, { origin: "DEMO" }));
+    expect((await (await markPublishAttempt(t, deviceToken, jobId, claim)).json()).error.code).toBe("DEMO_LINK_NOT_PUBLISHABLE");
+    expect((await t.run((ctx) => ctx.db.get(jobId)))?.publishAttemptedAt).toBeUndefined();
+    await t.fetch(`/agent/jobs/${jobId}/complete`, authed(deviceToken, { method: "POST", body: JSON.stringify({ ...claim, status: "FAILED", errorCode: "DEMO_LINK_NOT_PUBLISHABLE" }) }));
+    await t.mutation(internal.schedules.tick, { now: schedule.nextRunAt! + 1 });
+    expect((await t.run((ctx) => ctx.db.get(schedule.scheduleId)))?.lastSkipReason).toBe("DEMO_LINK_NOT_PUBLISHABLE");
+  });
+
   it("queues Codex login only for an online paired device", async () => {
     const t = makeT();
     const user = await signup(t, "codex-connect@test.com");
@@ -282,6 +349,7 @@ describe("device pairing & agent contract", () => {
     const productId = await seedProduct(t);
     const link = await user.as.action(api.links.issue, { productId });
     const links = await user.as.query(api.links.listMine, {});
+    await t.run((ctx) => ctx.db.patch(links[0]!._id, { origin: "POOL" }));
     const jobId = await user.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "신상 원피스 소개", mediaUrls: [], linkId: links[0]!._id, requireApproval: true });
     let jobs = await user.as.query(api.jobs.listMine, {});
     expect(jobs[0]?.status).toBe("NEEDS_APPROVAL");
@@ -330,6 +398,7 @@ describe("device pairing & agent contract", () => {
     const productId = await seedProduct(t, 100099);
     const issued = await user.as.action(api.links.issue, { productId });
     const linkId = (await user.as.query(api.links.listMine, {})).find((link) => link.shortCode === issued.shortCode)!._id;
+    await t.run((ctx) => ctx.db.patch(linkId, { origin: "POOL" }));
     const jobId = await user.as.mutation(api.jobs.enqueuePublish, { spaceId, text: "직전 링크 상태 확인", mediaUrls: [], linkId });
     await user.as.mutation(api.jobs.approve, { jobId });
     const claim = (await (await t.fetch("/agent/claim", authed(deviceToken, { method: "POST", body: "{}" }))).json()).data as { attemptNo: number; leaseToken: string };

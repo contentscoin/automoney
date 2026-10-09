@@ -82,6 +82,9 @@ describe("stateless MCP server", () => {
     expect(link.shortUrl).toMatch(/\/r\//);
     expect(((await tool(call, "link_issue", { productId: products[0]!.productId })).result as { existed: boolean }).existed).toBe(true);
     expect(((await tool(call, "link_list")).result as unknown[]).length).toBe(1);
+    // This live scheduling scenario uses a verified partner link, not the demo adapter.
+    const liveLink = (await user.as.query(api.links.listMine, {}))[0]!;
+    await t.run((ctx) => ctx.db.patch(liveLink._id, { origin: "POOL" }));
     // 위험 툴 미확인 → preview
     const preview = (await tool(call, "space_create", { platform: "THREADS", name: "mcp-space" })).result as { requiresConfirmation: boolean };
     expect(preview.requiresConfirmation).toBe(true);
